@@ -1,0 +1,64 @@
+# —— Python ——
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# —— 虚拟环境与本地 Conda / Miniforge（勿提交）——
+.venv/
+venv/
+ENV/
+env/
+.conda_envs/
+.conda_pkgs/
+.miniforge3/
+
+# —— 打包与可编辑安装产物 ——
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+share/python-wheels/
+
+# —— 测试与类型检查 ——
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# —— Jupyter ——
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# —— 数据、数据库、运行输出（与 README / .dockerignore 一致：默认不落库）——
+data/
+*.duckdb
+*.duckdb.wal
+
+# —— 密钥与本地覆盖配置 ——
+.env
+.env.*
+!.env.example
+secrets.yaml
+config.local.yaml
+
+# —— 编辑器与系统 ——
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# —— 日志（若将来有仓库根目录下的日志）——
+*.log

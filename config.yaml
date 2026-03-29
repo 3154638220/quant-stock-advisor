@@ -1,0 +1,276 @@
+# 全局配置 — A 股量化本地流水线（Jetson / ARM 友好）
+# 路径均相对于项目根目录，也可用绝对路径覆盖
+
+paths:
+  data_dir: data
+  duckdb_path: data/market.duckdb
+  # 全市场拉取与因子截面的统一交易日上界；留空则使用运行当日
+  asof_trade_date: "2026-03-27"
+  # 股票池本地快照：外部股票列表源成功后写入；后续接口抖动时可直接回退使用
+  universe_cache_path: data/cache/universe_symbols.json
+  logs_dir: data/logs
+  results_dir: data/results
+  # 训练工件与实验追踪（models/train_*.py 默认仍写 data/models、data/experiments）
+  models_dir: data/models
+  experiments_dir: data/experiments
+
+akshare:
+  # 日线复权：qfq 前复权 | hfq 后复权 | "" 不复权
+  adjust: qfq
+  request_timeout_sec: 10.0
+  # false（荐股默认）：股票池优先 DuckDB 已有标的，不足再本地快照，最后 AkShare；true：先拉全市场代码列表再回退本地
+  universe_prefer_akshare: false
+  # 全市场股票池接口（代码列表）超时与重试；用于应对深交所/东财接口抖动
+  universe_source_timeout_sec: 60
+  universe_source_retries: 2
+  universe_retry_delay_sec: 3.0
+  # DuckDB / 本地快照若少于该数量，视为不完整股票池，继续回退到外部源
+  min_cached_universe_symbols: 1000
+  # 拉取时的批次休眠（秒），降低被限流概率
+  sleep_between_symbols_sec: 0.15
+  # 单标的拉取失败时的重试次数与间隔（指数退避系数为 attempt+1）
+  max_fetch_retries: 3
+  retry_delay_sec: 2.0
+
+database:
+  # DuckDB 表名
+  table_daily: a_share_daily
+  # 拉取审计表：run_id、标的数、写入行数、失败数、耗时
+  table_audit: data_fetch_audit
+  # 主键语义：symbol + trade_date 唯一
+  primary_key:
+    - symbol
+    - trade_date
+
+# 数据质量阈值（run_quality_checks / 写入前校验）
+quality:
+  # 相邻交易日历间隔超过该值则计为「大间隔」（长假或缺数）
+  max_calendar_gap_days: 20
+  # 列级空值比例上限（0–1）
+  null_ratio_max: 0.05
+  # 以下为 false 时：仍统计 ohlc_invalid / large_gaps，但不判「质量未通过」（视为市场/源数据常态，非拉取故障）
+  fail_on_ohlc_invalid: false
+  fail_on_large_gaps: false
+
+gpu:
+  # 张量因子批处理：cuda 或 cpu（无 GPU 时自动回退可在代码中处理）
+  device: cuda
+  batch_symbols: 512
+  dtype: float32
+
+features:
+  momentum_window: 10
+  rsi_period: 14
+  # ATR（Wilder）周期；需库中有 high/low
+  atr_period: 14
+  # 拉取日线用于因子计算时的最少交易日跨度（日历上用 BDay 回推）
+  lookback_trading_days: 260
+  min_valid_days: 30
+  # 扩展基础因子窗口（tensor_base_factors / 研究脚本）
+  vol_window: 20
+  turnover_window: 20
+  vp_corr_window: 20
+  reversal_window: 5
+  # 标准化：截面分位缩尾
+  winsor_lower_q: 0.01
+  winsor_upper_q: 0.99
+  # 因子评估默认前瞻持有期（交易日）
+  eval_forward_horizon: 5
+  eval_ic_roll_window: 20
+  # ——— 改进方案新增因子窗口 ———
+  # 乖离率短期/长期均线窗口
+  bias_window_short: 20
+  bias_window_long: 60
+  # 过去 N 天最大单日跌幅（识别筹码松动）
+  max_drop_window: 20
+  # 近 N 日涨幅（短期暴涨惩罚项）
+  recent_return_window: 3
+  # 当前价格在过去 N 天区间中的位置
+  price_position_window: 250
+  # ——— K 线结构高频降频代理因子窗口 ———
+  # 尾盘强度（close/open 均值）滚动窗口
+  tail_window: 10
+  # 量价趋势（VPT）滚动累计窗口
+  vpt_window: 20
+  # 日内振幅偏度滚动窗口
+  range_skew_window: 20
+
+# ——— 改进方案：股票池预过滤（硬规则，前置于因子打分） ———
+prefilter:
+  enabled: true
+  # 过去 N 天内涨停或跌停次数上限
+  limit_move_lookback: 5
+  limit_move_max: 2
+  # 换手率过低（死水股）或过高（极度博傻股）的分位阈值
+  turnover_low_pct: 0.10
+  turnover_high_pct: 0.98
+  # 价格处于过去 N 天区间顶部的分位阈值（剔除绝对高位股）
+  price_position_high_pct: 0.90
+  price_position_lookback: 250
+
+# ——— 改进方案：训练标签转换 ———
+label:
+  # raw：原始前瞻收益；sharpe：夏普比率标签；calmar：卡玛比率标签；truncate：截断极端标签
+  transform: truncate
+  # truncate 模式下，截断前瞻收益最高的 N% 极值
+  truncate_quantile: 0.98
+
+# ——— 因子正交化（XGBoost 训练前）———
+orthogonalize:
+  # 是否在 long_factor_panel_from_daily 中对因子截面做正交化
+  enabled: false
+  # symmetric（Löwdin，推荐）或 gram_schmidt
+  method: symmetric
+
+signals:
+  # 每日推荐池长度
+  top_k: 50
+  # 排序键：momentum | rsi | composite | composite_extended | xgboost | deep_sequence（阶段三）
+  sort_by: xgboost
+  composite:
+    w_momentum: 0.65
+    w_rsi: 0.35
+    # level：RSI 水平与高动量同向；mean_revert：用 (50-RSI) 偏均值回归
+    rsi_mode: level
+  # sort_by: composite_extended 时使用；键须与 recommend 列名一致；权重按绝对值和归一化，可为负
+  composite_extended:
+    momentum: 0.25
+    rsi: 0.20
+    atr: 0.03
+    realized_vol: 0.03
+    turnover_roll_mean: 0.05
+    vol_ret_corr: 0.05
+    short_reversal: 0.0
+    vol_to_turnover: 0.02
+    volume_skew_log: 0.02
+    # 改进方案新增因子权重（负权重 = 该因子越高越差）
+    bias_short: -0.08
+    bias_long: -0.06
+    max_single_day_drop: 0.06
+    recent_return: -0.08
+    price_position: -0.04
+    log_market_cap: 0.03
+    # K 线结构高频降频代理因子权重
+    intraday_range: -0.04      # 日内振幅大 → 妖股特征，负权重
+    upper_shadow_ratio: -0.05  # 上影线长 → 上方抛压，负权重
+    lower_shadow_ratio: 0.04   # 下影线长 → 下方支撑，正权重
+    close_open_return: 0.04    # 尾盘强于开盘 → 买力旺盛
+    overnight_gap: -0.02       # 隔夜高开 → 博弈性跳空，轻微惩罚
+    tail_strength: 0.05        # 持续尾盘强势 → 主动买入信号
+    volume_price_trend: 0.03   # 量价趋势正向
+    intraday_range_skew: -0.03 # 振幅右偏 → 偶发暴涨，妖股特征
+  # 阶段二：截面 XGBoost（须先运行 models/train_xgboost.py，再将 bundle_dir 指向工件目录）
+  tree_model:
+    bundle_dir: data/models/xgboost_panel_ee2108f515be
+    # 推理用因子列；留空则沿用 composite_extended 中非零权重键
+    features:
+      - momentum
+      - rsi
+      - atr
+      - realized_vol
+      - turnover_roll_mean
+      - vol_ret_corr
+      - short_reversal
+      - vol_to_turnover
+      - volume_skew_log
+      - bias_short
+      - bias_long
+      - max_single_day_drop
+      - recent_return
+      - price_position
+      - log_market_cap
+      # K 线结构高频降频代理因子
+      - intraday_range
+      - upper_shadow_ratio
+      - lower_shadow_ratio
+      - close_open_return
+      - overnight_gap
+      - tail_strength
+      - volume_price_trend
+      - intraday_range_skew
+    rsi_mode: level
+  # 阶段三：OHLCV 序列深度学习（须先运行 models/train_deep_sequence.py）
+  deep_sequence:
+    bundle_dir: ""
+    # 与训练时 seq_len 一致（默认 30 日窗口）
+    seq_len: 30
+    # lstm | gru | tcn | transformer（与训练 --kind 一致）
+    kind: gru
+    # regression：MSE 前瞻收益；binary_up：涨跌二分类（与 models/train_deep_sequence.py --target-task 一致）
+    target_task: regression
+    # 推理设备：cuda 需本机 PyTorch CUDA 可用；否则 daily_run 会回退 cpu
+    map_location: cuda
+
+# 可执行组合：在排序结果上生成权重（daily_run 写 CSV；eval 复算并计组合收益）
+portfolio:
+  # equal：等权；score：按得分归一化；
+  # risk_parity / min_variance / mean_variance：用 Top-K 日收益协方差
+  # 改进方案建议：启用 risk_parity 或 min_variance，高位妖股协方差极高会被天然削权
+  weight_method: risk_parity
+  score_col: auto
+  # 协方差：默认 Ledoit–Wolf 收缩 + 对角 cov_ridge * I
+  cov_lookback_days: 60
+  cov_ridge: 1e-6
+  cov_shrinkage: ledoit_wolf
+  # mean_variance：目标 max mu'w - (λ/2) w'Σw
+  risk_aversion: 1.0
+  # 改进方案：严苛单票上限 3%–5%，即便妖股腰斩对组合净值影响也可控
+  max_single_weight: 0.05
+  max_industry_weight: 0.20
+  industry_col: industry
+  max_turnover: 1.0
+
+# ——— 大盘状态分类器（Regime Switch）———
+# 在系统最外层判断大盘状态（牛/熊/震荡），动态调整 composite/composite_extended 权重
+# 仅在 sort_by=composite 或 composite_extended 时生效
+regime:
+  enabled: true
+  # 短期趋势判断窗口（交易日）
+  short_window: 20
+  # 中期趋势判断窗口（交易日）
+  long_window: 60
+  # 牛市判定：短期累计收益 > 5%
+  bull_return_threshold: 0.05
+  # 熊市判定：短期累计收益 < -4%
+  bear_return_threshold: 0.04
+  # 高波动（年化 > 25%）倾向震荡市
+  vol_threshold_ann: 0.25
+  # 牛市：动量权重乘以 1.5
+  bull_momentum_multiplier: 1.5
+  # 牛市：反转权重乘以 0.3（压制均值回归）
+  bull_reversal_multiplier: 0.3
+  # 熊市：低波因子权重乘以 2.0
+  bear_lowvol_multiplier: 2.0
+  # 熊市：动量权重乘以 0.4（压制趋势追击）
+  bear_momentum_multiplier: 0.4
+  # 熊市：大市值权重乘以 1.5
+  bear_size_multiplier: 1.5
+  # 震荡：反转因子权重乘以 1.3
+  oscillation_reversal_multiplier: 1.3
+
+# A 股口径交易成本（基点 bps）；eval 输出「无成本」与「含成本」可对比
+# 双边合计约 14~20 bps：佣金 2.5+2.5 + 滑点 4.5*2 + 印花税 5 = 19 bps（贴近双边千分之二）
+transaction_costs:
+  commission_buy_bps: 2.5
+  commission_sell_bps: 2.5
+  # 滑点适度调高至 4.5 bps/side 以体现「双边千分之二」保守假设
+  slippage_bps_per_side: 4.5
+  # 卖出印花税（仅卖出侧）；现行 A 股一般为 0.05% = 5 bps，以监管为准
+  stamp_duty_sell_bps: 5.0
+
+# 回测引擎增强配置
+backtest:
+  execution_mode: tplus1_open
+  # 涨停买入失败处理：idle（资金闲置）或 redistribute（权重顺延到其他标的）
+  limit_up_mode: redistribute
+
+# 风险：极端行情降杠杆/空仓、回撤与波动预警（基准需能拉到日线）
+risk:
+  max_drawdown_alert: 0.15
+  max_volatility_ann: 0.55
+  # 大盘代理（ETF 流动性好）；若库中无该标的请先拉取或改代码
+  benchmark_symbol: "510300"
+  extreme_lookback_days: 5
+  extreme_drop_threshold: 0.05
+  # 触发极端规则时仓位乘子：0=空仓，1=不调整，0.5=半仓
+  risk_off_factor: 0.0

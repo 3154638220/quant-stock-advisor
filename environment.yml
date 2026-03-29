@@ -1,0 +1,18 @@
+# 项目专用 Conda 环境：Python 3.10.x（与 Jetson 官方 PyTorch cp310 wheel 对齐；补丁版见 .python-version）
+# 用法：
+#   conda env create -f environment.yml
+#   conda activate quant-system
+#   bash scripts/bootstrap_conda_env.sh   # pip 依赖 + NVIDIA wheel + pip install -e .
+#
+# JetPack 与 wheel 对应关系以 NVIDIA 文档为准；默认 URL 见 jetson/torch-wheel.url，可用 TORCH_WHEEL_URL 覆盖。
+# 若 conda 无法解析 python=3.10.12，可改为 python=3.10。
+#
+# 仅 venv：需已安装 python3.10-venv，然后 python3.10 -m venv .venv && source .venv/bin/activate && bash scripts/bootstrap_conda_env.sh
+
+name: quant-system
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.12
+  - pip
+  - libopenblas

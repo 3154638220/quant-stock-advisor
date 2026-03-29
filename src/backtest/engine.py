@@ -1,0 +1,340 @@
+"""标准回测接口：信号（权重）、调仓频率、成本模型、风险约束 → 日收益序列与统一绩效。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Optional
+
+import numpy as np
+import pandas as pd
+
+from src.backtest.performance_panel import PerformancePanel, compute_performance_panel
+from src.backtest.transaction_costs import TransactionCostParams, turnover_cost_drag
+from src.backtest.risk_metrics import risk_config_from_mapping
+
+
+@dataclass
+class BacktestConfig:
+    """回测配置：成本、无风险利率、年化基准、风险约束（与现有 risk 配置兼容）。"""
+
+    cost_params: Optional[TransactionCostParams] = None
+    risk_free_daily: float = 0.0
+    periods_per_year: float = 252.0
+    # 若权重行和 > 1 或需限制总敞口，先缩放至 sum(w) <= max_gross_exposure（再归一化）
+    max_gross_exposure: float = 1.0
+    # 可选：与 risk_metrics.risk_config_from_mapping 同结构的极端行情等（预留扩展）
+    risk_cfg: Dict[str, Any] = field(default_factory=dict)
+    # ``close_to_close``：asset_returns 为当日收盘/昨收 -1；``tplus1_open``：须为 open(t+1)/open(t)-1（隔夜+日内至次日开盘），与 T+1 可卖一致，避免 T+0 假高频
+    execution_mode: str = "close_to_close"
+    # 涨停买入失败处理模式（仅 tplus1_open 模式下有效）：
+    # ``idle``：资金闲置（权重归零，对应收益置 0），等价于原 zero_if_limit_up_open
+    # ``redistribute``：将涨停票权重均匀分配给同日其他可买标的（顺延到下一个标的）
+    limit_up_mode: str = "idle"
+
+
+@dataclass
+class BacktestResult:
+    """引擎输出：日收益、换手、绩效面板。"""
+
+    daily_returns: pd.Series
+    rebalance_turnover: pd.Series  # 仅调仓日有值，其余 NaN
+    panel: PerformancePanel
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+def _align_weights_columns(
+    weights: pd.DataFrame,
+    asset_cols: List[str],
+) -> pd.DataFrame:
+    """将权重表列对齐到收益表列顺序；缺失列视为 0。"""
+    w = weights.reindex(columns=asset_cols, fill_value=0.0)
+    return w.astype(np.float64)
+
+
+def build_open_to_open_returns(
+    daily_long: pd.DataFrame,
+    *,
+    date_col: str = "trade_date",
+    sym_col: str = "symbol",
+    zero_if_limit_up_open: bool = False,
+) -> pd.DataFrame:
+    """
+    由日线长表构造「开盘到次日开盘」单日简单收益宽表，索引为交易日，与 ``run_backtest(..., execution_mode='tplus1_open')`` 输入一致。
+
+    第 ``t`` 行、``s`` 列：``open(t+1,s)/open(t,s)-1``（最后一行全为 ``nan`` 或 0）。
+
+    zero_if_limit_up_open
+        若为 True，当 ``open(t)`` 触及涨停价（相对前收）时将该收益置 0，表示开盘无法买入、该笔不参与。
+    """
+    from src.market.tradability import is_open_limit_up_unbuyable
+
+    if daily_long.empty:
+        raise ValueError("daily_long 为空")
+    need = {date_col, sym_col, "open", "close"}
+    miss = need - set(daily_long.columns)
+    if miss:
+        raise ValueError(f"daily_long 缺少列: {miss}")
+
+    df = daily_long.copy()
+    df[sym_col] = df[sym_col].astype(str).str.zfill(6)
+    df[date_col] = pd.to_datetime(df[date_col]).dt.normalize()
+    chunks: List[pd.DataFrame] = []
+    for sym, g in df.groupby(sym_col, sort=False):
+        g = g.sort_values(date_col)
+        o = pd.to_numeric(g["open"], errors="coerce")
+        c = pd.to_numeric(g["close"], errors="coerce")
+        prev_c = c.shift(1)
+        o2o = o.shift(-1) / o - 1.0
+        if zero_if_limit_up_open:
+            for i in range(len(g) - 1):
+                pc = float(prev_c.iloc[i])
+                ox = float(o.iloc[i])
+                if np.isfinite(pc) and np.isfinite(ox) and is_open_limit_up_unbuyable(ox, pc, str(sym)):
+                    o2o.iloc[i] = 0.0
+        chunks.append(
+            pd.DataFrame(
+                {
+                    date_col: g[date_col].values,
+                    sym_col: sym,
+                    "_o2o": o2o.values,
+                }
+            )
+        )
+    long_o2o = pd.concat(chunks, ignore_index=True)
+    wide = long_o2o.pivot(index=date_col, columns=sym_col, values="_o2o")
+    wide = wide.sort_index()
+    return wide.astype(np.float64)
+
+
+def _is_limit_up_open_row(
+    r_row: np.ndarray,
+    *,
+    threshold: float = 0.095,
+) -> np.ndarray:
+    """
+    在「开盘到次日开盘」收益行中，检测哪些资产当日开盘即触及涨停（收益 >= threshold）。
+
+    ``tplus1_open`` 模式下，r_row[j] = open(t+1,j)/open(t,j)-1。
+    若该值 >= threshold（约 9.5%，贴近主板 10% 涨停、创业板/科创板 20% 另做处理），
+    则认为该票 T+1 开盘一字涨停，无法按预期价格买入。
+
+    注意：这是个近似检测，更精确的做法需要前收价格（见 tradability.py）。
+    此处用于回测引擎中的「强校验」近似替代。
+    """
+    r = np.asarray(r_row, dtype=np.float64)
+    return np.where(np.isfinite(r), r >= threshold, False)
+
+
+def _redistribute_limit_up_weights(
+    w: np.ndarray,
+    limit_up_mask: np.ndarray,
+) -> np.ndarray:
+    """
+    将涨停票的权重均匀重分配给同日其余可买标的（顺延逻辑）。
+
+    Parameters
+    ----------
+    w
+        当日权重向量（归一化后），长度 k。
+    limit_up_mask
+        布尔数组，True 表示该票涨停买入失败。
+
+    Returns
+    -------
+    w_new : ndarray，重分配后权重（仍归一化）
+    """
+    w = np.asarray(w, dtype=np.float64).copy()
+    lim = np.asarray(limit_up_mask, dtype=bool)
+    if not lim.any():
+        return w
+    stranded = float(np.sum(w[lim]))
+    w[lim] = 0.0
+    # 将滞留资金按现有权重比例重分配给非涨停票
+    available = ~lim
+    avail_sum = float(np.sum(w[available]))
+    if avail_sum > 1e-15:
+        w[available] += w[available] / avail_sum * stranded
+    # 若所有票均涨停，资金闲置（全部置 0）
+    return w
+
+
+def _apply_gross_exposure(w: np.ndarray, max_gross: float) -> np.ndarray:
+    """若 sum(w) > max_gross，整体缩放。"""
+    s = float(np.nansum(np.maximum(w, 0.0)))
+    if s <= 0:
+        return np.zeros_like(w, dtype=np.float64)
+    cap = float(max_gross)
+    if cap > 0 and s > cap:
+        return w * (cap / s)
+    return w
+
+
+def build_daily_weights(
+    trading_index: pd.DatetimeIndex,
+    weights_rebalance: pd.DataFrame,
+    *,
+    max_gross_exposure: float = 1.0,
+) -> pd.DataFrame:
+    """
+    将调仓日权重前向填充到完整交易日索引；调仓日须为 ``trading_index`` 的子集。
+    """
+    if weights_rebalance.empty:
+        raise ValueError("weights_rebalance 为空")
+    wr = weights_rebalance.sort_index()
+    wr.index = pd.to_datetime(wr.index).normalize()
+    ti = pd.DatetimeIndex(pd.to_datetime(trading_index).normalize())
+    # 仅保留交易日上存在的调仓日
+    wr = wr[wr.index.isin(ti)]
+    if wr.empty:
+        raise ValueError("调仓日不在 trading_index 中")
+    cols = wr.columns.tolist()
+    out = pd.DataFrame(index=ti, columns=cols, dtype=np.float64)
+    for i, dt in enumerate(ti):
+        # 最后一个 <= dt 的调仓行
+        sub = wr.loc[wr.index <= dt]
+        if sub.empty:
+            raise ValueError(f"日期 {dt} 之前无调仓权重")
+        row = sub.iloc[-1].to_numpy(dtype=np.float64)
+        row = _apply_gross_exposure(row, max_gross_exposure)
+        s = row.sum()
+        if s > 0:
+            row = row / s
+        out.iloc[i] = row
+    return out
+
+
+def run_backtest(
+    asset_returns: pd.DataFrame,
+    weights_signal: pd.DataFrame,
+    *,
+    config: Optional[BacktestConfig] = None,
+    # 调仓频率：若给定，从 weights_signal 中按规则重采样（仅保留该频率的调仓日）
+    rebalance_rule: Optional[str] = None,
+) -> BacktestResult:
+    """
+    标准回测：输入资产日收益宽表 + 信号权重宽表（按调仓日行），输出日组合收益与绩效面板。
+
+    Parameters
+    ----------
+    asset_returns
+        索引为交易日，列为标的，值为**当日**简单收益。
+    weights_signal
+        索引为调仓日（须为 ``asset_returns.index`` 的子集），列为标的，非负权重（将归一化）。
+        即「信号」已体现在权重上；若需由得分转权重，请在组合层先调用 ``build_portfolio_weights``。
+    rebalance_rule
+        若给定（如 ``"W-FRI"``），先将 ``weights_signal`` 按该规则对齐到 ``asset_returns`` 的日历后
+        再前向填充；否则认为 ``weights_signal`` 的每一行即调仓日。
+
+    Notes
+    -----
+    组合日收益：``r_{p,t} = w_{t-1}^T r_t``（前一日权重 × 当日资产收益），首日为 0。
+
+    - **close_to_close**（默认）：``r_t`` 为当日收盘相对昨收的收益；权重在 ``t-1`` 日末确定、参与 ``t`` 日收盘口径收益（常见回测约定）。
+    - **tplus1_open**：``r_t`` 须为 ``open(t+1)/open(t)-1``（见 ``build_open_to_open_returns``），与「T+1 最早次日开盘卖」一致，避免用日内 T+0 夸大夏普；收益矩阵末行可为 ``nan``（无下一开盘），将按 0 处理。
+
+    成本：在**发生调仓**的交易日，按相对上一有效权重的 half L1 换手，用 ``turnover_cost_drag`` 从当日收益中扣减。
+    默认参数（commission_buy=2.5bps, commission_sell=2.5bps, slippage=2.0bps/side, stamp_duty=5.0bps）合计约 14 bps 双边，
+    如需对齐「双边千分之二（20bps）」的保守假设，可将 ``slippage_bps_per_side`` 调为 4~5 bps，
+    或在配置中将 ``transaction_costs.slippage_bps_per_side`` 设为 4.5。
+
+    涨停买入失败（仅 ``tplus1_open`` 模式）：
+    - ``limit_up_mode="idle"``：检测到当日开盘收益 >= 9.5%（涨停近似）的标的，其收益置 0（资金闲置）。
+    - ``limit_up_mode="redistribute"``：将涨停票权重均匀重分配给同日其余可买标的（顺延逻辑）。
+    """
+    cfg = config or BacktestConfig()
+    cost = cfg.cost_params
+    exe = str(cfg.execution_mode).lower().strip()
+    if exe not in ("close_to_close", "tplus1_open"):
+        raise ValueError("execution_mode 须为 close_to_close 或 tplus1_open")
+    ar = asset_returns.sort_index().copy()
+    ar.index = pd.to_datetime(ar.index).normalize()
+    sym_cols = [c for c in ar.columns]
+
+    ws = weights_signal.sort_index().copy()
+    ws.index = pd.to_datetime(ws.index).normalize()
+    ws = _align_weights_columns(ws, sym_cols)
+
+    if rebalance_rule is not None:
+        # 将用户给定权重序列重采样到规则锚点（取该周期内最后一行）
+        rs = ws.resample(rebalance_rule).last().dropna(how="all")
+        rs = rs[rs.index.isin(ar.index)]
+        ws = rs
+
+    trading_index = ar.index
+    daily_w = build_daily_weights(
+        trading_index,
+        ws,
+        max_gross_exposure=cfg.max_gross_exposure,
+    )
+
+    r_mat = ar.to_numpy(dtype=np.float64)
+    if exe == "tplus1_open":
+        r_mat = np.where(np.isfinite(r_mat), r_mat, 0.0)
+    w_mat = daily_w.to_numpy(dtype=np.float64)
+    n, k = r_mat.shape
+    if w_mat.shape != (n, k):
+        raise ValueError("内部权重矩阵与收益矩阵形状不一致")
+
+    limit_up_mode = str(cfg.limit_up_mode).lower().strip()
+    if limit_up_mode not in ("idle", "redistribute"):
+        limit_up_mode = "idle"
+
+    port = np.zeros(n, dtype=np.float64)
+    turn_series = np.full(n, np.nan, dtype=np.float64)
+    rebalance_dates = ws.index.intersection(trading_index)
+
+    # r_{p,t} = w_{t-1}^T r_t（前一日权重 × 当日 r_t；tplus1_open 时 r_t 为开盘到次日开盘收益）
+    port[0] = 0.0
+    for i in range(1, n):
+        w_prev = w_mat[i - 1].copy()
+        r_today = r_mat[i]
+
+        # 涨停买入失败处理（仅 tplus1_open 模式）
+        if exe == "tplus1_open":
+            # 近似检测：当日收益 >= 9.5% 视为涨停（主板阈值）
+            lim_mask = _is_limit_up_open_row(r_today, threshold=0.095)
+            if lim_mask.any():
+                if limit_up_mode == "redistribute":
+                    w_prev = _redistribute_limit_up_weights(w_prev, lim_mask)
+                else:
+                    # idle 模式：直接将收益置 0（已在 r_mat 填充时处理，此处兜底）
+                    r_today = r_today.copy()
+                    r_today[lim_mask] = 0.0
+
+        port[i] = float(np.dot(w_prev, r_today))
+
+        w_new = w_mat[i]
+        w_old = w_mat[i - 1]
+        half_l1 = 0.5 * float(np.sum(np.abs(w_new - w_old)))
+        if half_l1 > 1e-15:
+            turn_series[i] = half_l1
+            if cost is not None:
+                port[i] -= turnover_cost_drag(half_l1, cost)
+
+    s = pd.Series(port, index=trading_index, name="portfolio_ret")
+    turn = pd.Series(turn_series, index=trading_index, name="turnover_half_l1")
+
+    panel = compute_performance_panel(
+        s.to_numpy(dtype=np.float64),
+        turnover=turn.to_numpy(dtype=np.float64),
+        risk_free_daily=cfg.risk_free_daily,
+        periods_per_year=cfg.periods_per_year,
+    )
+
+    meta = {
+        "n_rebalances": int(len(rebalance_dates)),
+        "symbols": sym_cols,
+        "risk_cfg_resolved": risk_config_from_mapping(cfg.risk_cfg),
+        "execution_mode": exe,
+    }
+    return BacktestResult(daily_returns=s, rebalance_turnover=turn, panel=panel, meta=meta)
+
+
+def result_to_dict(res: BacktestResult) -> Dict[str, Any]:
+    """便于落盘：序列化摘要。"""
+    return {
+        "panel": res.panel.to_dict(),
+        "meta": res.meta,
+        "daily_returns": res.daily_returns,
+        "rebalance_turnover": res.rebalance_turnover,
+    }
