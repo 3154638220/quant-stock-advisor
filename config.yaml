@@ -274,3 +274,36 @@ risk:
   extreme_drop_threshold: 0.05
   # 触发极端规则时仓位乘子：0=空仓，1=不调整，0.5=半仓
   risk_off_factor: 0.0
+
+# ——— 本地 LLM 分析（Ollama）———
+# 运行前需确保: ollama serve 已启动，且目标模型已下载
+# 快速检查: curl http://localhost:11434/api/tags
+# 更大模型（吃满算力）：先 ollama pull，再在 model 中填写，例如
+#   qwen2.5:14b | qwen2.5:32b | llama3.1:70b 等；Q4 量化下显存粗估约 7B≈5GB、14B≈10GB、32B≈20GB、70B≈40GB+
+llm:
+  # 7B 偏快；若本机显存/统一内存充足，建议改为 qwen2.5:14b 或 qwen2.5:32b 提升归纳与 JSON 稳定性
+  model: "qwen2.5:32b"
+  # Ollama 服务地址
+  base_url: "http://localhost:11434"
+  # 单次请求超时（秒）；14B/32B 在本地 GPU 上单次可能 1~5 分钟，可提到 300~600
+  timeout_sec: 120.0
+  # 透传给 Ollama 的 options（与 temperature 合并；见 Ollama Modelfile PARAMETER）
+  # num_gpu: 载入 GPU 的层数，-1 表示尽量全部 offload（充分利用本地 GPU）
+  # num_ctx: 上下文长度，越大占显存越多；本任务 4k~8k 通常足够
+  # num_thread: CPU 线程数；部分层在 CPU 时可提高（按物理核数调整）
+  ollama_options:
+    num_gpu: -1
+    num_ctx: 8192
+    # num_thread: 8   # 可选：仅当部分层在 CPU 时调高，按机器核心数设置
+  # 失败重试次数
+  max_retries: 2
+  # 默认分析前 N 只推荐股票（0 = 全部）
+  default_top_k: 10
+  # 单只股票抓取新闻条数上限
+  max_news_per_stock: 10
+  # 市场快讯条数上限
+  max_market_news: 20
+  # 个股新闻分析之间的休眠（秒），避免接口限流
+  sleep_between_stocks_sec: 1.0
+  # 个股财务分析之间的休眠（秒）
+  sleep_between_financial_sec: 1.5

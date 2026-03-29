@@ -9,6 +9,7 @@
 | 模块 | 说明 |
 |------|------|
 | **数据** | AkShare 日线增量、股票池缓存、写入前数据质量检查（`src/data_fetcher/`） |
+| **本地 LLM 分析** | Ollama + qwen2.5 提炼当日市场宏观利好/利空、个股新闻情绪评分、财务报表关键指标提取（`src/llm/`、`scripts/llm_daily_analysis.py`） |
 | **因子** | GPU 张量动量/RSI/ATR/波动率/换手/量价相关；K 线结构高频降频代理因子（日内振幅、影线比率、隔夜跳空、尾盘强度等）；截面 winsorize、z-score、行业与市值双重中性化（`src/features/`） |
 | **因子正交化** | Löwdin 对称正交化与 Gram-Schmidt 正交化，在传入 XGBoost/线性模型前剥离因子冗余（`src/features/orthogonalize.py`，训练时 `--orthogonalize` 启用） |
 | **信号** | 线性 composite / composite_extended；**XGBoost** 截面 **Learning-to-Rank**（默认 `XGBRanker`，可选回归）；**LSTM/GRU/TCN/Transformer** 序列模型（`src/models/`、`models/train_*.py`） |
@@ -57,11 +58,19 @@
 │   ├── models/              # 打分、基线、XGBoost、时序网络、推理
 │   ├── portfolio/           # 协方差、优化、权重
 │   ├── backtest/            # 回测（含涨停重分配）、成本、绩效、walk-forward
-│   └── market/
-│       ├── tradability.py   # 涨跌停、停牌、预过滤
-│       └── regime.py        # 大盘状态分类器（新增）
+│   ├── market/
+│   │   ├── tradability.py   # 涨跌停、停牌、预过滤
+│   │   └── regime.py        # 大盘状态分类器
+│   └── llm/
+│       ├── client.py        # Ollama 客户端封装（新增）
+│       ├── prompts.py       # Prompt 模板（新增）
+│       ├── news_analyzer.py # 新闻情绪分析（新增）
+│       └── financial_analyzer.py  # 财务报表提取（新增）
 ├── models/                  # 训练脚本入口（baseline / xgboost / deep_sequence 等）
-├── scripts/                 # 日更、环境、bootstrap、Docker 辅助
+├── scripts/
+│   ├── daily_run.py         # 日更主入口（拉数→因子→推荐 CSV）
+│   ├── llm_daily_analysis.py# 本地 LLM 新闻+财务分析（新增）
+│   └── ...                  # 环境、bootstrap、Docker 辅助
 ├── tests/                   # pytest
 ├── notebooks/               # 探索与原型
 └── jetson/                  # Jetson torch wheel 默认 URL 等
@@ -138,6 +147,36 @@ python scripts/daily_run.py eval --latest --horizon 5
 python scripts/daily_run.py eval --csv data/results/recommend_2026-03-27.csv
 ```
 
+**本地 LLM 日常分析（需 Ollama 运行中，模型已下载）：**
+
+```bash
+# 完整分析：市场宏观 + 个股新闻情绪 + 财务报表（分析最新推荐 CSV 前10只）
+python scripts/llm_daily_analysis.py
+
+# 只分析前5只，使用轻量模型（Jetson 内存有限时）
+python scripts/llm_daily_analysis.py --top-k 5 --model qwen2.5:3b
+
+# 仅市场宏观利好/利空快讯摘要
+python scripts/llm_daily_analysis.py --market-only
+
+# 仅财务报表分析（跳过新闻）
+python scripts/llm_daily_analysis.py --no-news
+
+# 指定历史 CSV
+python scripts/llm_daily_analysis.py --csv data/results/recommend_2026-03-27.csv
+```
+
+输出文件：
+- `data/results/llm_analysis_<date>.json` — 完整结构化 JSON
+- `data/results/llm_enriched_<date>.csv` — 推荐 CSV + LLM 分析列（`llm_sentiment`、`llm_news_score`、`fin_rating`、`fin_roe` 等）
+
+**本地算力与更大模型（7B 不必是上限）：**
+
+- **换模型**：在 `config.yaml` 的 `llm.model` 或命令行 `--model` 指定；先 `ollama pull <名称>`。常见：`qwen2.5:14b`、`qwen2.5:32b`；桌面大显存可试 `llama3.1:70b`、`qwen2.5:72b` 等。Q4 量化下显存粗估约：7B≈5GB、14B≈10GB、32B≈20GB、70B≈40GB+（随实现与上下文浮动）。
+- **吃满 GPU**：在 `llm.ollama_options` 中设置 `num_gpu: -1`（尽量把层放到 GPU）、`num_ctx`（如 4096~8192；过大占显存）。可选 `num_thread` 在部分层在 CPU 时调高。
+- **超时**：大模型单次推理更慢，把 `llm.timeout_sec` 提到 300~600，或运行 `python scripts/llm_daily_analysis.py --timeout 600`。
+- **Jetson / 边缘**：统一内存可跑更大模型，但 **tokens/s** 有限；若延迟难接受，可保留 **14B Q4** 或缩小 `default_top_k`。
+
 **烟测（固定标的、接口不稳时）：**
 
 ```bash
@@ -168,6 +207,7 @@ python scripts/daily_run.py --help
 - **portfolio**：权重模式（默认 `risk_parity`）、风险模型、单票/行业上限（默认 5%）、换手与成本
 - **backtest**：`execution_mode`（默认 `tplus1_open`）、`limit_up_mode`（`idle` / `redistribute`）
 - **transaction_costs**：`slippage_bps_per_side` 默认调整为 4.5 bps，合计双边约 **19 bps**
+- **llm**：`model`、`timeout_sec`、`ollama_options`（`num_gpu`、`num_ctx` 等，见上文「本地算力与更大模型」）
 
 ---
 
@@ -200,7 +240,7 @@ pytest
 
 ## 路线图（未默认落地）
 
-以下在 **[项目算法建模详解.md](项目算法建模详解.md)** 中亦标注为规划或可选扩展：**GNN**（板块/产业链图）、**深度强化学习**（如 FinRL）、**本地 LLM** 处理另类文本数据等。当前仓库主线仍是日线量价 + 统计/树/序列模型 + 凸优化组合 + 向量回测。
+以下在 **[项目算法建模详解.md](项目算法建模详解.md)** 中亦标注为规划或可选扩展：**GNN**（板块/产业链图）、**深度强化学习**（如 FinRL）、本地 LLM 情绪因子入模等（当前 LLM 分析以辅助阅读为主，暂未接入因子流水线）。当前仓库主线仍是日线量价 + 统计/树/序列模型 + 凸优化组合 + 向量回测。
 
 ---
 
