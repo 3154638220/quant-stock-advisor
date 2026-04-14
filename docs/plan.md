@@ -1,248 +1,342 @@
-# 量化系统优化规划
+# 策略优化与研发计划
 
-本文档汇总对整条量化流水线的系统性优化分析，便于跟踪与迭代。
+**文档版本**：2026-04-14（项目代码全量分析版）  
+**依据**：`docs/backtest_report.md`、`docs/backtest_report_data.json` 全样本与 Walk-Forward 结果，以及对仓库内 `src/`、`scripts/` 全部源码的系统性审查。
 
----
-
-## 整体架构现状
-
-```
-AkShare → DuckDB → PyTorch因子 → 排序(线性/XGBoost/序列) → 组合优化 → 推荐CSV → 回测
-                                                    ↕（独立）
-                                         LLM新闻/关注度扫描
-```
+**目的**：在可复现的回测框架下，系统性提升**风险调整后收益**与**相对全市场等权基准的超额**，并把最大回撤控制在可接受区间；本文件为执行级路线图，与回测报告同步迭代。
 
 ---
 
-## 一、紧急问题（影响系统可用性）
+## 1. 基线与结论（当前是否「满意」）
 
-### 1. `config.yaml` 彻底缺失
+| 维度 | 当前（含成本，2021-01-01～2026-04-14） | 结论 |
+|------|----------------------------------------|------|
+| 年化收益（CAGR） | **+10.59%**（基准全市场等权 **+13.47%**） | 绝对收益尚可，**相对基准跑输约 2.2%/年**，不满足「alpha 策略」预期 |
+| 夏普 | **0.499** | 勉强贴合格线，风险补偿一般 |
+| 最大回撤 | **-49.88%**（基准约 -33.87%） | **不可接受**：尾部风险显著高于简单等权 |
+| 年度稳定性 | 6 个自然年中 **4 年负超额**（2022、2023、2025、2026 偏弱） | 市况敏感，策略脆弱 |
+| Walk-Forward（滚动 15 折） | 年化均值 +34.14%（受 Fold 10 极端值拉高），**中位数**约 +11.6% | 单折 63 日噪声大，中位数更接近实际 OOS 能力 |
+| Walk-Forward（分段 3 折） | OOS 均值年化 +12.70%，夏普 +0.515，回撤 -27.34% | 与全样本基本一致，无明显过拟合信号 |
 
-`config.yaml` 已从仓库删除，但 `Dockerfile` 仍有 `COPY config.yaml ./`，导致 **Docker 构建必然失败**。`README.md` 中文档也全部引用该文件。当前系统靠代码内置默认值维持运行，属于「隐形状态」。
-
-**修复状态（已完成）**：
-
-- 已新增 `config.yaml.example` 作为模板配置。
-- `Dockerfile` 已移除 `COPY config.yaml ./`，改为仅拷贝模板文件。
-- 配置加载链路已支持 `QUANT_CONFIG -> config.yaml -> config.yaml.example` 回退。
-- `README.md` 已更新配置初始化方式（先复制模板再本地覆盖）。
-
-### 2. 依赖声明缺口
-
-`requirements-base.txt` 缺少以下实际运行时依赖：
-
-- `scipy`（`src/portfolio/optimizer.py` 中 SLSQP 优化器）
-- `ollama`（`src/llm/client.py`）
-- `httpx` / `aiohttp`（resilience 模块）
-
-新环境部署时会出现 `ImportError`。`pyproject.toml` 也未声明任何 `install_requires`。
-
-**修复状态（已完成）**：
-
-- `requirements-base.txt` 已补充：`scipy`、`ollama`、`httpx`、`aiohttp`。
-- `pyproject.toml` 已补齐 `project.dependencies`，与运行时依赖保持一致。
-
-### 3. XGBoost 模型可能系统性做反
-
-`docs/backtest_report.md` 明确记录历史 bundle 的 **Rank IC 为负**，而生产链路 `sort_by: xgboost` 若沿用旧 bundle，排序方向可能整体反转。需立即核查当前工件的 IC 方向。
-
-**修复状态（已完成）**：
-
-- 在 `src/models/inference.py` 的 `predict_xgboost_tree` 中新增方向保护：
-  - 自动读取 bundle 的 `val_rank_ic` / `train_rank_ic`；
-  - 当可用 Rank IC < 0 时，自动翻转 `tree_score` 方向，避免 Top-K 反向排序。
-- 已新增单测覆盖该行为（`tests/test_tree_model.py`）。
+**结论**：以「跑赢简单等权、回撤可控」为标尺，**当前结果不能算满意**；需在因子、组合构建、模型与验证四线并行改进。
 
 ---
 
-## 二、数据层优化
+## 2. 根因归纳（与代码/配置深度对齐）
 
-### 2.1 AkShare 数据稳定性
+### 2.1 因子维度单一，信号同质
 
-`src/data_fetcher/akshare_resilience.py` 已有 `SIGALRM` 超时和 JSON 快照回退，但：
+- `composite_extended`（`config.yaml.example` 中 16 个因子）全部为技术面短周期信号（动量、RSI、偏离度、涨跌幅等），权重绝对值前五名均为反转/动量类（各约 13.6%）。
+- 无基本面（PE/PB/ROE）、无结构性因子（行业轮动）、无资金流向因子，截面分散度低。
+- `src/features/tensor_alpha.py`、`tensor_base_factors.py`、`intraday_proxy_factors.py` 提供了计算基础，但尚未扩展至基本面域。
 
-- `SIGALRM` 只能用于主线程，多线程并发拉取时无效
-- 建议改为 `concurrent.futures.ThreadPoolExecutor` + `Future.result(timeout=...)` 实现真正的超时
+### 2.2 权重静态，未利用已有 IC 监控能力
 
-### 2.2 DuckDB 写入瓶颈
+- 因子权重硬编码在 `config.yaml.example` 的 `signals.composite_extended` 节，属于「凭经验配置」。
+- **`src/features/ic_monitor.py`（`ICMonitor` 类）已完整实现**滚动 IC 统计与告警，但未接入 `daily_run.py` 的因子加权路径；`src/features/factor_eval.py` 中 `information_coefficient`、`rank_ic`、`layered_returns` 等评估工具同样未被日常调用。
+- 滚动 ICIR 加权的基础设施已就位，缺的是把 `ic_monitor.json` 结果反馈到 `composite_extended_linear_score` 权重的「闭环」代码。
 
-`db_manager.py` 的并发拉取在大股票池（5000+ 标的）下会产生连接竞争。建议：
+### 2.3 组合构建偏粗，优化器未接入主链路
 
-- 批量写入改为先攒 Arrow Table 再单次 `INSERT`
-- 对 `trade_date` + `symbol` 建联合索引加速回测期间的区间查询
+- 主回测固定 **Top-50 等权**，无行业/市值约束。
+- **`src/portfolio/optimizer.py` 已实现** `optimize_risk_parity`、`optimize_min_variance`、`optimize_mean_variance` 三种方法，`weights_from_cov_method` 提供统一入口；`src/portfolio/covariance.py` 实现 Ledoit-Wolf 收缩。
+- `src/portfolio/weights.py` 中 `build_topk_weights` 是当前唯一生产权重构建路径，**行业约束逻辑尚未添加**。
+- 上述优化器与协方差在 `tests/` 有单元测试，可直接接入回测引擎。
 
-### 2.3 衍生列回填脚本依赖
+### 2.4 XGBoost 模型 Rank IC 为负，两套系统未统一评价
 
-`scripts/backfill_derived_daily.py` 是手工触发的，若新增因子字段后忘记回填，历史数据和增量数据会产生字段不一致。建议在 `db_manager.py` 初始化时自动检测缺失列并触发回填。
+- 工件 `data/models/xgboost_panel_ee2108f515be/bundle.json` 显示 `train_rank_ic = -0.161`、`val_rank_ic = -0.074`，若 `config.yaml` 中 `sort_by: xgboost`，生产实际选出的是未来表现最差的股票。
+- 当前 `run_backtest_eval.py` 主报告使用 `composite_extended` 线性路径，但 `config.yaml.example` 默认 `sort_by: xgboost`——**生产与回测默认配置不一致**。
+- `src/models/inference.py` 有 `rank_ic_guard` 保护逻辑（`config.yaml.example` 中 `quantile: 0.25, min_history: 4`），但不能弥补模型本身方向错误。
+- `scripts/train/train_xgboost.py`、`train_baseline.py`、`train_deep_sequence.py`、`train_timeseries.py` 均已存在，缺的是**正确的时序切分标签与重训验收流程**。
 
----
+### 2.5 信号与调仓错配
 
-## 三、因子工程优化
+- 多数因子窗口 3～20 日，月末调仓（约 21 个交易日）导致信号在执行时已大幅衰减。
+- 执行口径为 `close_to_close`，而因子是 T 日收盘值——理论上存在一日的信号可用性延迟（T 日信号、T+1 日实际能入场），但该偏差在回测中已被接受并记录。
 
-### 3.1 因子 IC 衰减未被监控
+### 2.6 Regime 机制有实现，效果未独立量化
 
-`src/features/factor_eval.py` 有 IC / RankIC 计算，但没有持久化记录和告警。因子效果会随市场状态衰退，需要建立因子 IC 的滚动监控看板（写入 DuckDB 或 JSON），当近期 IC 均值跌破阈值时发出告警。
+- `src/market/regime.py` 实现 bull/bear/oscillation 三态分类 + 连续动态因子权重调整，已接入 `daily_run.py`。
+- 当前没有回测脚本对 **「启用 regime 调权 vs 关闭」** 做对照实验，无法判断其净贡献；`config.yaml.example` 中 `regime.enabled: true` 为默认，可能引入不必要的方差。
 
-### 3.2 中性化应作为默认选项
+### 2.7 Walk-Forward 报告解读偏差
 
-`算法改进.md` 和 `src/features/neutralize.py` 都支持市值+行业回归中性化，但在 `daily_run.py` 的默认路径中未必启用。**市值效应在 A 股极强**，不中性化的因子 IC 很可能大部分来自市值暴露，并非真实 alpha。
+- 滚动 WF 均值被 Fold 10（年化 +437.88%，总收益 +52.29%）严重拉高，均值 +34.14% 不具代表性。
+- 脚本当前输出均值聚合；**中位数** 约 +11.6%，更贴近真实预期；分段 WF（3 折，每折约 1 年）给出更可信的 OOS 回撤估计（-27.34%）。
+- `run_backtest_eval.py` 报告中 WF 段落仅导出均值，需增加 p25/中位数/p75 输出。
 
-### 3.3 K 线结构因子标签未完整映射
+### 2.8 LLM 支线尚未闭环
 
-`src/models/recommend_explain.py` 的 `FACTOR_LABELS` 未覆盖 `intraday_proxy_factors.py` 中的全部因子，推荐报告的解释性差。
-
----
-
-## 四、模型层优化
-
-### 4.1 XGBoost 训练的标签质量
-
-`src/features/tree_dataset.py` 已支持夏普/卡玛/截断标签，但需要验证：
-
-- 是否真正使用了**截面相对标签**（而非绝对收益）
-- 标签窗口（5d/10d/20d）是否做了多目标融合
-
-建议将标签构造参数纳入实验追踪（`src/models/experiment.py`），使每次训练结果可复现和对比。
-
-**修复状态（已完成）**：
-
-- `scripts/train/train_xgboost.py` 已支持多窗口标签融合（`label-horizons` / `label-weights`，默认可配置 5/10/20）。
-- 融合标签采用按交易日截面的相对排序融合（`rank_fusion`），明确使用截面相对标签信号。
-- 标签构造参数（窗口、权重、变换、融合模式）已写入 `bundle.json` 与实验日志（`params_json`）。
-
-### 4.2 缺乏模型版本管理
-
-`src/models/artifacts.py` 有 bundle 存取，但没有版本比较机制。当新训练的模型 OOS 表现不如旧模型时，系统会静默替换。建议：
-
-- 新 bundle 写入前先计算验证集 Rank IC，低于历史 P25 分位则拒绝替换
-- 保留最近 N 个版本，支持回滚
-
-**修复状态（已完成）**：
-
-- `src/models/artifacts.py` 新增版本治理能力：历史版本列表、指标读取、分位门禁判断、发布目录+历史快照管理。
-- `src/models/xtree/train.py` 已接入门禁：候选模型 `val_rank_ic` 低于历史 P25（可配置）会拒绝发布。
-- 发布时自动写入 `xgboost_panel_history/active_bundle.json`，记录 active/previous 版本并保留最近 N 份快照，支持回滚。
-
-### 4.3 时序模型（LSTM/TCN）欠缺生产验证
-
-`src/models/timeseries/` 已有完整架构，但 `docs/backtest_report.md` 中的 `config_source: builtin_defaults` 显示历史回测仅用了线性模型。深度序列模型尚未经过严格的 walk-forward OOS 验证。
-
-**修复状态（已完成）**：
-
-- `src/models/timeseries/train.py` 新增可选 walk-forward OOS 校验（可配置 train/test/step/epochs），输出聚合 OOS 指标到模型 metrics。
-- `scripts/train/train_deep_sequence.py` 默认启用 `--walk-forward-oos`，训练后自动执行 OOS 验证。
-- `scripts/train/train_timeseries.py` 增加 `--time-val-split`（默认开启）与可选 `--walk-forward-oos` 参数，避免随机切分泄漏未来。
+- `src/llm/` 实现了 Ollama 客户端、东财飙升榜关注度扫描、新闻/财报情绪分析，但输出为独立 CSV/JSON，**未作为截面因子注入 `composite_extended` 或过滤层**。
+- README 明确标注「LLM 尚未闭环」；在基础因子改进完成前，LLM 因子的优先级应次于 P2。
 
 ---
 
-## 五、组合优化层
+## 3. 目标与验收标准（建议）
 
-### 5.1 协方差矩阵估计质量
+以下数值为**方向性目标**，以同一套 `run_backtest_eval.py` 参数族与成本假设复测为准；若更换基准或股票池，需单独说明。
 
-`src/portfolio/covariance.py` 使用 Ledoit-Wolf 收缩，在股票池大、历史数据短时效果有限。建议补充：
-
-- **行业因子模型**协方差（Barra 风格，用行业虚拟变量做因子分解）
-- 或 **指数加权**协方差（对近期数据加权更重）
-
-**修复状态（已完成）**：
-
-- `src/portfolio/covariance.py` 已新增 `ewma` 协方差估计（`cov_shrinkage: ewma`，支持 `cov_ewma_halflife`）。
-- 已新增 `industry_factor` 协方差估计（`cov_shrinkage: industry_factor`），按行业虚拟变量做因子分解并重构 `Σ = BFB' + D`。
-- `daily_run` 与 `portfolio_eval` 已接入上述新方法，可通过 `portfolio.cov_shrinkage` 配置切换。
-
-### 5.2 换手约束过于简单
-
-`src/portfolio/weights.py` 有换手上限，但没有考虑**交易冲击成本**：大市值票的换手成本和小市值票差异很大。建议引入以市值分档的成本系数。
-
-**修复状态（已完成）**：
-
-- `src/portfolio/weights.py` 的换手约束已支持成本加权形式：
-  `0.5 * sum(coeff_i * |Δw_i|) <= max_turnover`。
-- 已新增按市值分档的成本系数构造（小盘更高、大盘更低），通过 `portfolio.turnover_cost_model` 配置启用。
-- `daily_run` 与 `portfolio_eval` 已接入成本加权换手约束。
-
-### 5.3 Regime 状态切换粒度粗
-
-`src/market/regime.py` 的三状态（牛/熊/震荡）对信号权重的影响是静态配置的。更优做法是用**隐马尔可夫模型（HMM）** 或基于波动率指标（如 VIX 类）的动态权重，而不是硬编码分档。
-
-**修复状态（已完成）**：
-
-- `src/market/regime.py` 已新增“趋势 + 波动率”连续动态权重机制（可配置开关）。
-- `get_regime_weights` 在保留三状态标签的同时，可根据 `short_return` 与 `realized_vol_ann` 输出连续权重倍数，避免纯硬切换。
-- `daily_run` 已将 `classify_regime` 的结果透传到动态权重计算链路。
+| 阶段 | 指标 | 目标 |
+|------|------|------|
+| **第一阶段** | 超额年化（vs `market_ew`） | 由 -2.17% **转正**，目标 **+1%～+3%/年** |
+| | 最大回撤 | 由 -49.88% 收窄至 **≤ -35%** |
+| | 年度稳定性 | 6 个自然年中 **正超额年数 ≥ 4 年** |
+| **第二阶段** | 夏普（含成本） | 提升至 **0.6+** |
+| | 最大回撤 | 进一步收窄至 **≤ -30%** |
+| | WF 中位数超额 | **> 0** |
+| **通用约束** | 成本敏感性 | 任何策略须同时报含/不含成本，换手 ≤ 60% |
+| | OOS 一致性 | 分段 WF（长窗口）OOS 夏普与全样本差距 **< 0.1** |
 
 ---
 
-## 六、LLM 链路深度集成
+## 4. 工作分解（按优先级与代码可操作性排序）
 
-当前 LLM 模块与主流水线完全割裂，输出仅为独立 JSON 报告。可分两步集成：
+### P0 — 快速修复：可立刻落地，收益确定性高
 
-**第一步（低风险）**：将 `attention_scanner.py` 的「关注度得分」作为一个**软因子**加入线性组合，权重设小（5% 以内），先观察 IC。
+#### P0-A：统一生产与回测默认配置（1～2 天）
 
-**第二步（中期）**：将个股新闻情绪分（`news_analyzer.py`）按时间戳对齐到日线，构造「情绪动量因子」，纳入树模型特征。需严格处理**前视偏差**（只用截止收盘前已发布的新闻）。
+- **问题**：`config.yaml.example` 中 `sort_by: xgboost`，XGBoost Rank IC 为负，导致生产实际选出的是差股。
+- **行动**：
+  1. 将 `config.yaml.example` 中 `signals.sort_by` 改为 `composite_extended`（与回测报告对齐）。
+  2. 在 `run_backtest_eval.py` 与 `daily_run.py` 顶部注释中明确「默认排序键」，防止日后静默修改。
+  3. XGBoost 路径待 P3 重训验收后再恢复。
+- **文件**：`config.yaml.example`、`scripts/run_backtest_eval.py`、`scripts/daily_run.py`
 
----
+#### P0-B：Walk-Forward 报告增加中位数/分位聚合（0.5～1 天）
 
-## 七、回测与评估
+- **问题**：当前滚动 WF 报告仅输出均值，Fold 10 将均值拉至不可信区间。
+- **行动**：在 `src/backtest/walk_forward.py` 的聚合逻辑中，额外计算并输出 `median_ann_return`、`p25_ann_return`、`p75_ann_return`；`run_backtest_eval.py` 的 Markdown 报告同步展示。
+- **文件**：`src/backtest/walk_forward.py`、`scripts/run_backtest_eval.py`
 
-### 7.1 Walk-forward 窗口需延长
+#### P0-C：行业持仓上限约束（2～3 天）
 
-当前短测试窗导致年化波动极大，单个 fold 的结论不具统计显著性。建议测试窗至少 **63 个交易日（约 3 个月）**，训练窗 **252 天以上**。
+- **问题**：无行业约束导致集中暴露（如 2022/2025 偏弱年份可能对应某行业系统性调整）。
+- **行动**：
+  1. 在 `src/portfolio/weights.py` 的 `build_topk_weights` 中增加 `industry_cap` 参数（如每行业最多持 N 只或 X%），按 AkShare 行业分类实现。
+  2. 行业分类数据从 DuckDB `a_share_daily` 或单独 `a_share_info` 表读取（若无则补充一次性抓取脚本）。
+  3. 在回测引擎中传递行业映射，验证约束前后回撤差异。
+- **文件**：`src/portfolio/weights.py`、`src/backtest/engine.py`、可能需新增 `scripts/fetch_industry.py`
 
-**修复状态（已完成）**：
+#### P0-D：Regime 对照实验（1 天）
 
-- `scripts/run_backtest_eval.py` 的 rolling walk-forward 已固定使用 `train_days=252 / test_days=63 / step_days=63`。
-- 时间切片验证 `contiguous_time_splits` 也已提高最小训练窗约束（默认 `min_train_days=252`），避免短窗误判。
-
-### 7.2 缺少基准对比
-
-回测结果未与沪深300 / 中证500 / 等权指数做**超额收益（Alpha）** 对比，无法判断系统贡献的真实价值。
-
-**修复状态（已完成）**：
-
-- `scripts/run_backtest_eval.py` 新增多基准对比：`510300(沪深300ETF)`、`510500(中证500ETF)` 与全市场等权基准。
-- 报告输出与 JSON 均新增 `benchmarks` 与 `excess_vs_benchmarks`，可直接查看策略相对各基准的年化/夏普/回撤超额。
-
-### 7.3 滑点模型过于乐观
-
-`BacktestConfig` 的 `execution_mode` 使用 close-to-close，现实中尾盘集合竞价流动性有限，大单冲击不可忽视。建议补充 **VWAP 执行模式**。
-
-**修复状态（已完成）**：
-
-- `src/backtest/engine.py` 的 `BacktestConfig.execution_mode` 已支持 `vwap`。
-- `vwap` 模式在调仓日按换手额外扣减执行冲击（可配置 `vwap_slippage_bps_per_side`、`vwap_impact_bps`），用于近似模拟 VWAP 成交与冲击成本。
-- `scripts/run_backtest_eval.py` 已支持从配置读取并使用 `vwap` 执行模式，回测报告会记录实际执行口径。
+- **问题**：`regime` 模块已接入但净贡献未知，可能增加不必要方差。
+- **行动**：在 `run_backtest_eval.py` 中增加 `--no-regime` 选项，输出关闭 regime 调权的对照结果；纳入报告第四节。
+- **文件**：`scripts/run_backtest_eval.py`、`src/market/regime.py`
 
 ---
 
-## 八、工程质量
+### P1 — 因子库扩展（预期 alpha 增量最大）
 
-| 问题 | 当前状态 | 建议 |
-|------|----------|------|
-| CI/CD | 已接入自动化测试流水线 | GitHub Actions 在 push / PR 触发 `pytest` |
-| 日志 | 已支持结构化日志 | 默认 JSON 行日志，可配置回退 text |
-| `data/` 纳入 git | 已明确排除 | `.gitignore` 已排除 `data/` 与 DuckDB 产物 |
-| 测试覆盖 | 已补齐端到端链路 | 新增 fetch → factor → rank → backtest 集成测试 |
+#### P1-A：基本面因子最小集（1～2 周）
 
-**修复状态（已完成）**：
+当前因子全为技术面，基本面/质量因子可提供与短期动量低相关的独立 alpha 源。
 
-- 新增 `.github/workflows/pytest.yml`，每次 push / PR 自动执行 `pytest`。
-- `src/logging_config.py` 新增 JSON line formatter，入口脚本支持 `logging.format` 配置（`json` / `text`）。
-- `config.yaml.example` 新增 `logging.format` 示例配置，默认 `json`。
-- `tests/test_e2e_pipeline.py` 新增离线 e2e 集成测试，覆盖 fetch → factor → rank → backtest 主链路。
-- `.gitignore` 已明确排除 `data/`、`*.duckdb`、`*.duckdb.wal`，避免大文件入库。
+- **计划引入**（严格按公告日对齐，不允许前视偏差）：
+  - 估值：市盈率（TTM）、市净率、EV/EBITDA
+  - 盈利质量：ROE（TTM）、净利润同比增速、毛利率变化
+  - 资产负债：资产负债率变化、经营现金流/净利润
+- **数据路径**：AkShare 已支持财务数据接口；新增 `src/data_fetcher/fundamental_client.py`，数据入 DuckDB `a_share_fundamental` 表，按季度公告日 join 日线表（point-in-time 对齐）。
+- **因子计算**：在 `src/features/` 下新增 `fundamental_factors.py`，实现截面 winsorize、z-score 与市值中性化（复用 `src/features/standardize.py`、`neutralize.py`）。
+- **接入**：在 `config.yaml.example` 的 `signals.composite_extended` 节增加基本面因子权重，初始以均匀小权重（3%～5%）试水；同步更新 `src/models/rank_score.py` 中 `composite_extended_linear_score` 的可接收因子集。
+- **验收**：新因子在因子评估脚本中 Rank IC 均值 > 0.02，且加入前后全样本夏普有正向贡献。
+
+#### P1-B：资金流与情绪因子（可选，按数据可得性）
+
+- 北向资金净流入（AkShare 有接口）
+- 融资买入额占成交比
+- 分析师一致预期 EPS 变化速度
+
+以上因子数据频率与可回溯深度需先评估，再决定是否纳入回测区间（2021 年以前可能缺失）。
+
+#### P1-C：LLM 情绪因子正式闭环（P1 后期）
+
+- 在 `src/llm/attention_scanner.py` 输出的关注度分数基础上，计算截面标准化的「LLM 情绪 z 分」。
+- 接入 `composite_extended` 权重（初始权重 ≤ 5%），通过回测验证净贡献后决定是否扩大。
+- 需解决历史回填问题：LLM 情绪因子没有历史数据，初期只能做前向跟踪，不能用于历史回测，需单独说明。
 
 ---
 
-## 优先级路线图
+### P2 — 权重与组合优化（利用已有实现）
 
-```
-P0（本周）:   修复 Dockerfile COPY config.yaml / 补全 requirements
-P1（本月）:   XGBoost bundle IC 方向核查 + 中性化默认启用
-P2（Q2）:     因子 IC 监控 + 模型版本管理 + walk-forward 窗口调整
-P3（Q3）:     LLM 情绪因子集成 + Regime 动态化 + 行业协方差模型
-```
+#### P2-A：滚动 ICIR 加权替代静态权重（1～2 周）
+
+**代码已就绪，需实现「闭环」**：
+
+- `src/features/ic_monitor.py` 已实现 `ICMonitor.rolling_ic_stats()`，可输出每因子近期 ICIR。
+- 当前缺少的逻辑：
+  1. 在 `daily_run.py` 或独立的 `scripts/update_ic_weights.py` 中，读取 `ic_monitor.json` → 计算滚动 ICIR → 导出 `ic_weights.json`。
+  2. 在 `src/models/rank_score.py` 的 `composite_extended_linear_score` 函数中增加 `weights_override` 参数，优先使用 `ic_weights.json` 而非 `config.yaml` 静态权重。
+  3. 在 `run_backtest_eval.py` 中实现历史 ICIR 滚动权重的回测路径（向量化实现，避免前视偏差）。
+- **衰减方案**：ICIR 加权 + 指数衰减（近期 IC 权重更高）+ clip 防止单因子权重过大（上限 25%）。
+
+#### P2-B：组合优化层接入（1～2 周）
+
+**优化器已就绪，需接入主链路**：
+
+- `src/portfolio/optimizer.py`（`optimize_risk_parity`、`optimize_min_variance`）+ `src/portfolio/covariance.py`（Ledoit-Wolf）均已实现并通过单元测试。
+- 当前 `build_topk_weights` 固定等权，需在其内部或调用处增加可选的优化权重路径：
+  ```
+  if portfolio_method == "equal_weight":
+      weights = equal_weight(topk_stocks)
+  elif portfolio_method in ("risk_parity", "min_variance"):
+      Sigma = estimate_covariance(topk_returns, method="ledoit_wolf")
+      weights = weights_from_cov_method(portfolio_method, Sigma)
+  ```
+- 在 `config.yaml.example` 新增 `portfolio.method`（默认 `equal_weight`，可选 `risk_parity`、`min_variance`）。
+- **验收指标**：风险平价 vs 等权的全样本回撤对比，以及含成本夏普。
+
+#### P2-C：Top-K 与调仓频率网格搜索（3～5 天）
+
+- 参数网格：`top_k` ∈ {30, 40, 50, 60}、`max_turnover` ∈ {0.3, 0.4, 0.5}、调仓频率 ∈ {月末, 双周}。
+- 目标函数：含成本夏普（主）+ Calmar 比率（副），**禁止使用裸收益**。
+- 在 `run_backtest_eval.py` 中新增 `--grid-search` 选项，结果导出为 CSV，避免手动逐次运行。
 
 ---
 
-*文档生成自系统优化分析；随实现进度可在此文件勾选或追加条目。*
+### P3 — 机器学习重训与统一评价
+
+#### P3-A：XGBoost 根因排查与重训（1～2 周）
+
+- **排查清单**（针对 Rank IC 为负）：
+  1. 标签泄露：确认 `train_xgboost.py` 中标签 `forward_ret` 的对齐方式，检查是否使用了 T+1 当天的收盘价而不是真正的未来价格。
+  2. 特征标准化方向：确认 `momentum`/`rsi` 等反转因子在树模型特征中是否需要翻转符号（线性模型用负权重，树模型直接处理单调关系）。
+  3. 交叉验证方式：必须使用**严格时间序列切分**（`TimeSeriesSplit`），禁止 k-fold。
+  4. 标签设计：当前标签见 `config.yaml.example` 中 `labels.horizons: [5, 10, 20]`，`fusion: rank_fusion`；确认 rank 是在**截面**还是全样本计算。
+- **重训规范**：
+  - `scripts/train/train_xgboost.py` 修复后，验证集 Rank IC > 0.03 才允许写入 `bundle_dir`。
+  - 可选对照：同期训练 LightGBM ranker（`objective='rank:pairwise'`），对比 Rank IC 与分层收益。
+- **文件**：`scripts/train/train_xgboost.py`、`src/models/inference.py`
+
+#### P3-B：深度序列模型现状评估（3～5 天）
+
+- `scripts/train/train_deep_sequence.py` 已实现，`src/backtest/` 中 `deep_sequence` 路径存在，但生产回测未启用。
+- 评估步骤：拉取最新 `data/models/deep_sequence_latest/` 工件，在独立测试集上计算 Rank IC；若 IC > 0 则接入对照回测，否则先修复。
+- 序列模型的优势在于**捕捉时序模式**，与截面线性因子互补；但推理延迟和 Jetson GPU 资源需提前评估。
+
+#### P3-C：生产一致性校验（持续）
+
+- 每次模型更新后，在 `daily_run.py` 的 `eval` 子命令结果中核对：推荐 CSV 的 Rank IC（推荐当日 vs 后 N 日收益的截面相关）。
+- `src/cli/eval_recommend.py` 已实现此逻辑，需定期运行并写入 `data/experiments/experiments.jsonl`。
+
+---
+
+### P4 — 验证体系与工程运营
+
+#### P4-A：Walk-Forward 聚合增强（已列 P0-B，此为深化）
+
+- 延长单折测试窗：在 `run_backtest_eval.py` 中支持 `--wf-test-window` 参数，默认保留 63 日（当前），可配置为 126 日（半年）减少单折噪声。
+- 分段 WF 有效折数过少（当前 3 折），可通过调整 `n_splits` 或改用 `expanding_window=True` 的扩张窗方案增加样本量。
+
+#### P4-B：配置治理（持续）
+
+- 明确 `config.yaml`（生产）与回测默认的差异点，在 `config.yaml.example` 中加注释说明每个关键字段对回测结果的影响。
+- 关键对照字段：`signals.sort_by`、`portfolio.method`、`regime.enabled`、`backtest.eval_rebalance_rule`、`prefilter.*`。
+- 考虑新增 `config.yaml.backtest` 作为回测专用配置快照，与生产 `config.yaml` 解耦。
+
+#### P4-C：实验记录规范化（持续）
+
+- `data/experiments/experiments.jsonl` 已存在，但写入路径不统一（部分脚本直接写，部分不写）。
+- 统一：每次 `run_backtest_eval.py` 运行结果（参数 + 关键指标）自动追加到 `experiments.jsonl`，便于横向对比。
+- 可考虑在 `src/models/experiment_recorder.py` 中增加 `append_backtest_result()` 工厂函数。
+
+---
+
+## 5. 里程碑与时间顺序
+
+| 阶段 | 关键任务 | 涉及文件 | 验收产出 |
+|------|----------|----------|----------|
+| **M1**（1 周内） | P0-A 配置统一 + P0-B WF 中位数 + P0-D Regime 对照 | `config.yaml.example`、`walk_forward.py`、`run_backtest_eval.py` | 回测报告更新，WF 中位数明确，生产默认使用 `composite_extended` |
+| **M2**（2～3 周） | P0-C 行业上限约束 + P2-C Top-K 网格搜索 | `portfolio/weights.py`、`backtest/engine.py`、`run_backtest_eval.py` | 行业约束前后回撤对比，网格搜索最优参数表 |
+| **M3**（3～5 周） | P1-A 基本面因子最小集入库 + P2-A ICIR 加权闭环 | `data_fetcher/fundamental_client.py`、`features/fundamental_factors.py`、`ic_monitor.py` + `rank_score.py` | 新因子 Rank IC > 0.02，ICIR 权重时间序列可审计，全样本含基本面对比实验 |
+| **M4**（5～7 周） | P2-B 风险平价接入 + P3-A XGBoost 重训验收 | `portfolio/optimizer.py`（已实现）、`train_xgboost.py`、`inference.py` | 风险平价 vs 等权回撤对比，XGBoost 验证集 Rank IC > 0.03 |
+| **M5**（7～10 周） | P3-B 深度序列评估 + P1-B 资金流因子（可选）+ P1-C LLM 因子尝试 | `train_deep_sequence.py`、LLM 模块 | 模型横向 Rank IC 对比表，推荐默认配置更新 |
+
+具体日历由资源与数据准备情况调整；每一里程碑结束应保留**可复现命令**（见 `backtest_report.md` 附录），并在 `data/experiments/experiments.jsonl` 中记录关键指标快照。
+
+---
+
+## 6. 风险与依赖
+
+| 风险 | 影响 | 缓解措施 |
+|------|------|----------|
+| **基本面数据前视偏差** | 使用未来信息导致虚高回测 | AkShare 财务接口需核实「公告日」字段是否为真实披露日；回测 join 必须使用 `merge_asof` 按公告日对齐 |
+| **XGBoost 方向仍错误** | 生产持续选差股 | M1 前先禁用 xgboost 路径（P0-A）；M4 重训后独立验证，不混入线性策略报告 |
+| **Regime 引入额外方差** | 状态切换时机错误放大损失 | M1 期的对照实验（P0-D）量化净贡献，若负贡献则默认关闭 |
+| **组合优化数值不稳定** | 协方差估计在股票数多时可能奇异 | `covariance.py` 已用 Ledoit-Wolf 收缩；优化器有 `bounds=(1e-8, 1.0)` 下界保护；需在至少 3 年历史数据下测试 |
+| **过拟合风险（因子增多）** | 样本内调参造成 OOS 失效 | 因子引入必须先做 OOS 评估（分段 WF 的测试期，或单独留出 2024 年后的数据作为最终检验集）；禁止仅用全样本调参 |
+| **计算成本上升** | GPU（Jetson）资源瓶颈 | 基本面因子为日频 join，计算量小；协方差计算在 Top-K 子集上（≤ 60 只），可接受；深度模型推理延迟需提前在 Jetson 上实测 |
+| **数据质量**（ST、停牌、复权） | 因子计算与回测收益对不上 | `src/data_fetcher/data_quality.py` 已实现落库检查；基本面数据需额外的单测（如对比已知财报数字）；ST 过滤在 `prefilter` 中已部分实现 |
+
+---
+
+## 7. 相关文件索引
+
+### 核心流水线
+
+| 文件 | 职责 |
+|------|------|
+| `scripts/daily_run.py` | 日更主入口：拉数 → 因子 → 排序 → 权重 → 推荐 CSV |
+| `scripts/run_backtest_eval.py` | 回测评估入口（本计划验收基准） |
+| `src/settings.py` | 配置加载（`QUANT_CONFIG` → `config.yaml` → `config.yaml.example`） |
+| `config.yaml.example` | 全局配置模板，包含全部可调参数 |
+
+### 因子层
+
+| 文件 | 职责 |
+|------|------|
+| `src/features/tensor_alpha.py` | GPU 张量因子（动量、RSI、ATR 等） |
+| `src/features/tensor_base_factors.py` | 扩展基础因子 bundle |
+| `src/features/intraday_proxy_factors.py` | 日内 K 线结构代理因子 |
+| `src/features/factor_eval.py` | IC/RankIC/分层收益评估工具 |
+| `src/features/ic_monitor.py` | 滚动 IC 持久化监控与告警（**已实现，待接入权重闭环**） |
+| `src/features/standardize.py`、`neutralize.py`、`orthogonalize.py` | 截面标准化、中性化、正交化 |
+
+### 信号与模型层
+
+| 文件 | 职责 |
+|------|------|
+| `src/models/rank_score.py` | `composite_extended_linear_score`；排序键计算 |
+| `src/models/inference.py` | XGBoost/深度序列推理，含 `rank_ic_guard` |
+| `scripts/train/train_xgboost.py` | XGBoost 截面排序训练（**待修复 Rank IC 为负问题**） |
+| `scripts/train/train_deep_sequence.py` | 深度序列模型训练 |
+
+### 市场状态
+
+| 文件 | 职责 |
+|------|------|
+| `src/market/regime.py` | Bull/Bear/Oscillation 分类 + 因子权重动态调整 |
+| `src/market/tradability.py` | 涨跌停、停牌过滤 |
+
+### 组合与回测层
+
+| 文件 | 职责 |
+|------|------|
+| `src/portfolio/weights.py` | `build_topk_weights`（**待添加行业约束**） |
+| `src/portfolio/optimizer.py` | ERC / 最小方差 / 均值-方差优化（**已实现，待接入主链路**） |
+| `src/portfolio/covariance.py` | Ledoit-Wolf 协方差收缩（**已实现**） |
+| `src/backtest/engine.py` | 向量回测引擎，支持 `close_to_close` / `tplus1_open` |
+| `src/backtest/walk_forward.py` | Walk-Forward 验证（**待增加中位数聚合**） |
+| `src/backtest/portfolio_eval.py` | 组合绩效评估 |
+
+### 数据层
+
+| 文件 | 职责 |
+|------|------|
+| `src/data_fetcher/akshare_client.py` | AkShare 日线拉取与 DuckDB 写入 |
+| `src/data_fetcher/akshare_resilience.py` | 超时/重试/缓存韧性层 |
+| `src/data_fetcher/db_manager.py` | DuckDB 管理 |
+| `src/data_fetcher/data_quality.py` | 落库前质量检查 |
+
+### 文档与结果
+
+| 文件 | 职责 |
+|------|------|
+| `docs/backtest_report.md` | 最新回测报告（含基线指标、WF 结果、根因诊断） |
+| `docs/backtest_report_data.json` | 回测结果机器可读快照 |
+| `data/experiments/experiments.jsonl` | 实验记录（参数 + 指标，需规范化写入） |
+| `data/models/xgboost_panel_*/bundle.json` | XGBoost 工件（当前 Rank IC 为负，待重训） |
+
+---
+
+*本计划随回测与实现进度更新；重大变更请同步修订本节日期与里程碑状态。*
