@@ -29,7 +29,7 @@ Usage
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -110,8 +110,6 @@ def symmetric_orthogonalize(
         X_filled[~np.isfinite(X_filled)] = 0.0
 
     # 因子相关矩阵 C = X'X / n（用有限样本估计）
-    valid = np.isfinite(X_s)
-    n_valid = np.maximum(valid.sum(axis=0), 1)
     # 使用 filled 矩阵计算
     C = X_filled.T @ X_filled
     # 归一化为相关矩阵（避免方差量纲影响）

@@ -10,21 +10,34 @@ import numpy as np
 import pandas as pd
 
 FACTOR_LABELS: Dict[str, str] = {
+    # 基础动量 / 均值回归
     "momentum": "动量",
     "rsi": "RSI",
-    "atr": "ATR",
-    "realized_vol": "已实现波动",
-    "turnover_roll_mean": "换手（滚动均值）",
-    "vol_ret_corr": "量价相关性",
     "short_reversal": "短期反转",
-    "vol_to_turnover": "量/换手比",
-    "volume_skew_log": "成交量偏度（对数）",
+    "recent_return": "近3日涨幅",
     "bias_short": "短期乖离率",
     "bias_long": "长期乖离率",
-    "max_single_day_drop": "最大单日跌幅",
-    "recent_return": "近3日涨幅",
     "price_position": "价格位置",
+    # 波动 / 风险
+    "atr": "ATR",
+    "realized_vol": "已实现波动",
+    "max_single_day_drop": "最大单日跌幅",
+    # 流动性 / 量
+    "turnover_roll_mean": "换手（滚动均值）",
+    "vol_ret_corr": "量价相关性",
+    "vol_to_turnover": "量/换手比",
+    "volume_skew_log": "成交量偏度（对数）",
+    # 规模
     "log_market_cap": "对数流通市值",
+    # K 线结构高频降频代理因子（intraday_proxy_factors）
+    "intraday_range": "日内振幅",
+    "upper_shadow_ratio": "上影线比率",
+    "lower_shadow_ratio": "下影线比率",
+    "close_open_return": "日内涨跌",
+    "overnight_gap": "隔夜跳空",
+    "tail_strength": "尾盘强度",
+    "volume_price_trend": "量价趋势",
+    "intraday_range_skew": "振幅偏度",
 }
 
 

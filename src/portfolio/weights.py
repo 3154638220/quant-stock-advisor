@@ -127,11 +127,14 @@ def apply_turnover_constraint(
     w_new: np.ndarray,
     w_old_aligned: np.ndarray,
     max_turnover: float,
+    turnover_cost_coeffs: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     在总权重均为 1 的长仅向量上，将换手约束为
     ``0.5 * sum(|w - w_old|) <= max_turnover``（单边换手为 L1/2）。
 
+    若传入 ``turnover_cost_coeffs``，则约束变为
+    ``0.5 * sum(coeff_i * |w_i - w_old_i|) <= max_turnover``，用于近似交易冲击成本。
     若 ``max_turnover >= 1`` 视为不限制。
     """
     w = np.asarray(w_new, dtype=np.float64).ravel().copy()
@@ -141,11 +144,45 @@ def apply_turnover_constraint(
     max_turnover = float(max(max_turnover, 0.0))
     if max_turnover >= 1.0 - 1e-12:
         return w
-    tv = 0.5 * float(np.sum(np.abs(w - o)))
+    if turnover_cost_coeffs is None:
+        tv = 0.5 * float(np.sum(np.abs(w - o)))
+    else:
+        c = np.asarray(turnover_cost_coeffs, dtype=np.float64).ravel().copy()
+        if c.size != w.size:
+            raise ValueError("turnover_cost_coeffs 长度须与 w_new 一致")
+        c = np.where(np.isfinite(c) & (c > 0), c, 1.0)
+        tv = 0.5 * float(np.sum(c * np.abs(w - o)))
     if tv <= max_turnover + 1e-12 or tv <= 0:
         return w
     lam = max_turnover / tv
     return o + lam * (w - o)
+
+
+def turnover_cost_coeffs_from_size(
+    size_values: np.ndarray,
+    *,
+    small_cap_coeff: float = 1.6,
+    mid_cap_coeff: float = 1.0,
+    large_cap_coeff: float = 0.7,
+    q_small: float = 0.33,
+    q_large: float = 0.67,
+) -> np.ndarray:
+    """按市值分档构造换手成本系数（小市值成本更高）。"""
+    x = np.asarray(size_values, dtype=np.float64).ravel()
+    n = x.size
+    if n == 0:
+        return x
+    coeff = np.ones(n, dtype=np.float64) * float(mid_cap_coeff)
+    fin = np.isfinite(x)
+    if int(fin.sum()) < 2:
+        return coeff
+    v = x[fin]
+    q1 = float(np.quantile(v, float(q_small)))
+    q2 = float(np.quantile(v, float(q_large)))
+    coeff[fin & (x <= q1)] = float(small_cap_coeff)
+    coeff[fin & (x >= q2)] = float(large_cap_coeff)
+    coeff = np.where(np.isfinite(coeff) & (coeff > 0), coeff, 1.0)
+    return coeff
 
 
 def build_portfolio_weights(
@@ -161,6 +198,7 @@ def build_portfolio_weights(
     cov_matrix: Optional[np.ndarray] = None,
     expected_returns: Optional[np.ndarray] = None,
     risk_aversion: float = 1.0,
+    turnover_cost_model: Optional[Mapping[str, Any]] = None,
 ) -> np.ndarray:
     """
     返回与 ``df`` 行对齐、和为 1 的长仅权重向量（若无可投则全 0）。
@@ -225,7 +263,26 @@ def build_portfolio_weights(
         w = redistribute_individual_cap(w, float(max_single_weight))
 
     if prev_weights_aligned is not None:
-        w = apply_turnover_constraint(w, prev_weights_aligned, max_turnover)
+        coeffs = None
+        m = dict(turnover_cost_model or {})
+        if bool(m.get("enabled", False)):
+            size_col = str(m.get("size_col", "log_market_cap"))
+            if size_col in df.columns:
+                size_vals = pd.to_numeric(df[size_col], errors="coerce").to_numpy(dtype=np.float64)
+                coeffs = turnover_cost_coeffs_from_size(
+                    size_vals,
+                    small_cap_coeff=float(m.get("small_cap_coeff", 1.6)),
+                    mid_cap_coeff=float(m.get("mid_cap_coeff", 1.0)),
+                    large_cap_coeff=float(m.get("large_cap_coeff", 0.7)),
+                    q_small=float(m.get("q_small", 0.33)),
+                    q_large=float(m.get("q_large", 0.67)),
+                )
+        w = apply_turnover_constraint(
+            w,
+            prev_weights_aligned,
+            max_turnover,
+            turnover_cost_coeffs=coeffs,
+        )
     s = w.sum()
     if s > 0:
         w /= s
@@ -269,6 +326,7 @@ def portfolio_config_from_mapping(sig: Mapping[str, Any]) -> Dict[str, Any]:
     ra = p.get("risk_aversion", 1.0)
     cr = p.get("cov_ridge", 1e-6)
     cs = p.get("cov_shrinkage", "ledoit_wolf")
+    tcm = p.get("turnover_cost_model") or {}
     return {
         "weight_method": str(p.get("weight_method", "score")).lower(),
         "score_col": str(p.get("score_col", "auto")),
@@ -280,4 +338,14 @@ def portfolio_config_from_mapping(sig: Mapping[str, Any]) -> Dict[str, Any]:
         "risk_aversion": float(ra) if ra is not None else 1.0,
         "cov_ridge": float(cr) if cr is not None else 1e-6,
         "cov_shrinkage": str(cs).lower() if cs is not None else "ledoit_wolf",
+        "cov_ewma_halflife": float(p.get("cov_ewma_halflife", 20.0)),
+        "turnover_cost_model": {
+            "enabled": bool((tcm or {}).get("enabled", False)),
+            "size_col": str((tcm or {}).get("size_col", "log_market_cap")),
+            "small_cap_coeff": float((tcm or {}).get("small_cap_coeff", 1.6)),
+            "mid_cap_coeff": float((tcm or {}).get("mid_cap_coeff", 1.0)),
+            "large_cap_coeff": float((tcm or {}).get("large_cap_coeff", 0.7)),
+            "q_small": float((tcm or {}).get("q_small", 0.33)),
+            "q_large": float((tcm or {}).get("q_large", 0.67)),
+        },
     }

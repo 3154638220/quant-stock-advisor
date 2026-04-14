@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Optional
 
 import pandas as pd
 
+from ..data_fetcher.akshare_resilience import fetch_dataframe_with_cache, resolve_cache_ttl_seconds
+from ..settings import load_config
 from .client import OllamaClient
 from .prompts import (
     MARKET_MACRO_SYSTEM,
@@ -87,11 +87,16 @@ class NewsAnalyzer:
         max_news_per_stock: int = 10,
         max_market_news: int = 20,
         sleep_between_stocks: float = 1.0,
+        config: dict | None = None,
     ) -> None:
         self.client = client
         self.max_news_per_stock = max_news_per_stock
         self.max_market_news = max_market_news
         self.sleep_between_stocks = sleep_between_stocks
+        self.config = config or load_config()
+        ak_cfg = self.config.get("akshare", {}) if isinstance(self.config, dict) else {}
+        self._akshare_retries = max(1, int(ak_cfg.get("api_call_retries", 2)))
+        self._akshare_timeout = float(ak_cfg.get("request_timeout_sec", 10.0))
 
     # ------------------------------------------------------------------
     # 数据拉取
@@ -101,7 +106,16 @@ class NewsAnalyzer:
         """从东方财富拉取个股最新新闻，返回 DataFrame；失败时返回空表。"""
         try:
             import akshare as ak
-            df = ak.stock_news_em(symbol=symbol)
+
+            df = fetch_dataframe_with_cache(
+                [("stock_news_em", lambda: ak.stock_news_em(symbol=symbol))],
+                cache_key=f"news_analyzer_stock_news_{symbol}",
+                cache_ttl_sec=resolve_cache_ttl_seconds("news", self.config),
+                retries=self._akshare_retries,
+                timeout_sec=self._akshare_timeout,
+                cfg=self.config,
+                accept_empty=True,
+            )
             return df.head(self.max_news_per_stock) if not df.empty else df
         except Exception as exc:
             _LOG.warning("拉取 %s 个股新闻失败: %s", symbol, exc)
@@ -113,7 +127,15 @@ class NewsAnalyzer:
             import akshare as ak
             # trade_date 格式 YYYY-MM-DD → YYYYMMDD
             date_compact = trade_date.replace("-", "")
-            df = ak.news_economic_baidu(date=date_compact)
+            df = fetch_dataframe_with_cache(
+                [("news_economic_baidu", lambda: ak.news_economic_baidu(date=date_compact))],
+                cache_key=f"news_analyzer_market_news_{date_compact}",
+                cache_ttl_sec=resolve_cache_ttl_seconds("news", self.config),
+                retries=self._akshare_retries,
+                timeout_sec=self._akshare_timeout,
+                cfg=self.config,
+                accept_empty=True,
+            )
             return df.head(self.max_market_news) if not df.empty else df
         except Exception as exc:
             _LOG.warning("拉取市场快讯失败 (%s): %s", trade_date, exc)
@@ -124,7 +146,18 @@ class NewsAnalyzer:
         try:
             import akshare as ak
             date_compact = trade_date.replace("-", "")
-            df = ak.stock_notice_report(symbol=symbol, date=date_compact)
+            df = fetch_dataframe_with_cache(
+                [(
+                    "stock_notice_report",
+                    lambda: ak.stock_notice_report(symbol=symbol, date=date_compact),
+                )],
+                cache_key=f"news_analyzer_notice_{symbol}_{date_compact}",
+                cache_ttl_sec=resolve_cache_ttl_seconds("news", self.config),
+                retries=self._akshare_retries,
+                timeout_sec=self._akshare_timeout,
+                cfg=self.config,
+                accept_empty=True,
+            )
             return df.head(5) if not df.empty else df
         except Exception as exc:
             _LOG.debug("拉取 %s 公告失败 (可能当日无公告): %s", symbol, exc)

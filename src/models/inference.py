@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Union
 
@@ -13,6 +14,8 @@ from src.models.artifacts import load_normalizer_stats
 from src.models.baseline.train import load_baseline_bundle
 from src.models.timeseries.ohlcv_norm import normalize_ohlcv_anchor
 from src.models.timeseries.train import load_timeseries_bundle
+
+_LOG = logging.getLogger(__name__)
 
 
 def predict_baseline_bundle(
@@ -40,12 +43,34 @@ def predict_xgboost_tree(
     （与 ``rank_score.cross_section_z_columns`` 一致）。
     """
     root = Path(bundle_dir)
-    model, inf, _ = load_baseline_bundle(root)
+    model, inf, meta = load_baseline_bundle(root)
     missing = [c for c in inf.feature_columns if c not in df.columns]
     if missing:
         raise ValueError(f"推理缺少列（请先截面 z-score）: {missing[:8]}")
     X = df[inf.feature_columns].to_numpy(dtype=np.float64)
     pred = model.predict(X)
+    # 线上保护：若历史训练记录显示 Rank IC<0，自动翻转分数方向，避免 Top-K 系统性做反。
+    rank_ic = None
+    metrics = dict(getattr(meta, "metrics", {}) or {})
+    val_rank_ic = metrics.get("val_rank_ic")
+    train_rank_ic = metrics.get("train_rank_ic")
+    for candidate in (val_rank_ic, train_rank_ic):
+        if candidate is None:
+            continue
+        try:
+            val = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(val):
+            rank_ic = val
+            break
+    if rank_ic is not None and rank_ic < 0:
+        _LOG.warning(
+            "检测到模型 Rank IC<0（%.4f），已自动翻转 tree_score 方向: %s",
+            rank_ic,
+            root,
+        )
+        pred = -pred
     return np.asarray(pred, dtype=np.float64)
 
 

@@ -91,8 +91,9 @@ def summarize_portfolio_eval(
     exp_ret = None
     if wm in cov_methods:
         shr = str(pcfg.get("cov_shrinkage", "ledoit_wolf")).lower()
-        if shr not in ("ledoit_wolf", "sample"):
+        if shr not in ("ledoit_wolf", "sample", "ewma", "industry_factor"):
             shr = "ledoit_wolf"
+        ind_col_cfg = pcfg.get("industry_col")
         mu_arr, cov_mtx = mean_cov_returns_from_daily_long(
             daily_df,
             symbols,
@@ -100,6 +101,12 @@ def summarize_portfolio_eval(
             lookback_days=int(pcfg.get("cov_lookback_days", 60)),
             ridge=float(pcfg.get("cov_ridge", 1e-6)),
             shrinkage=shr,  # type: ignore[arg-type]
+            ewma_halflife=float(pcfg.get("cov_ewma_halflife", 20.0)),
+            industry_col=(
+                str(ind_col_cfg)
+                if shr == "industry_factor" and isinstance(ind_col_cfg, str) and ind_col_cfg.strip()
+                else None
+            ),
         )
         if wm == "mean_variance":
             exp_ret = mu_arr
@@ -116,6 +123,7 @@ def summarize_portfolio_eval(
         cov_matrix=cov_mtx,
         expected_returns=exp_ret,
         risk_aversion=float(pcfg.get("risk_aversion", 1.0)),
+        turnover_cost_model=pcfg.get("turnover_cost_model"),
     )
     df["weight"] = w
 

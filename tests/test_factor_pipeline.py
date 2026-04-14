@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 import torch
 
 from src.features.factor_eval import (
@@ -16,7 +15,7 @@ from src.features.factor_eval import (
     rolling_ic_stability,
 )
 from src.features.neutralize import attach_neutralized_pair
-from src.features.standardize import factor_standardize_pipeline, zscore_by_date
+from src.features.standardize import factor_standardize_pipeline
 from src.features.tensor_base_factors import (
     atr_wilder,
     compute_base_factor_bundle,

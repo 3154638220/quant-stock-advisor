@@ -4,7 +4,7 @@
 
 用法（项目根目录）::
 
-    python models/train_baseline.py --csv data/train.csv --kind ridge \\
+    python scripts/train/train_baseline.py --csv data/train.csv --kind ridge \\
       --features f1,f2 --target y --seed 42
 
 输出：``data/models/baseline_<kind>_<run_id>/``（``bundle.json``、``inference_config.json``、``model.joblib``），
@@ -20,12 +20,12 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.models.data_slice import apply_time_symbol_filter, normalize_slice_spec
 from src.models.baseline.train import train_baseline
+from src.models.data_slice import apply_time_symbol_filter, normalize_slice_spec
 
 
 def _parse_features(s: str) -> list[str]:

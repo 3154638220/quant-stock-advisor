@@ -1,0 +1,204 @@
+paths:
+  duckdb_path: data/market.duckdb
+  results_dir: data/results
+  logs_dir: data/logs
+  models_dir: data/models
+  universe_cache_path: data/cache/universe_symbols.json
+  asof_trade_date: ""
+
+logging:
+  # 日志格式：json（结构化，便于 ELK / DuckDB 查询）或 text（人读）
+  format: json
+
+database:
+  table_daily: a_share_daily
+  table_audit: data_fetch_audit
+
+risk:
+  benchmark_symbol: "510300"
+
+gpu:
+  device: cuda
+  dtype: float32
+
+features:
+  lookback_trading_days: 160
+  min_valid_days: 30
+  momentum_window: 10
+  rsi_period: 14
+  atr_period: 14
+  vol_window: 20
+  turnover_window: 20
+  vp_corr_window: 20
+  reversal_window: 5
+  bias_window_short: 20
+  bias_window_long: 60
+  max_drop_window: 20
+  recent_return_window: 3
+  price_position_window: 250
+  tail_window: 10
+  vpt_window: 20
+  range_skew_window: 20
+  # 截面市值中性化（去除 A 股市值效应）：true=对打分因子做市值回归残差，false=关闭
+  neutralize: true
+
+signals:
+  top_k: 50
+  sort_by: xgboost
+  composite:
+    w_momentum: 0.65
+    w_rsi: 0.35
+    rsi_mode: level
+  composite_extended:
+    momentum: -0.15
+    rsi: -0.15
+    realized_vol: 0.03
+    turnover_roll_mean: 0.05
+    vol_ret_corr: 0.05
+    vol_to_turnover: 0.02
+    bias_short: -0.12
+    bias_long: -0.06
+    max_single_day_drop: 0.06
+    recent_return: -0.15
+    price_position: -0.04
+    intraday_range: -0.04
+    upper_shadow_ratio: -0.05
+    lower_shadow_ratio: 0.04
+    close_open_return: 0.04
+    tail_strength: 0.05
+  tree_model:
+    bundle_dir: data/models/xgboost_panel_latest
+    rsi_mode: level
+    keep_versions: 8
+    rank_ic_guard:
+      enabled: true
+      quantile: 0.25
+      min_history: 4
+    labels:
+      horizons: [5, 10, 20]
+      weights: [0.5, 0.3, 0.2]
+      fusion: rank_fusion
+    features:
+      - momentum
+      - rsi
+      - atr
+      - realized_vol
+      - turnover_roll_mean
+      - vol_ret_corr
+      - short_reversal
+      - vol_to_turnover
+      - volume_skew_log
+      - bias_short
+      - bias_long
+      - max_single_day_drop
+      - recent_return
+      - price_position
+      - log_market_cap
+      - intraday_range
+      - upper_shadow_ratio
+      - lower_shadow_ratio
+      - close_open_return
+      - overnight_gap
+      - tail_strength
+      - volume_price_trend
+      - intraday_range_skew
+  deep_sequence:
+    bundle_dir: data/models/deep_sequence_latest
+    seq_len: 30
+    map_location: cpu
+
+regime:
+  enabled: true
+  short_window: 20
+  long_window: 60
+  dynamic_weighting_enabled: true
+  dynamic_vol_target_ann: 0.22
+  dynamic_vol_scale: 0.08
+  dynamic_trend_scale: 0.05
+  dynamic_strength: 3.0
+
+portfolio:
+  weight_method: risk_parity
+  score_col: auto
+  max_single_weight: 0.05
+  max_industry_weight: null
+  industry_col: null
+  max_turnover: 0.5
+  cov_lookback_days: 60
+  cov_ridge: 1.0e-6
+  cov_shrinkage: ledoit_wolf
+  cov_ewma_halflife: 20
+  risk_aversion: 1.0
+  turnover_cost_model:
+    enabled: true
+    size_col: log_market_cap
+    small_cap_coeff: 1.6
+    mid_cap_coeff: 1.0
+    large_cap_coeff: 0.7
+    q_small: 0.33
+    q_large: 0.67
+
+backtest:
+  execution_mode: tplus1_open
+  eval_rebalance_rule: M
+  limit_up_mode: redistribute
+  # execution_mode=vwap 时生效：按换手额外扣减执行冲击
+  vwap_slippage_bps_per_side: 3.0
+  vwap_impact_bps: 8.0
+
+transaction_costs:
+  commission_buy_bps: 2.5
+  commission_sell_bps: 2.5
+  slippage_bps_per_side: 4.5
+  stamp_duty_sell_bps: 5.0
+
+prefilter:
+  enabled: true
+  limit_move_lookback: 5
+  limit_move_max: 2
+  turnover_low_pct: 0.10
+  turnover_high_pct: 0.98
+  price_position_high_pct: 0.90
+  price_position_lookback: 250
+
+orthogonalize:
+  enabled: false
+  method: symmetric
+
+label:
+  transform: truncate
+
+quality:
+  null_ratio_warn_threshold: 0.2
+  outlier_sigma_threshold: 8.0
+
+akshare:
+  adjust: qfq
+  request_timeout_sec: 10
+  retry_delay_sec: 2
+  max_fetch_retries: 3
+  sleep_between_symbols_sec: 0
+  fetch_workers: 4
+  daily_source_preference: sina
+  daily_allow_fallback: true
+  backfill_derived_after_fetch: false
+  cache_dir: data/cache/akshare
+  stale_cache_on_error: true
+  universe_prefer_akshare: false
+  universe_merge_duckdb_and_cache: true
+  universe_target_min_symbols: 4500
+  min_cached_universe_symbols: 1000
+
+llm:
+  model: qwen2.5:32b
+  timeout_sec: 400
+  base_url: http://localhost:11434
+  max_retries: 2
+  retry_delay_sec: 3
+  ollama_options:
+    num_gpu: -1
+    num_ctx: 8192
+  attention:
+    max_surge_stocks: 50
+    max_news_per_stock: 20
+    news_lookback_hours: 48

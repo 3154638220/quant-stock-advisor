@@ -74,16 +74,16 @@ def _ohlc_invalid_count(
     cols: tuple[str, ...],
 ) -> int:
     """违反 high/low 与 open/close 关系的行数（四价均非空时检查）。"""
-    o, h, l, c = cols[0], cols[1], cols[2], cols[3]
+    o, h, lo, c = cols[0], cols[1], cols[2], cols[3]
     q = f"""
     SELECT COUNT(*)::BIGINT
     FROM {table}
-    WHERE {o} IS NOT NULL AND {h} IS NOT NULL AND {l} IS NOT NULL AND {c} IS NOT NULL
+    WHERE {o} IS NOT NULL AND {h} IS NOT NULL AND {lo} IS NOT NULL AND {c} IS NOT NULL
       AND (
         {h} < GREATEST({o}, {c})
-        OR {l} > LEAST({o}, {c})
-        OR {h} < {l}
-        OR {o} <= 0 OR {h} <= 0 OR {l} <= 0 OR {c} <= 0
+        OR {lo} > LEAST({o}, {c})
+        OR {h} < {lo}
+        OR {o} <= 0 OR {h} <= 0 OR {lo} <= 0 OR {c} <= 0
       )
     """
     row = conn.execute(q).fetchone()
@@ -212,22 +212,21 @@ def validate_daily_frame(df: pd.DataFrame, *, cfg: Optional[QualityConfig] = Non
     if "symbol" in df.columns and "trade_date" in df.columns:
         dup = len(df) - len(df.drop_duplicates(subset=["symbol", "trade_date"]))
 
-    o, h, l, c = qc.ohlc_cols[0], qc.ohlc_cols[1], qc.ohlc_cols[2], qc.ohlc_cols[3]
-    sub = df[[o, h, l, c]].dropna(how="any")
+    o, h, lo, c = qc.ohlc_cols[0], qc.ohlc_cols[1], qc.ohlc_cols[2], qc.ohlc_cols[3]
+    sub = df[[o, h, lo, c]].dropna(how="any")
     ohlc_n = 0
     if not sub.empty:
         bad = (
             (sub[h] < sub[[o, c]].max(axis=1))
-            | (sub[l] > sub[[o, c]].min(axis=1))
-            | (sub[h] < sub[l])
+            | (sub[lo] > sub[[o, c]].min(axis=1))
+            | (sub[h] < sub[lo])
             | (sub[o] <= 0)
             | (sub[h] <= 0)
-            | (sub[l] <= 0)
+            | (sub[lo] <= 0)
             | (sub[c] <= 0)
         )
         ohlc_n = int(bad.sum())
 
-    n = len(df)
     null_v: List[str] = []
     price_cols = list(qc.ohlc_cols) + [
         x

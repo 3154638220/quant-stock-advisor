@@ -22,7 +22,6 @@ import torch
 
 from .tensor_base_factors import (
     _rolling_nan_mean,
-    _rolling_nan_std,
     _rowwise_skew,
     daily_returns_from_close,
 )

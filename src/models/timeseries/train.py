@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
-TimeseriesTargetTask = Literal["regression", "binary_up"]
-
 import numpy as np
 import pandas as pd
 import torch
@@ -37,6 +35,7 @@ from src.models.experiment import append_experiment_csv, append_experiment_jsonl
 from src.models.timeseries.lstm_tcn import ArchKind, build_timeseries_model
 from src.models.timeseries.ohlcv_norm import normalize_ohlcv_anchor
 
+TimeseriesTargetTask = Literal["regression", "binary_up"]
 TimeseriesKind = ArchKind
 
 NormalizeMode = Literal["none", "ohlcv_anchor"]
@@ -96,6 +95,63 @@ def build_panel_sequences(
     return X, y
 
 
+def build_panel_sequences_with_dates(
+    df: pd.DataFrame,
+    *,
+    feature_columns: Sequence[str],
+    target_column: str,
+    seq_len: int,
+    symbol_col: str = "symbol",
+    date_col: str = "trade_date",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """返回序列样本及其窗口末日（用于 walk-forward OOS 切分）。"""
+    need = {symbol_col, date_col, target_column, *feature_columns}
+    if not need.issubset(df.columns):
+        raise ValueError(f"缺少列: {need - set(df.columns)}")
+    sub = df[list(need)].copy()
+    sub[date_col] = pd.to_datetime(sub[date_col]).dt.normalize()
+    sub = sub.sort_values([symbol_col, date_col])
+
+    xs: List[np.ndarray] = []
+    ys: List[float] = []
+    ds: List[np.datetime64] = []
+    feats = list(feature_columns)
+    for _, g in sub.groupby(symbol_col, sort=False):
+        g = g.reset_index(drop=True)
+        if len(g) < seq_len:
+            continue
+        mat = g[feats].to_numpy(dtype=np.float64)
+        targ = g[target_column].to_numpy(dtype=np.float64)
+        dts = pd.to_datetime(g[date_col]).to_numpy(dtype="datetime64[ns]")
+        for t in range(seq_len - 1, len(g)):
+            window = mat[t - seq_len + 1 : t + 1]
+            yv = targ[t]
+            if not np.isfinite(window).all() or not np.isfinite(yv):
+                continue
+            xs.append(window)
+            ys.append(float(yv))
+            ds.append(np.datetime64(dts[t]))
+    if not xs:
+        raise ValueError("无有效序列样本（检查 seq_len、缺失值）")
+    return np.stack(xs, axis=0), np.asarray(ys, dtype=np.float64), np.asarray(ds, dtype="datetime64[ns]")
+
+
+def _mse(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.mean((a - b) ** 2))
+
+
+def _r2(a: np.ndarray, b: np.ndarray) -> float:
+    ss_res = float(np.sum((a - b) ** 2))
+    ss_tot = float(np.sum((a - np.mean(a)) ** 2))
+    return float(1.0 - ss_res / ss_tot) if ss_tot > 1e-18 else 0.0
+
+
+def _binary_acc(y_true: np.ndarray, logits: np.ndarray) -> float:
+    p = 1.0 / (1.0 + np.exp(-np.clip(logits, -50.0, 50.0)))
+    pb = (p >= 0.5).astype(np.float64)
+    return float(np.mean(pb == y_true))
+
+
 def _set_torch_deterministic(seed: int) -> torch.Generator:
     seed_everything(seed)
     torch.backends.cudnn.deterministic = True
@@ -107,6 +163,121 @@ def _set_torch_deterministic(seed: int) -> torch.Generator:
     except (RuntimeError, TypeError):
         pass
     return g
+
+
+def _walk_forward_oos_metrics(
+    df: pd.DataFrame,
+    *,
+    kind: TimeseriesKind,
+    feature_columns: Sequence[str],
+    target_column: str,
+    seq_len: int,
+    training_seed: int,
+    device: str,
+    hidden: int,
+    num_layers: int,
+    kernel: int,
+    num_blocks: int,
+    dropout: float,
+    d_model: int,
+    nhead: int,
+    num_encoder_layers: int,
+    dim_feedforward: int,
+    max_seq_len: int,
+    batch_size: int,
+    lr: float,
+    normalize_mode: NormalizeMode,
+    target_task: TimeseriesTargetTask,
+    train_days: int,
+    test_days: int,
+    step_days: int,
+    epochs: int,
+    min_folds: int,
+) -> Dict[str, float]:
+    X, y, end_dates = build_panel_sequences_with_dates(
+        df,
+        feature_columns=feature_columns,
+        target_column=target_column,
+        seq_len=seq_len,
+    )
+    if normalize_mode == "ohlcv_anchor":
+        X = normalize_ohlcv_anchor(X)
+    if str(target_task).lower() == "binary_up":
+        y = (y > 0.0).astype(np.float64)
+
+    unique_dates = np.sort(np.unique(end_dates))
+    if len(unique_dates) < (train_days + test_days):
+        return {}
+
+    use_binary = str(target_task).lower() == "binary_up"
+    metrics: List[float] = []
+    fold_cnt = 0
+    start = 0
+    while start + train_days + test_days <= len(unique_dates):
+        tr_start = unique_dates[start]
+        tr_end = unique_dates[start + train_days - 1]
+        te_start = unique_dates[start + train_days]
+        te_end = unique_dates[start + train_days + test_days - 1]
+
+        tr_m = (end_dates >= tr_start) & (end_dates <= tr_end)
+        te_m = (end_dates >= te_start) & (end_dates <= te_end)
+        if int(np.sum(tr_m)) < 16 or int(np.sum(te_m)) < 4:
+            start += step_days
+            continue
+
+        X_tr = torch.from_numpy(X[tr_m]).float()
+        y_tr = torch.from_numpy(y[tr_m]).float()
+        X_te = torch.from_numpy(X[te_m]).float()
+        y_te = torch.from_numpy(y[te_m]).float()
+        n_feat = X_tr.shape[2]
+
+        gen = _set_torch_deterministic(training_seed + fold_cnt + 1)
+        model = build_timeseries_model(
+            kind,
+            n_feat,
+            hidden=hidden,
+            num_layers=num_layers,
+            kernel=kernel,
+            num_blocks=num_blocks,
+            dropout=dropout,
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            dim_feedforward=dim_feedforward,
+            max_seq_len=max(seq_len, max_seq_len),
+        ).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        loss_fn: nn.Module = nn.BCEWithLogitsLoss() if use_binary else nn.MSELoss()
+        ds_tr = TensorDataset(X_tr, y_tr)
+        dl_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, generator=gen)
+        model.train()
+        for _ in range(max(1, int(epochs))):
+            for xb, yb in dl_tr:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                opt.zero_grad(set_to_none=True)
+                pred = model(xb)
+                loss = loss_fn(pred, yb)
+                loss.backward()
+                opt.step()
+        model.eval()
+        with torch.no_grad():
+            pred_te = model(X_te.to(device)).cpu().numpy()
+        y_te_np = y_te.numpy()
+        if use_binary:
+            metrics.append(_binary_acc(y_te_np, pred_te))
+        else:
+            metrics.append(_r2(y_te_np, pred_te))
+        fold_cnt += 1
+        start += step_days
+
+    if fold_cnt < int(min_folds):
+        return {}
+    metric_key = "wf_test_acc_mean" if use_binary else "wf_test_r2_mean"
+    return {
+        "wf_folds": float(fold_cnt),
+        metric_key: float(np.mean(metrics)),
+    }
 
 
 def train_timeseries(
@@ -137,6 +308,12 @@ def train_timeseries(
     max_seq_len: int = 128,
     time_val_split: bool = False,
     target_task: TimeseriesTargetTask = "regression",
+    walk_forward_oos: bool = False,
+    wf_train_days: int = 252,
+    wf_test_days: int = 63,
+    wf_step_days: int = 63,
+    wf_epochs: int = 8,
+    wf_min_folds: int = 2,
     slice_spec: Optional[dict] = None,
     out_root: Union[str, Path] = "data/models",
     log_experiments: bool = True,
@@ -262,19 +439,6 @@ def train_timeseries(
     y_tr_np = y_tr.numpy()
     y_te_np = y_te.numpy()
 
-    def _mse(a: np.ndarray, b: np.ndarray) -> float:
-        return float(np.mean((a - b) ** 2))
-
-    def _r2(a: np.ndarray, b: np.ndarray) -> float:
-        ss_res = float(np.sum((a - b) ** 2))
-        ss_tot = float(np.sum((a - np.mean(a)) ** 2))
-        return float(1.0 - ss_res / ss_tot) if ss_tot > 1e-18 else 0.0
-
-    def _binary_acc(y_true: np.ndarray, logits: np.ndarray) -> float:
-        p = 1.0 / (1.0 + np.exp(-np.clip(logits, -50.0, 50.0)))
-        pb = (p >= 0.5).astype(np.float64)
-        return float(np.mean(pb == y_true))
-
     if use_binary:
         metrics = {
             "train_acc": _binary_acc(y_tr_np, pred_tr),
@@ -289,6 +453,40 @@ def train_timeseries(
             "train_r2": _r2(y_tr_np, pred_tr),
             "test_r2": _r2(y_te_np, pred_te),
         }
+
+    if walk_forward_oos:
+        try:
+            wf = _walk_forward_oos_metrics(
+                df,
+                kind=kind,
+                feature_columns=feature_columns,
+                target_column=target_column,
+                seq_len=seq_len,
+                training_seed=training_seed,
+                device=dev,
+                hidden=hidden,
+                num_layers=num_layers,
+                kernel=kernel,
+                num_blocks=num_blocks,
+                dropout=dropout,
+                d_model=d_model,
+                nhead=nhead,
+                num_encoder_layers=num_encoder_layers,
+                dim_feedforward=dim_feedforward,
+                max_seq_len=max_seq_len,
+                batch_size=batch_size,
+                lr=lr,
+                normalize_mode=normalize_mode,
+                target_task=target_task,
+                train_days=wf_train_days,
+                test_days=wf_test_days,
+                step_days=wf_step_days,
+                epochs=wf_epochs,
+                min_folds=wf_min_folds,
+            )
+            metrics.update(wf)
+        except Exception:
+            metrics["wf_folds"] = 0.0
 
     run_id = uuid.uuid4().hex[:12]
     bundle_dir = Path(out_root) / f"ts_{kind}_{run_id}"
@@ -327,6 +525,8 @@ def train_timeseries(
             "epochs": epochs,
             "normalize_mode": normalize_mode,
             "target_task": str(target_task),
+            "time_val_split": bool(time_val_split),
+            "walk_forward_oos": bool(walk_forward_oos),
         },
     )
     save_inference_config(bundle_dir, inf)
@@ -352,6 +552,12 @@ def train_timeseries(
             "normalize_mode": normalize_mode,
             "time_val_split": time_val_split,
             "target_task": str(target_task),
+            "walk_forward_oos": bool(walk_forward_oos),
+            "wf_train_days": int(wf_train_days),
+            "wf_test_days": int(wf_test_days),
+            "wf_step_days": int(wf_step_days),
+            "wf_epochs": int(wf_epochs),
+            "wf_min_folds": int(wf_min_folds),
         },
     )
     save_bundle_metadata(bundle_dir, meta)

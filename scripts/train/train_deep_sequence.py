@@ -4,7 +4,7 @@
 
 用法（项目根目录，conda activate quant-system）::
 
-    python models/train_deep_sequence.py --config config.yaml --kind gru --max-symbols 400
+    python scripts/train/train_deep_sequence.py --config config.yaml --kind gru --max-symbols 400
 
 训练完成后将 ``signals.deep_sequence.bundle_dir`` 指向输出的 ``data/models/ts_*_*/``，
 ``signals.sort_by`` 设为 ``deep_sequence``，并与 ``deep_sequence.seq_len`` 对齐。
@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -55,6 +55,16 @@ def main() -> int:
         default=True,
         help="按交易日时间切分验证集（推荐）；关闭则随机切分",
     )
+    p.add_argument(
+        "--walk-forward-oos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="训练后执行 walk-forward OOS 校验（生产推荐开启）",
+    )
+    p.add_argument("--wf-train-days", type=int, default=252)
+    p.add_argument("--wf-test-days", type=int, default=63)
+    p.add_argument("--wf-step-days", type=int, default=63)
+    p.add_argument("--wf-epochs", type=int, default=8)
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -192,6 +202,11 @@ def main() -> int:
         max_seq_len=max(seq_len, 128),
         time_val_split=bool(args.time_val_split),
         target_task=tt,  # type: ignore[arg-type]
+        walk_forward_oos=bool(args.walk_forward_oos),
+        wf_train_days=int(args.wf_train_days),
+        wf_test_days=int(args.wf_test_days),
+        wf_step_days=int(args.wf_step_days),
+        wf_epochs=int(args.wf_epochs),
         slice_spec=spec,
         out_root=out_root,
         experiments_dir=exp_dir,

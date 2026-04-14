@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -237,3 +238,102 @@ def write_full_bundle(
         # 已写入目标目录时仅记录
         pass
     return root
+
+
+def list_bundle_dirs(
+    root_dir: Union[str, Path],
+    *,
+    prefix: str,
+) -> list[Path]:
+    root = Path(root_dir)
+    if not root.exists():
+        return []
+    out: list[Path] = []
+    for p in root.iterdir():
+        if p.is_dir() and p.name.startswith(prefix):
+            out.append(p)
+    out.sort(key=lambda x: x.stat().st_mtime)
+    return out
+
+
+def load_metric_from_bundle(
+    bundle_dir: Union[str, Path],
+    metric_key: str,
+) -> float:
+    meta = load_bundle_metadata(bundle_dir)
+    raw = (meta.metrics or {}).get(metric_key)
+    if raw is None:
+        return float("nan")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return float("nan")
+    return val if np.isfinite(val) else float("nan")
+
+
+def should_promote_by_quantile(
+    *,
+    candidate_metric: float,
+    history_metrics: list[float],
+    quantile: float = 0.25,
+    min_history: int = 4,
+) -> tuple[bool, float]:
+    vals = np.asarray([v for v in history_metrics if np.isfinite(v)], dtype=np.float64)
+    if not np.isfinite(candidate_metric):
+        return False, float("nan")
+    if len(vals) < int(min_history):
+        return True, float("nan")
+    qv = float(np.quantile(vals, float(quantile)))
+    return bool(candidate_metric >= qv), qv
+
+
+def publish_bundle_with_history(
+    *,
+    source_bundle_dir: Union[str, Path],
+    publish_dir: Union[str, Path],
+    history_root: Union[str, Path],
+    keep_recent: int = 8,
+) -> Dict[str, Any]:
+    src = Path(source_bundle_dir)
+    if not src.is_dir():
+        raise ValueError(f"source_bundle_dir 不存在: {src}")
+    pub = Path(publish_dir)
+    hist_root = Path(history_root)
+    hist_root.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    version_name = f"{stamp}_{src.name}"
+    version_dir = hist_root / version_name
+    shutil.copytree(src, version_dir)
+
+    previous_name = None
+    if pub.exists():
+        prev_meta = hist_root / "active_bundle.json"
+        if prev_meta.exists():
+            try:
+                previous_name = json.loads(prev_meta.read_text(encoding="utf-8")).get("active_version")
+            except Exception:
+                previous_name = None
+        if pub.is_dir():
+            shutil.rmtree(pub)
+        else:
+            pub.unlink()
+    shutil.copytree(src, pub)
+
+    meta = {
+        "active_version": version_name,
+        "previous_version": previous_name,
+        "source_bundle_dir": str(src),
+        "publish_dir": str(pub),
+        "history_root": str(hist_root),
+    }
+    (hist_root / "active_bundle.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    versions = sorted([p for p in hist_root.iterdir() if p.is_dir()], key=lambda x: x.name)
+    if keep_recent > 0 and len(versions) > keep_recent:
+        for p in versions[: len(versions) - keep_recent]:
+            shutil.rmtree(p, ignore_errors=True)
+    return meta

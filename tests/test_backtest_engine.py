@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.backtest.engine import BacktestConfig, build_open_to_open_returns, run_backtest
 from src.backtest.performance_panel import compute_performance_panel
@@ -67,6 +66,22 @@ def test_run_backtest_tplus1_open_execution_mode():
     res = run_backtest(ar, ws, config=BacktestConfig(execution_mode="tplus1_open"))
     assert res.meta.get("execution_mode") == "tplus1_open"
     assert np.isfinite(res.panel.sharpe_ratio)
+
+
+def test_run_backtest_vwap_execution_mode_penalizes_turnover():
+    ar, ws = _dummy_market(80)
+    base = run_backtest(ar, ws, config=BacktestConfig(execution_mode="close_to_close"))
+    vwap = run_backtest(
+        ar,
+        ws,
+        config=BacktestConfig(
+            execution_mode="vwap",
+            vwap_slippage_bps_per_side=5.0,
+            vwap_impact_bps=20.0,
+        ),
+    )
+    assert vwap.meta.get("execution_mode") == "vwap"
+    assert vwap.panel.total_return <= base.panel.total_return + 1e-12
 
 
 def test_run_backtest_equal_weight_no_cost():

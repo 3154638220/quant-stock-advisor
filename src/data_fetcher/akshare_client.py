@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import random
-import signal
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +13,9 @@ from typing import Callable, Iterable, List, Optional, Tuple, Union
 import akshare as ak
 import duckdb
 import pandas as pd
-import yaml
+
+from .akshare_resilience import call_with_timeout, install_akshare_requests_resilience
+from ..settings import load_config, project_root
 
 _LOG = logging.getLogger(__name__)
 
@@ -121,6 +121,15 @@ def _fill_derived_daily_fields(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def fill_derived_daily_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    对单标的日线 DataFrame 补全涨跌额、涨跌幅、振幅（与 AkShare 口径一致：相对前收）。
+
+    当源接口未返回或列为空时，用前收 ``close`` 与当日 OHLC 计算。
+    """
+    return _fill_derived_daily_fields(df)
+
+
 def _symbol_with_exchange_prefix(symbol: str) -> str:
     if symbol.startswith(("5", "6", "9")):
         return f"sh{symbol}"
@@ -145,15 +154,25 @@ def _fetch_a_share_daily_via_em(
     )
     if raw is None or raw.empty:
         return _empty_daily_frame()
-    return _standardize_daily_df(raw, symbol)
+    df = _fill_derived_daily_fields(_standardize_daily_df(raw, symbol))
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    return df[(df["trade_date"] >= start_ts) & (df["trade_date"] <= end_ts)].reset_index(drop=True)
 
 
 def _fetch_a_share_daily_via_sina(
     symbol: str,
     start_date: str,
     end_date: str,
+    *,
+    adjust: str = "qfq",
 ) -> pd.DataFrame:
-    raw = ak.stock_zh_a_daily(symbol=_symbol_with_exchange_prefix(symbol))
+    raw = ak.stock_zh_a_daily(
+        symbol=_symbol_with_exchange_prefix(symbol),
+        start_date=start_date,
+        end_date=end_date,
+        adjust=adjust,
+    )
     if raw is None or raw.empty:
         return _empty_daily_frame()
     df = _fill_derived_daily_fields(_standardize_daily_df(raw, symbol))
@@ -169,6 +188,9 @@ def fetch_a_share_daily(
     *,
     adjust: str = "qfq",
     timeout_sec: float = 10.0,
+    source_preference: Optional[str] = None,
+    allow_fallback: Optional[bool] = None,
+    config: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     拉取单只 A 股日线（6 位代码，无交易所前缀）。
@@ -186,38 +208,79 @@ def fetch_a_share_daily(
     if len(code) != 6 or not code.isdigit():
         raise ValueError(f"symbol 须为 6 位数字 A 股代码，收到: {symbol!r}")
 
-    try:
-        with _time_limit(timeout_sec):
-            return _fetch_a_share_daily_via_sina(code, start_date, end_date)
-    except Exception as primary_exc:
-        _LOG.warning(
-            "stock_zh_a_daily (sina) 失败 symbol=%s，回退 stock_zh_a_hist (em): %s: %s",
-            code,
-            type(primary_exc).__name__,
-            primary_exc,
-        )
+    cfg = config or _load_config(None)
+    install_akshare_requests_resilience(cfg)
+    pref = (source_preference or cfg.get("akshare", {}).get("daily_source_preference", "sina")).lower()
+    fallback_enabled = (
+        bool(allow_fallback)
+        if allow_fallback is not None
+        else bool(cfg.get("akshare", {}).get("daily_allow_fallback", True))
+    )
+
+    ordered_sources: list[tuple[str, Callable[[], pd.DataFrame]]] = [
+        (
+            "stock_zh_a_daily (sina)",
+            lambda: _fetch_a_share_daily_via_sina(
+                code,
+                start_date,
+                end_date,
+                adjust=adjust,
+            ),
+        ),
+        (
+            "stock_zh_a_hist (em)",
+            lambda: _fetch_a_share_daily_via_em(
+                code,
+                start_date,
+                end_date,
+                adjust=adjust,
+            ),
+        ),
+    ]
+    if pref in ("em", "eastmoney", "stock_zh_a_hist"):
+        ordered_sources = [ordered_sources[1], ordered_sources[0]]
+    if not fallback_enabled:
+        ordered_sources = ordered_sources[:1]
+
+    first_exc: Optional[BaseException] = None
+    total_sources = len(ordered_sources)
+    for idx, (source_name, fetcher) in enumerate(ordered_sources, start=1):
         try:
-            with _time_limit(timeout_sec):
-                return _fetch_a_share_daily_via_em(
+            return call_with_timeout(
+                fetcher,
+                timeout_sec=timeout_sec,
+                label=f"{source_name}:{code}",
+            )
+        except Exception as exc:
+            if first_exc is None:
+                first_exc = exc
+            if idx < total_sources:
+                _LOG.warning(
+                    "%s 失败 symbol=%s，尝试下一来源: %s: %s",
+                    source_name,
                     code,
-                    start_date,
-                    end_date,
-                    adjust=adjust,
+                    type(exc).__name__,
+                    exc,
                 )
-        except Exception:
-            raise primary_exc
+            else:
+                _LOG.warning(
+                    "%s 失败 symbol=%s（无后续来源）: %s: %s",
+                    source_name,
+                    code,
+                    type(exc).__name__,
+                    exc,
+                )
+    if first_exc is not None:
+        raise first_exc
+    return _empty_daily_frame()
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return project_root()
 
 
 def _load_config(config_path: Optional[Union[str, Path]]) -> dict:
-    path = Path(config_path) if config_path else _project_root() / "config.yaml"
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    return load_config(Path(config_path)) if config_path else load_config()
 
 
 def _extract_symbol_codes(df: Optional[pd.DataFrame]) -> List[str]:
@@ -238,7 +301,12 @@ def _extract_symbol_codes(df: Optional[pd.DataFrame]) -> List[str]:
     return [c.zfill(6) for c in codes]
 
 
-def _list_symbols_via_akshare(api_name: str) -> List[str]:
+def _list_symbols_via_akshare(
+    api_name: str,
+    config_path: Optional[Union[str, Path]] = None,
+) -> List[str]:
+    """与日线拉取共用 requests 超时/重试注入，config 与 ``fetch_only`` / DB 路径一致。"""
+    install_akshare_requests_resilience(_load_config(config_path))
     fn = getattr(ak, api_name, None)
     if fn is None:
         return []
@@ -341,8 +409,11 @@ def _fetch_source_with_retries(
     last_exc: Optional[BaseException] = None
     for attempt in range(max(1, retries)):
         try:
-            with _time_limit(timeout_sec):
-                codes = fetcher()
+            codes = call_with_timeout(
+                fetcher,
+                timeout_sec=timeout_sec,
+                label=f"股票池:{source}",
+            )
             if codes:
                 return codes
             _LOG.warning(
@@ -368,10 +439,24 @@ def _fetch_source_with_retries(
     return []
 
 
-_AKSHARE_UNIVERSE_FETCHERS: Tuple[Tuple[str, Callable[[], List[str]]], ...] = (
-    ("stock_info_a_code_name", lambda: _list_symbols_via_akshare("stock_info_a_code_name")),
-    ("stock_zh_a_spot_em", lambda: _list_symbols_via_akshare("stock_zh_a_spot_em")),
-)
+def _akshare_universe_fetchers(
+    *,
+    config_path: Optional[Union[str, Path]] = None,
+) -> Tuple[Tuple[str, Callable[[], List[str]]], ...]:
+    """
+    全市场代码表来源顺序与日线增量「同源优先」：
+
+    1. ``stock_zh_a_spot_em``：东财实时表，与 ``stock_zh_a_hist`` 同属东财链路，通常比
+       ``stock_info_a_code_name``（北交所/多段请求）更稳、更少无意义超时。
+    2. ``stock_info_a_code_name``：后备（含北交所等，网络差时易拖慢首轮）。
+    """
+    return (
+        ("stock_zh_a_spot_em", lambda: _list_symbols_via_akshare("stock_zh_a_spot_em", config_path)),
+        (
+            "stock_info_a_code_name",
+            lambda: _list_symbols_via_akshare("stock_info_a_code_name", config_path),
+        ),
+    )
 
 
 def _fetch_akshare_universe_codes(
@@ -385,7 +470,7 @@ def _fetch_akshare_universe_codes(
     依次尝试 AkShare 代码列表接口；成功则写入本地 universe 快照并返回代码列表。
     全部失败则返回 ``None``。
     """
-    for source, fetcher in _AKSHARE_UNIVERSE_FETCHERS:
+    for source, fetcher in _akshare_universe_fetchers(config_path=config_path):
         try:
             codes = _fetch_source_with_retries(
                 source,
@@ -434,26 +519,6 @@ def _subsample_universe_symbols(
     return [symbols[i] for i in range(len(symbols)) if i in chosen]
 
 
-@contextlib.contextmanager
-def _time_limit(seconds: float):
-    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
-        yield
-        return
-
-    def _handle_timeout(signum, frame):  # type: ignore[unused-arg]
-        raise TimeoutError(f"股票池来源调用超时（>{seconds:.1f}s）")
-
-    previous = signal.getsignal(signal.SIGALRM)
-    timer_seconds = max(seconds, 1e-3)
-    signal.signal(signal.SIGALRM, _handle_timeout)
-    signal.setitimer(signal.ITIMER_REAL, timer_seconds)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0.0)
-        signal.signal(signal.SIGALRM, previous)
-
-
 def list_default_universe_symbols(
     max_symbols: Optional[int] = None,
     *,
@@ -463,11 +528,15 @@ def list_default_universe_symbols(
     """
     返回当前可交易 A 股代码列表。
 
-    默认：优先 DuckDB 中已有历史股票集合，避免日常任务被外部股票列表接口卡住；
-    不足再回退本地快照，最后 AkShare 代码列表接口。
+    默认（``universe_prefer_akshare: false``）：将 DuckDB 已有代码与本地 ``universe_symbols.json``
+    取**并集**（可关 ``universe_merge_duckdb_and_cache``），若并集仍低于
+    ``universe_target_min_symbols`` 则**只在此情况下**自动拉一次全市场代码表（东财优先，与日线共用
+    HTTP 策略）并写入本地快照；之后并集达标，日常与增量一样不再请求列表接口。
 
-    ``config akshare.universe_prefer_akshare: true`` 时：先请求 AkShare 全市场代码列表，
-    失败或未命中再回退 DuckDB / 本地快照（适合希望每次以接口为准刷新股票池的场景）。
+    ``incremental_universe_duckdb_only: true``（默认）且库内标的数不低于 ``min_cached_universe_symbols``
+    时：日线增量**仅使用 DuckDB 已有代码**，不合并本地全市场快照，避免每日对 5800+ 全表做增量拉取。
+
+    ``universe_prefer_akshare: true`` 时：每次先请求 AkShare 全市场列表，失败再回退并集 / 本地。
 
     Parameters
     ----------
@@ -487,10 +556,30 @@ def list_default_universe_symbols(
     retry_delay_sec = float(ak_cfg.get("universe_retry_delay_sec", 3.0))
     min_cached_symbols = max(1, int(ak_cfg.get("min_cached_universe_symbols", 1000)))
     prefer_akshare = bool(ak_cfg.get("universe_prefer_akshare", False))
+    merge_sources = bool(ak_cfg.get("universe_merge_duckdb_and_cache", True))
+    target_floor = int(ak_cfg.get("universe_target_min_symbols", 4500))
+    incremental_duckdb_only = bool(ak_cfg.get("incremental_universe_duckdb_only", True))
 
     required_min = min_cached_symbols if max_symbols is None else max(1, max_symbols)
     duckdb_codes = _list_symbols_from_duckdb(config_path=config_path)
     local_cache_codes = _load_symbols_from_local_cache(config_path=config_path)
+
+    if (
+        incremental_duckdb_only
+        and not prefer_akshare
+        and duckdb_codes
+        and len(duckdb_codes) >= min_cached_symbols
+    ):
+        _LOG.info(
+            "股票池来源: duckdb_incremental_only（不合并本地全市场快照）| 标的数: %s",
+            len(duckdb_codes),
+        )
+        return _subsample_universe_symbols(list(duckdb_codes), max_symbols)
+
+    def _merged_base() -> List[str]:
+        if merge_sources:
+            return sorted(frozenset(duckdb_codes) | frozenset(local_cache_codes))
+        return list(duckdb_codes) if duckdb_codes else list(local_cache_codes)
 
     if prefer_akshare:
         codes = _fetch_akshare_universe_codes(
@@ -505,7 +594,35 @@ def list_default_universe_symbols(
             "已启用 universe_prefer_akshare，但 AkShare 代码列表未成功，回退 DuckDB / 本地快照。"
         )
 
-    if duckdb_codes:
+    base = _merged_base()
+    if not prefer_akshare and target_floor > 0 and len(base) < target_floor:
+        _LOG.info(
+            "股票池并集 %s 低于 universe_target_min_symbols=%s，尝试补拉全市场代码表一次。",
+            len(base),
+            target_floor,
+        )
+        codes = _fetch_akshare_universe_codes(
+            config_path=config_path,
+            source_timeout_sec=timeout_sec,
+            source_retries=source_retries,
+            retry_delay_sec=retry_delay_sec,
+        )
+        if codes:
+            base = sorted(frozenset(duckdb_codes) | frozenset(codes))
+            _LOG.info(
+                "股票池来源: merged_duckdb_and_akshare_universe | 标的数: %s",
+                len(base),
+            )
+            if len(base) >= required_min:
+                return _subsample_universe_symbols(base, max_symbols)
+        else:
+            _LOG.warning("全市场代码表补拉失败，继续使用 DuckDB / 本地并集或后续回退。")
+
+    if merge_sources and base and len(base) >= required_min:
+        _LOG.info("股票池来源: merged_duckdb_and_cache | 标的数: %s", len(base))
+        return _subsample_universe_symbols(base, max_symbols)
+
+    if not merge_sources and duckdb_codes:
         if len(duckdb_codes) >= required_min:
             _LOG.info("股票池来源: duckdb_cached_symbols | 标的数: %s", len(duckdb_codes))
             return _subsample_universe_symbols(duckdb_codes, max_symbols)
@@ -515,7 +632,7 @@ def list_default_universe_symbols(
             required_min,
         )
 
-    if local_cache_codes:
+    if not merge_sources and local_cache_codes:
         if len(local_cache_codes) >= required_min:
             _LOG.info("股票池来源: local_universe_cache | 标的数: %s", len(local_cache_codes))
             return _subsample_universe_symbols(local_cache_codes, max_symbols)
@@ -553,11 +670,19 @@ def fetch_many_daily(
     adjust: str = "qfq",
     sleep_sec: float = 0.0,
     timeout_sec: float = 10.0,
+    config: Optional[dict] = None,
 ) -> pd.DataFrame:
     """顺序拉取多只标的并纵向合并；可选间隔以降低限流风险。"""
     frames: List[pd.DataFrame] = []
     for sym in symbols:
-        df = fetch_a_share_daily(sym, start_date, end_date, adjust=adjust, timeout_sec=timeout_sec)
+        df = fetch_a_share_daily(
+            sym,
+            start_date,
+            end_date,
+            adjust=adjust,
+            timeout_sec=timeout_sec,
+            config=config,
+        )
         if not df.empty:
             frames.append(df)
         if sleep_sec > 0:

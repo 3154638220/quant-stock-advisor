@@ -20,12 +20,21 @@ import pandas as pd
 from src.models.artifacts import (
     BundleMetadata,
     InferenceConfig,
+    list_bundle_dirs,
+    load_metric_from_bundle,
+    publish_bundle_with_history,
     save_bundle_metadata,
     save_inference_config,
     save_sklearn_model,
+    should_promote_by_quantile,
     utc_now_iso,
 )
-from src.models.data_slice import combined_data_fingerprint, hash_slice_spec, normalize_slice_spec, seed_everything
+from src.models.data_slice import (
+    combined_data_fingerprint,
+    hash_slice_spec,
+    normalize_slice_spec,
+    seed_everything,
+)
 from src.models.experiment import append_experiment_csv, append_experiment_jsonl, build_experiment_record
 from src.models.rank_score import apply_cross_section_z_by_date
 
@@ -168,6 +177,13 @@ def train_xgboost_panel(
     date_col: str = "trade_date",
     slice_spec: Optional[dict] = None,
     xgb_params: Optional[Dict[str, Any]] = None,
+    label_spec: Optional[Dict[str, Any]] = None,
+    enforce_metric_guard: bool = True,
+    guard_metric_key: str = "val_rank_ic",
+    guard_quantile: float = 0.25,
+    guard_min_history: int = 4,
+    keep_recent_versions: int = 8,
+    publish_bundle_dir: Optional[Union[str, Path]] = None,
     out_root: Union[str, Path] = "data/models",
     log_experiments: bool = True,
     experiments_dir: Union[str, Path] = "data/experiments",
@@ -184,6 +200,7 @@ def train_xgboost_panel(
     t0 = time.perf_counter()
     seed_everything(training_seed)
     xgb_params = dict(xgb_params or {})
+    label_spec = dict(label_spec or {})
     use_rank = str(xgboost_objective).lower() == "rank"
 
     if df.empty or len(df) < 20:
@@ -306,6 +323,34 @@ def train_xgboost_panel(
             "val_mae": float(np.mean(np.abs(y_va - pred_va))),
         }
 
+    guard_decision: Dict[str, Any] = {}
+    if use_rank and enforce_metric_guard:
+        hist_dirs = list_bundle_dirs(out_root, prefix="xgboost_panel_")
+        history_vals: List[float] = []
+        for d in hist_dirs:
+            v = load_metric_from_bundle(d, guard_metric_key)
+            if np.isfinite(v):
+                history_vals.append(v)
+        cand = float(metrics.get(guard_metric_key, np.nan))
+        ok, qv = should_promote_by_quantile(
+            candidate_metric=cand,
+            history_metrics=history_vals,
+            quantile=guard_quantile,
+            min_history=guard_min_history,
+        )
+        guard_decision = {
+            "metric_key": guard_metric_key,
+            "candidate_metric": cand,
+            "history_count": len(history_vals),
+            "quantile": float(guard_quantile),
+            "threshold": qv,
+            "passed": bool(ok),
+        }
+        if not ok:
+            raise RuntimeError(
+                f"候选模型 {guard_metric_key}={cand:.6f} 低于历史 P{int(guard_quantile * 100)} 阈值 {qv:.6f}，拒绝替换。"
+            )
+
     run_id = uuid.uuid4().hex[:12]
     bundle_dir = Path(out_root) / f"xgboost_panel_{run_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -323,6 +368,7 @@ def train_xgboost_panel(
             "date_col": date_col,
             "val_frac": val_frac,
             "xgboost_objective": "rank" if use_rank else "regression",
+            "label_spec": label_spec,
         },
     )
     save_inference_config(bundle_dir, inf)
@@ -342,9 +388,36 @@ def train_xgboost_panel(
             "val_frac": val_frac,
             "rsi_mode": rsi_mode,
             "xgboost_objective": "rank" if use_rank else "regression",
+            "label_spec": label_spec,
+            "metric_guard": guard_decision,
         },
     )
     save_bundle_metadata(bundle_dir, meta)
+
+    if keep_recent_versions > 0:
+        all_dirs = list_bundle_dirs(out_root, prefix="xgboost_panel_")
+        if len(all_dirs) > keep_recent_versions:
+            for d in all_dirs[: len(all_dirs) - keep_recent_versions]:
+                try:
+                    import shutil
+
+                    shutil.rmtree(d, ignore_errors=True)
+                except Exception:
+                    pass
+
+    if publish_bundle_dir:
+        publish_dir = Path(publish_bundle_dir)
+        if not publish_dir.is_absolute():
+            publish_dir = Path(out_root) / publish_dir
+        history_root = Path(out_root) / "xgboost_panel_history"
+        publish_meta = publish_bundle_with_history(
+            source_bundle_dir=bundle_dir,
+            publish_dir=publish_dir,
+            history_root=history_root,
+            keep_recent=keep_recent_versions,
+        )
+        meta.params["publish"] = publish_meta
+        save_bundle_metadata(bundle_dir, meta)
 
     duration = time.perf_counter() - t0
     if log_experiments:

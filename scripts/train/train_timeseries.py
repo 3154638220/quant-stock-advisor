@@ -6,7 +6,7 @@
 
 用法::
 
-    python models/train_timeseries.py --csv data/panel.csv --kind lstm \\
+    python scripts/train/train_timeseries.py --csv data/panel.csv --kind lstm \\
       --features ret5,vol20 --target fwd5 --seq-len 10 --seed 42
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -40,6 +40,12 @@ def main() -> int:
     p.add_argument("--seq-len", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--test-size", type=float, default=0.2)
+    p.add_argument(
+        "--time-val-split",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否按时间切分验证集（生产推荐开启，避免未来泄漏）",
+    )
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -51,6 +57,16 @@ def main() -> int:
     p.add_argument("--num-encoder-layers", type=int, default=2)
     p.add_argument("--dim-feedforward", type=int, default=128)
     p.add_argument("--max-seq-len", type=int, default=128)
+    p.add_argument(
+        "--walk-forward-oos",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="训练后执行 walk-forward OOS 校验（更耗时）",
+    )
+    p.add_argument("--wf-train-days", type=int, default=252)
+    p.add_argument("--wf-test-days", type=int, default=63)
+    p.add_argument("--wf-step-days", type=int, default=63)
+    p.add_argument("--wf-epochs", type=int, default=8)
     p.add_argument("--model-version", default="1.0.0")
     p.add_argument("--feature-version", default="v1")
     p.add_argument("--out-root", default="data/models")
@@ -96,6 +112,12 @@ def main() -> int:
         num_encoder_layers=args.num_encoder_layers,
         dim_feedforward=args.dim_feedforward,
         max_seq_len=args.max_seq_len,
+        time_val_split=bool(args.time_val_split),
+        walk_forward_oos=bool(args.walk_forward_oos),
+        wf_train_days=int(args.wf_train_days),
+        wf_test_days=int(args.wf_test_days),
+        wf_step_days=int(args.wf_step_days),
+        wf_epochs=int(args.wf_epochs),
         slice_spec=spec,
         out_root=args.out_root,
         experiments_dir=args.experiments_dir,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import time
 import uuid
@@ -11,9 +12,9 @@ from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import duckdb
 import pandas as pd
-import yaml
 
-from .akshare_client import fetch_a_share_daily
+from ..settings import load_config, project_root
+from .akshare_client import fetch_a_share_daily, fill_derived_daily_fields
 from .data_quality import QualityConfig, QualityReport, run_quality_checks, validate_daily_frame
 
 _LOG = logging.getLogger(__name__)
@@ -26,13 +27,19 @@ class SymbolUpdateResult(NamedTuple):
     fetch_failed: bool
 
 
-def _load_yaml_config(path: Union[str, Path]) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+class SymbolFetchPayload(NamedTuple):
+    symbol: str
+    start_s: str
+    end_dt: date
+    df: Optional[pd.DataFrame]
+    fetch_failed: bool
+    error: Optional[BaseException]
 
 
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+class SymbolFetchPlan(NamedTuple):
+    symbol: str
+    start_s: str
+    end_dt: date
 
 
 class DuckDBManager:
@@ -47,9 +54,9 @@ class DuckDBManager:
         duckdb_path: Optional[str] = None,
         table_daily: Optional[str] = None,
     ) -> None:
-        root = _project_root()
-        cfg_path = Path(config_path) if config_path else root / "config.yaml"
-        cfg = _load_yaml_config(cfg_path) if cfg_path.exists() else {}
+        root = project_root()
+        cfg = load_config(Path(config_path)) if config_path else load_config()
+        self._cfg = cfg
 
         paths = cfg.get("paths", {})
         db_cfg = cfg.get("database", {})
@@ -65,6 +72,10 @@ class DuckDBManager:
         self._max_fetch_retries = max(1, int(ak_cfg.get("max_fetch_retries", 3)))
         self._retry_delay_sec = float(ak_cfg.get("retry_delay_sec", 2.0))
         self._timeout_sec = float(ak_cfg.get("request_timeout_sec", 10.0))
+        self._fetch_workers = max(1, int(ak_cfg.get("fetch_workers", 4)))
+        self._daily_allow_fallback = bool(ak_cfg.get("daily_allow_fallback", True))
+        self._backfill_derived_after_fetch = bool(ak_cfg.get("backfill_derived_after_fetch", False))
+        self._auto_backfill_derived_on_init = bool(db_cfg.get("auto_backfill_derived_on_init", True))
 
         logs_dir = paths.get("logs_dir", "data/logs")
         ld = Path(logs_dir)
@@ -81,6 +92,7 @@ class DuckDBManager:
         self._conn = duckdb.connect(str(abs_db))
         self._ensure_schema()
         self._ensure_audit_schema()
+        self._auto_backfill_derived_columns_if_needed()
         self._last_fetch_run_id: Optional[str] = None
 
     def _append_fetch_failure_log(self, symbol: str, exc: BaseException) -> None:
@@ -133,6 +145,33 @@ class DuckDBManager:
             )
             """
         )
+        self._conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{self._table}_trade_date_symbol
+            ON {self._table}(trade_date, symbol)
+            """
+        )
+
+    def _missing_derived_daily_columns(self) -> list[str]:
+        rows = self._conn.execute(f"PRAGMA table_info('{self._table}')").fetchall()
+        cols = {str(r[1]) for r in rows if len(r) > 1 and r[1] is not None}
+        required = {"change", "pct_chg", "amplitude_pct"}
+        return sorted(required - cols)
+
+    def _auto_backfill_derived_columns_if_needed(self) -> None:
+        if not self._auto_backfill_derived_on_init:
+            return
+        missing = self._missing_derived_daily_columns()
+        if missing:
+            _LOG.warning(
+                "跳过初始化衍生列回填：表 %s 缺少列 %s。",
+                self._table,
+                ",".join(missing),
+            )
+            return
+        fixed = self.backfill_derived_daily_columns()
+        if fixed > 0:
+            _LOG.info("初始化阶段自动回填衍生列完成，修复行数: %s", fixed)
 
     def _ensure_audit_schema(self) -> None:
         self._conn.execute(
@@ -208,6 +247,23 @@ class DuckDBManager:
         SymbolUpdateResult
             ``rows_written`` 与 ``fetch_failed``（拉取经重试仍失败时为 True）。
         """
+        plan = self._plan_symbol_window(
+            symbol,
+            default_start=default_start,
+            end_date=end_date,
+        )
+        if plan is None:
+            return SymbolUpdateResult(0, False)
+        payload = self._fetch_symbol_payload(plan)
+        return self._write_symbol_payload(payload)
+
+    def _plan_symbol_window(
+        self,
+        symbol: str,
+        *,
+        default_start: str,
+        end_date: Optional[str],
+    ) -> SymbolFetchPlan | None:
         today = datetime.now().date()
         end_s = end_date or today.strftime("%Y%m%d")
         end_dt = pd.to_datetime(end_s).date()
@@ -218,55 +274,89 @@ class DuckDBManager:
         else:
             start_dt = last + timedelta(days=1)
             if start_dt > end_dt:
-                return SymbolUpdateResult(0, False)
+                return None
             start_s = start_dt.strftime("%Y%m%d")
+        return SymbolFetchPlan(symbol=symbol, start_s=start_s, end_dt=end_dt)
 
+    def _build_fetch_plans(
+        self,
+        symbols: List[str],
+        *,
+        default_start: str,
+        end_date: Optional[str],
+    ) -> tuple[list[SymbolFetchPlan], Dict[str, SymbolUpdateResult]]:
+        plans: list[SymbolFetchPlan] = []
+        done: Dict[str, SymbolUpdateResult] = {}
+        for sym in symbols:
+            plan = self._plan_symbol_window(
+                sym,
+                default_start=default_start,
+                end_date=end_date,
+            )
+            if plan is None:
+                done[sym] = SymbolUpdateResult(0, False)
+                continue
+            plans.append(plan)
+        return plans, done
+
+    def _fetch_symbol_payload(
+        self,
+        plan: SymbolFetchPlan,
+    ) -> SymbolFetchPayload:
+        end_s = plan.end_dt.strftime("%Y%m%d")
         df: Optional[pd.DataFrame] = None
         last_exc: Optional[BaseException] = None
         for attempt in range(self._max_fetch_retries):
             try:
                 df = fetch_a_share_daily(
-                    symbol,
-                    start_s,
+                    plan.symbol,
+                    plan.start_s,
                     end_s,
                     adjust=self._adjust,
                     timeout_sec=self._timeout_sec,
+                    allow_fallback=self._daily_allow_fallback,
+                    config=self._cfg,
                 )
-                break
+                return SymbolFetchPayload(
+                    symbol=plan.symbol,
+                    start_s=plan.start_s,
+                    end_dt=plan.end_dt,
+                    df=df,
+                    fetch_failed=False,
+                    error=None,
+                )
             except Exception as e:
                 last_exc = e
                 _LOG.warning(
                     "AkShare 拉取失败 symbol=%s 第 %s/%s 次: %s",
-                    symbol,
+                    plan.symbol,
                     attempt + 1,
                     self._max_fetch_retries,
                     e,
                 )
                 if attempt < self._max_fetch_retries - 1:
                     time.sleep(self._retry_delay_sec * (attempt + 1))
-                else:
-                    if last_exc is not None:
-                        self._append_fetch_failure_log(symbol, last_exc)
-                    return SymbolUpdateResult(0, True)
-        if df is None:
-            return SymbolUpdateResult(0, True)
-
-        if df.empty:
-            return SymbolUpdateResult(0, False)
-
-        # 只保留不超过 end 的交易日
-        df = df[df["trade_date"] <= pd.Timestamp(end_dt)]
-        if df.empty:
-            return SymbolUpdateResult(0, False)
-
-        # 增量幂等：同批重复主键只保留最后一条，再与库内主键 INSERT OR REPLACE 合并
-        df = df.sort_values("trade_date").drop_duplicates(
-            subset=["symbol", "trade_date"],
-            keep="last",
+        if last_exc is not None:
+            self._append_fetch_failure_log(plan.symbol, last_exc)
+        return SymbolFetchPayload(
+            symbol=plan.symbol,
+            start_s=plan.start_s,
+            end_dt=plan.end_dt,
+            df=None,
+            fetch_failed=True,
+            error=last_exc,
         )
+
+    def _write_symbol_payload(self, payload: SymbolFetchPayload) -> SymbolUpdateResult:
+        df = self._prepare_payload_frame(payload)
+        if payload.fetch_failed:
+            return SymbolUpdateResult(0, True)
+        if df is None:
+            return SymbolUpdateResult(0, False)
+
         qrep = validate_daily_frame(df, cfg=self._quality)
         if not qrep.ok:
-            _LOG.warning("写入前质量提示 symbol=%s: %s", symbol, qrep.summary())
+            _LOG.warning("写入前质量提示 symbol=%s: %s", payload.symbol, qrep.summary())
             if qrep.notes:
                 _LOG.warning("%s", "; ".join(qrep.notes))
 
@@ -282,6 +372,124 @@ class DuckDBManager:
             self._conn.unregister("df_incr")
         return SymbolUpdateResult(len(df), False)
 
+    def _prepare_payload_frame(self, payload: SymbolFetchPayload) -> Optional[pd.DataFrame]:
+        if payload.fetch_failed:
+            return None
+        df = payload.df
+        if df is None or df.empty:
+            return None
+        df = df[df["trade_date"] <= pd.Timestamp(payload.end_dt)]
+        if df.empty:
+            return None
+        df = df.sort_values("trade_date").drop_duplicates(
+            subset=["symbol", "trade_date"],
+            keep="last",
+        )
+        return fill_derived_daily_fields(df)
+
+    def _write_payload_batch(
+        self,
+        payloads: list[SymbolFetchPayload],
+        counts: Dict[str, SymbolUpdateResult],
+    ) -> None:
+        frames: list[pd.DataFrame] = []
+        for payload in payloads:
+            if payload.fetch_failed:
+                counts[payload.symbol] = SymbolUpdateResult(0, True)
+                continue
+            df = self._prepare_payload_frame(payload)
+            if df is None:
+                counts[payload.symbol] = SymbolUpdateResult(0, False)
+                continue
+            qrep = validate_daily_frame(df, cfg=self._quality)
+            if not qrep.ok:
+                _LOG.warning("写入前质量提示 symbol=%s: %s", payload.symbol, qrep.summary())
+                if qrep.notes:
+                    _LOG.warning("%s", "; ".join(qrep.notes))
+            frames.append(df)
+            counts[payload.symbol] = SymbolUpdateResult(len(df), False)
+
+        if not frames:
+            return
+
+        batch = (
+            pd.concat(frames, ignore_index=True)
+            .sort_values(["symbol", "trade_date"])
+            .drop_duplicates(subset=["symbol", "trade_date"], keep="last")
+            .reset_index(drop=True)
+        )
+        self._conn.register("df_incr_batch", batch)
+        try:
+            self._conn.execute(
+                f"""
+                INSERT OR REPLACE INTO {self._table}
+                SELECT * FROM df_incr_batch
+                """
+            )
+        finally:
+            self._conn.unregister("df_incr_batch")
+
+    def backfill_derived_daily_columns(self) -> int:
+        """
+        全表检查 ``amplitude_pct`` / ``pct_chg`` / ``change``：对仍为 NULL 的行用前收与 OHLC 补算并 UPDATE。
+
+        每 symbol 的首个交易日无前收，无法推导，保持 NULL。返回本轮消除的「含 NULL 行」数量（前后计数差）。
+        """
+        t = self._table
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(*)::BIGINT FROM {t}
+            WHERE change IS NULL OR pct_chg IS NULL OR amplitude_pct IS NULL
+            """
+        ).fetchone()
+        n_before = int(row[0] or 0)
+        if n_before == 0:
+            return 0
+        self._conn.execute(
+            f"""
+            WITH w AS (
+              SELECT
+                symbol,
+                trade_date,
+                close,
+                high,
+                low,
+                change,
+                pct_chg,
+                amplitude_pct,
+                LAG(close) OVER (PARTITION BY symbol ORDER BY trade_date) AS prev_close
+              FROM {t}
+            )
+            UPDATE {t} AS d
+            SET
+              change = COALESCE(d.change, w.close - w.prev_close),
+              pct_chg = COALESCE(d.pct_chg,
+                CASE WHEN w.prev_close IS NOT NULL AND ABS(w.prev_close) > 1e-12
+                  THEN (w.close - w.prev_close) / w.prev_close * 100.0 ELSE NULL END),
+              amplitude_pct = COALESCE(d.amplitude_pct,
+                CASE WHEN w.prev_close IS NOT NULL AND ABS(w.prev_close) > 1e-12
+                  THEN (w.high - w.low) / w.prev_close * 100.0 ELSE NULL END)
+            FROM w
+            WHERE d.symbol = w.symbol AND d.trade_date = w.trade_date
+              AND (d.change IS NULL OR d.pct_chg IS NULL OR d.amplitude_pct IS NULL)
+            """
+        )
+        row2 = self._conn.execute(
+            f"""
+            SELECT COUNT(*)::BIGINT FROM {t}
+            WHERE change IS NULL OR pct_chg IS NULL OR amplitude_pct IS NULL
+            """
+        ).fetchone()
+        n_after = int(row2[0] or 0)
+        fixed = n_before - n_after
+        _LOG.info(
+            "全表衍生列回填: 含 NULL 行 %s -> %s（本轮减少 %s 行）",
+            n_before,
+            n_after,
+            fixed,
+        )
+        return fixed
+
     def incremental_update_many(
         self,
         symbols: List[str],
@@ -290,24 +498,53 @@ class DuckDBManager:
         end_date: Optional[str] = None,
         record_audit: bool = True,
         run_id: Optional[str] = None,
+        backfill_derived_after: Optional[bool] = None,
     ) -> Dict[str, SymbolUpdateResult]:
-        """批量增量更新；可选写入审计表（``run_id`` 默认新建 UUID）。"""
+        """批量增量更新；可选写入审计表（``run_id`` 默认新建 UUID）。
+
+        结束后默认对全表回填 ``amplitude_pct`` / ``pct_chg`` / ``change`` 中的缺失值（见 ``backfill_derived_daily_columns``）。
+        """
         rid = run_id or str(uuid.uuid4())
+        do_backfill_derived = (
+            self._backfill_derived_after_fetch
+            if backfill_derived_after is None
+            else bool(backfill_derived_after)
+        )
         self._last_fetch_run_id = rid
         started_at = datetime.now()
         t0 = time.perf_counter()
-        counts: Dict[str, SymbolUpdateResult] = {}
-        for sym in symbols:
-            counts[sym] = self.incremental_update_symbol(
-                sym,
-                default_start=default_start,
-                end_date=end_date,
-            )
-            if self._sleep > 0:
-                time.sleep(self._sleep)
-        duration_ms = int((time.perf_counter() - t0) * 1000)
+        plans, counts = self._build_fetch_plans(
+            symbols,
+            default_start=default_start,
+            end_date=end_date,
+        )
+        self._conn.execute("BEGIN TRANSACTION")
+        try:
+            if self._fetch_workers <= 1 or len(plans) <= 1:
+                payloads: list[SymbolFetchPayload] = []
+                for plan in plans:
+                    payloads.append(self._fetch_symbol_payload(plan))
+                    if self._sleep > 0:
+                        time.sleep(self._sleep)
+                self._write_payload_batch(payloads, counts)
+            else:
+                payloads: list[SymbolFetchPayload] = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self._fetch_workers) as executor:
+                    future_map = {
+                        executor.submit(self._fetch_symbol_payload, plan): plan.symbol for plan in plans
+                    }
+                    for future in concurrent.futures.as_completed(future_map):
+                        payloads.append(future.result())
+                self._write_payload_batch(payloads, counts)
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
         rows_written = sum(r.rows_written for r in counts.values())
         failures = sum(1 for r in counts.values() if r.fetch_failed)
+        if do_backfill_derived:
+            self.backfill_derived_daily_columns()
+        duration_ms = int((time.perf_counter() - t0) * 1000)
         if record_audit:
             finished_at = datetime.now()
             self.record_fetch_audit(

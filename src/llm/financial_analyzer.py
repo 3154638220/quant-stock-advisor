@@ -9,6 +9,8 @@ from typing import Optional
 
 import pandas as pd
 
+from ..data_fetcher.akshare_resilience import fetch_dataframe_with_cache, resolve_cache_ttl_seconds
+from ..settings import load_config
 from .client import OllamaClient
 from .prompts import FINANCIAL_EXTRACT_SYSTEM, FINANCIAL_EXTRACT_USER
 
@@ -62,9 +64,14 @@ class FinancialAnalyzer:
         self,
         client: OllamaClient,
         sleep_between_stocks: float = 1.5,
+        config: dict | None = None,
     ) -> None:
         self.client = client
         self.sleep_between_stocks = sleep_between_stocks
+        self.config = config or load_config()
+        ak_cfg = self.config.get("akshare", {}) if isinstance(self.config, dict) else {}
+        self._akshare_retries = max(1, int(ak_cfg.get("api_call_retries", 2)))
+        self._akshare_timeout = float(ak_cfg.get("request_timeout_sec", 10.0))
 
     # ------------------------------------------------------------------
     # 数据拉取
@@ -74,7 +81,16 @@ class FinancialAnalyzer:
         """拉取财务摘要（新浪接口），包含最近几个报告期的核心指标。"""
         try:
             import akshare as ak
-            df = ak.stock_financial_abstract(symbol=symbol)
+
+            df = fetch_dataframe_with_cache(
+                [("stock_financial_abstract", lambda: ak.stock_financial_abstract(symbol=symbol))],
+                cache_key=f"financial_abstract_{symbol}",
+                cache_ttl_sec=resolve_cache_ttl_seconds("financial", self.config),
+                retries=self._akshare_retries,
+                timeout_sec=self._akshare_timeout,
+                cfg=self.config,
+                accept_empty=True,
+            )
             return df
         except Exception as exc:
             _LOG.warning("拉取 %s 财务摘要失败: %s", symbol, exc)
@@ -84,7 +100,18 @@ class FinancialAnalyzer:
         """拉取财务分析指标（含 ROE/毛利率/净利率等）。"""
         try:
             import akshare as ak
-            df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year="2022")
+            df = fetch_dataframe_with_cache(
+                [(
+                    "stock_financial_analysis_indicator",
+                    lambda: ak.stock_financial_analysis_indicator(symbol=symbol, start_year="2022"),
+                )],
+                cache_key=f"financial_indicator_{symbol}",
+                cache_ttl_sec=resolve_cache_ttl_seconds("financial", self.config),
+                retries=self._akshare_retries,
+                timeout_sec=self._akshare_timeout,
+                cfg=self.config,
+                accept_empty=True,
+            )
             return df.head(8) if not df.empty else df
         except Exception as exc:
             _LOG.warning("拉取 %s 财务指标失败: %s", symbol, exc)
@@ -94,7 +121,18 @@ class FinancialAnalyzer:
         """拉取利润表（东方财富）。"""
         try:
             import akshare as ak
-            df = ak.stock_profit_sheet_by_report_em(symbol=symbol)
+            df = fetch_dataframe_with_cache(
+                [(
+                    "stock_profit_sheet_by_report_em",
+                    lambda: ak.stock_profit_sheet_by_report_em(symbol=symbol),
+                )],
+                cache_key=f"profit_sheet_{symbol}",
+                cache_ttl_sec=resolve_cache_ttl_seconds("financial", self.config),
+                retries=self._akshare_retries,
+                timeout_sec=self._akshare_timeout,
+                cfg=self.config,
+                accept_empty=True,
+            )
             return df.head(4) if not df.empty else df
         except Exception as exc:
             _LOG.debug("拉取 %s 利润表失败: %s", symbol, exc)

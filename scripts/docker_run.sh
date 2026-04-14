@@ -2,7 +2,8 @@
 # 在 L4T / Jetson 专用 PyTorch 容器（dustynv/l4t-pytorch，默认 r36.4.0）内构建与运行。
 #
 # 用法（项目根目录）::
-#   bash scripts/docker_run.sh              # 仅构建
+#   bash scripts/docker_build_jetson.sh     # 仅构建镜像（推荐；默认 --network=host）
+#   bash scripts/docker_run.sh              # 构建（同上网络策略）并可选进入/烟测
 #   bash scripts/docker_run.sh --verify     # 构建后跑 verify_first_run（需网络）
 #   bash scripts/docker_run.sh -- bash      # 进入交互 shell
 #

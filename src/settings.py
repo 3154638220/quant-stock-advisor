@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
 import yaml
+
+_LOG = logging.getLogger(__name__)
 
 
 def project_root() -> Path:
@@ -14,9 +18,28 @@ def project_root() -> Path:
 
 
 def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    path = config_path or project_root() / "config.yaml"
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    if config_path is not None:
+        path = Path(config_path)
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+
+    root = project_root()
+    candidates = []
+    env_path = os.environ.get("QUANT_CONFIG", "").strip()
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.extend(
+        [
+            root / "config.yaml",
+            root / "config.yaml.example",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+    _LOG.warning("未找到配置文件（config.yaml / config.yaml.example），使用代码内默认参数。")
+    return {}
 
 
 def resolve_asof_trade_end(paths: Optional[Dict[str, Any]] = None) -> pd.Timestamp:

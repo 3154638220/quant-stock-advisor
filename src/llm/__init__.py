@@ -1,13 +1,17 @@
-"""本地 LLM 分析模块：利用 Ollama 提炼当日利好/利空，提取财务关键指标。"""
+"""本地 LLM 分析模块：关注度飙升检测、新闻情绪分析、财务指标提取。"""
 
+from .attention_scanner import AttentionScanner, AttentionStock
 from .client import OllamaClient
-from .news_analyzer import NewsAnalyzer, StockNewsSentiment
 from .financial_analyzer import FinancialAnalyzer, FinancialSummary
+from .news_analyzer import MarketMacroSentiment, NewsAnalyzer, StockNewsSentiment
 
 __all__ = [
+    "AttentionScanner",
+    "AttentionStock",
     "OllamaClient",
-    "NewsAnalyzer",
-    "StockNewsSentiment",
     "FinancialAnalyzer",
     "FinancialSummary",
+    "MarketMacroSentiment",
+    "NewsAnalyzer",
+    "StockNewsSentiment",
 ]

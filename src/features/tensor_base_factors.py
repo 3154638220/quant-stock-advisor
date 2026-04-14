@@ -397,10 +397,10 @@ def true_range(
     tr = torch.full_like(close, float("nan"))
     prev = close[:, :-1]
     h = high[:, 1:]
-    l = low[:, 1:]
-    hl = h - l
+    lo = low[:, 1:]
+    hl = h - lo
     hc = (h - prev).abs()
-    lc = (l - prev).abs()
+    lc = (lo - prev).abs()
     tr[:, 1:] = torch.maximum(torch.maximum(hl, hc), lc)
     return tr
 

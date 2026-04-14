@@ -9,21 +9,30 @@ FROM dustynv/l4t-pytorch:${L4T_PYTORCH_TAG}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_TRUSTED_HOST=pypi.org \
+    PIP_EXTRA_INDEX_URL=
 WORKDIR /workspace
 
 # 镜像已含 Jetson 版 PyTorch/CUDA；仅装业务依赖（勿用 requirements 覆盖 torch）
-COPY requirements-base.txt pyproject.toml README.md ./
+COPY requirements-base.txt pyproject.toml README.md config.yaml.example ./
 COPY scripts ./scripts
 COPY src ./src
 COPY tests ./tests
+# 构建阶段 DNS：若 `docker build` 报 pip 无法解析 pypi.org，见 README「Docker」或 `bash scripts/docker_build_jetson.sh`。
+# 基础镜像将 PIP_INDEX_URL 指向 jetson.webredirect，且用户级 pip.conf 含 NGC extra-index-url；
+# 与 PyPI 混用在部分网络下会触发 SSL 错误，故删除用户 pip 配置并仅用 PyPI（torch 仍来自基础镜像层）。
 # 勿升级 setuptools：镜像内 pytest/hypothesis 可能依赖 pkg_resources；setuptools≥82 已移除该模块。
-# 使用 --index-url 覆盖基础镜像 pip.conf 中的 Jetson 镜像站（业务依赖走 PyPI；torch 仍来自基础镜像）。
-RUN python3 -m pip install --index-url https://pypi.org/simple -U pip wheel \
-    && python3 -m pip install --index-url https://pypi.org/simple -r requirements-base.txt \
-    && python3 -m pip install --index-url https://pypi.org/simple -e ".[dev]"
+RUN rm -f /root/.pip/pip.conf /root/.config/pip/pip.conf \
+    && printf '[global]\nindex-url = https://pypi.org/simple\n' > /usr/pip.conf \
+    && cp /usr/pip.conf /etc/pip.conf \
+    && cp /usr/pip.conf /etc/xdg/pip/pip.conf \
+    && python3 -m pip install -U pip wheel \
+    && python3 -m pip install -r requirements-base.txt \
+    && python3 -m pip install -e ".[dev]"
 
-# 默认配置（可被 bind-mount 覆盖）
-COPY config.yaml ./
+# 配置文件建议在运行时通过 bind-mount 或 QUANT_CONFIG 注入；
+# 仓库内仅保留 config.yaml.example 模板，不在镜像里硬编码 config.yaml。
 
 CMD ["bash"]

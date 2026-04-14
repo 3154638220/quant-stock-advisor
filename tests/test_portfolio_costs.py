@@ -11,11 +11,14 @@ from src.backtest.transaction_costs import (
     TransactionCostParams,
     net_simple_return_from_long_hold,
 )
+from src.market.regime import RegimeConfig, RegimeResult, get_regime_weights
 from src.portfolio.covariance import mean_cov_returns_from_wide
 from src.portfolio.optimizer import optimize_min_variance, optimize_risk_parity
 from src.portfolio.weights import (
+    apply_turnover_constraint,
     build_portfolio_weights,
     redistribute_individual_cap,
+    turnover_cost_coeffs_from_size,
 )
 
 
@@ -134,6 +137,80 @@ def test_build_portfolio_risk_parity():
     )
     assert w.sum() == pytest.approx(1.0)
     assert np.all(w >= 0)
+
+
+def test_covariance_ewma_and_industry_factor():
+    rng = np.random.default_rng(1)
+    days = 81
+    dates = pd.date_range("2024-01-01", periods=days, freq="B")
+    syms = ["600000", "600001", "600002", "600003"]
+    prices = 10 + np.cumsum(rng.standard_normal((4, days)), axis=1) * 0.08
+    wide = pd.DataFrame(prices, index=syms, columns=dates)
+
+    _, cov_ewma = mean_cov_returns_from_wide(
+        wide,
+        syms,
+        lookback_days=60,
+        shrinkage="ewma",
+        ewma_halflife=15,
+    )
+    assert cov_ewma.shape == (4, 4)
+    assert np.all(np.diag(cov_ewma) > 0)
+
+    _, cov_ind = mean_cov_returns_from_wide(
+        wide,
+        syms,
+        lookback_days=60,
+        shrinkage="industry_factor",
+        industry_labels=["bank", "bank", "new_energy", "new_energy"],
+    )
+    assert cov_ind.shape == (4, 4)
+    assert np.all(np.diag(cov_ind) > 0)
+    assert np.allclose(cov_ind, cov_ind.T, atol=1e-10)
+
+
+def test_turnover_cost_weighted_constraint():
+    w_old = np.array([0.34, 0.33, 0.33], dtype=np.float64)
+    w_new = np.array([0.90, 0.05, 0.05], dtype=np.float64)
+    coeffs = np.array([1.8, 0.9, 0.7], dtype=np.float64)
+    out = apply_turnover_constraint(w_new, w_old, 0.20, turnover_cost_coeffs=coeffs)
+    tv_cost = 0.5 * float(np.sum(coeffs * np.abs(out - w_old)))
+    assert tv_cost <= 0.20 + 1e-8
+    assert np.isclose(out.sum(), 1.0)
+
+    size_vals = np.array([8.0, 9.0, 15.0], dtype=np.float64)
+    tc = turnover_cost_coeffs_from_size(size_vals)
+    assert tc[0] >= tc[1] >= tc[2]
+
+
+def test_dynamic_regime_weights():
+    base = {"momentum": 0.6, "short_reversal": -0.4}
+    cfg = RegimeConfig(
+        dynamic_weighting_enabled=True,
+        dynamic_vol_target_ann=0.2,
+        dynamic_vol_scale=0.05,
+        dynamic_trend_scale=0.04,
+        dynamic_strength=4.0,
+    )
+    res_risk_on = RegimeResult(
+        regime="bull",
+        short_return=0.08,
+        long_return=0.12,
+        realized_vol_ann=0.15,
+        n_days_used=60,
+    )
+    w_on = get_regime_weights(base, "bull", cfg=cfg, regime_result=res_risk_on)
+
+    res_risk_off = RegimeResult(
+        regime="bear",
+        short_return=-0.06,
+        long_return=-0.09,
+        realized_vol_ann=0.34,
+        n_days_used=60,
+    )
+    w_off = get_regime_weights(base, "bear", cfg=cfg, regime_result=res_risk_off)
+    assert abs(w_on["momentum"]) > abs(w_off["momentum"])
+    assert abs(w_on["short_reversal"]) < abs(w_off["short_reversal"])
 
 
 def test_max_drawdown_and_vol():

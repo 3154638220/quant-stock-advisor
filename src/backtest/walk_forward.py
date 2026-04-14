@@ -25,13 +25,11 @@ def contiguous_time_splits(
     trading_index: pd.DatetimeIndex,
     *,
     n_splits: int = 5,
-    min_train_days: int = 20,
+    min_train_days: int = 252,
 ) -> List[TimeSlice]:
     """
-    时间顺序 K 段切片：将样本按时间均分为 ``n_splits`` 段测试窗；
-    第 k 折的训练集为**该测试段之前**的所有交易日（扩展窗），测试集为第 k 段。
-
-    首段若训练样本不足 ``min_train_days`` 则跳过。
+    时间顺序 K 段切片：将样本按时间均分为 n_splits 段测试窗；
+    第 k 折训练集为该测试段之前的所有交易日（扩展窗），测试集为第 k 段。
     """
     if n_splits < 2:
         raise ValueError("n_splits 须 >= 2")
@@ -51,13 +49,7 @@ def contiguous_time_splits(
         test_ix = idx[a:b]
         if len(train_ix) < min_train_days or len(test_ix) < 1:
             continue
-        out.append(
-            TimeSlice(
-                train_index=pd.DatetimeIndex(train_ix),
-                test_index=pd.DatetimeIndex(test_ix),
-                fold_id=fid,
-            )
-        )
+        out.append(TimeSlice(train_index=pd.DatetimeIndex(train_ix), test_index=pd.DatetimeIndex(test_ix), fold_id=fid))
         fid += 1
     return out
 
@@ -69,11 +61,7 @@ def rolling_walk_forward_windows(
     test_days: int,
     step_days: int,
 ) -> List[TimeSlice]:
-    """
-    滚动 walk-forward：固定训练长度 ``train_days``、测试 ``test_days``，每次向前滑动 ``step_days``。
-
-    所有长度均以**交易日个数**计（非日历日）。
-    """
+    """滚动 walk-forward：固定训练长度/测试长度，每次向前滑动 step_days。"""
     if train_days < 5 or test_days < 1 or step_days < 1:
         raise ValueError("train_days/test_days/step_days 不合法")
     idx = pd.DatetimeIndex(pd.to_datetime(trading_index).normalize()).sort_values().unique()
@@ -86,12 +74,10 @@ def rolling_walk_forward_windows(
         te_end = tr_end + test_days
         if te_end > n:
             break
-        train_ix = idx[start:tr_end]
-        test_ix = idx[tr_end:te_end]
         out.append(
             TimeSlice(
-                train_index=pd.DatetimeIndex(train_ix),
-                test_index=pd.DatetimeIndex(test_ix),
+                train_index=pd.DatetimeIndex(idx[start:tr_end]),
+                test_index=pd.DatetimeIndex(idx[tr_end:te_end]),
                 fold_id=fid,
             )
         )
@@ -108,13 +94,26 @@ def run_backtest_on_index(
     config: Optional[BacktestConfig] = None,
     rebalance_rule: Optional[str] = None,
 ) -> BacktestResult:
-    """在 ``date_index`` 子区间上裁剪数据后调用 ``run_backtest``。"""
+    """在 date_index 子区间上裁剪数据后调用 run_backtest。"""
     ix = pd.DatetimeIndex(pd.to_datetime(date_index).normalize())
     ar = asset_returns.reindex(ix).dropna(how="all")
-    # 权重：仅保留落在区间内的调仓行
+
     ws = weights_signal.copy()
     ws.index = pd.to_datetime(ws.index).normalize()
-    ws = ws[ws.index.isin(ar.index)]
+    ws_in = ws[ws.index.isin(ar.index)]
+    if not ar.empty:
+        start_dt = ar.index.min()
+        ws_prev = ws[ws.index < start_dt]
+        if not ws_prev.empty:
+            seed = ws_prev.iloc[[-1]].copy()
+            seed.index = pd.DatetimeIndex([start_dt])
+            ws = pd.concat([seed, ws_in], axis=0)
+            ws = ws[~ws.index.duplicated(keep="last")].sort_index()
+        else:
+            ws = ws_in
+    else:
+        ws = ws_in
+
     if ar.empty or ws.empty:
         raise ValueError("切片内无重叠的收益或权重")
     return run_backtest(ar, ws, config=config, rebalance_rule=rebalance_rule)
@@ -129,23 +128,13 @@ def walk_forward_backtest(
     rebalance_rule: Optional[str] = None,
     use_test_only: bool = True,
 ) -> Tuple[List[PerformancePanel], pd.DataFrame, Dict[str, Any]]:
-    """
-    在多个时间切片上分别回测，返回各折 ``PerformancePanel``、明细表与聚合摘要。
-
-    use_test_only
-        为 True 时仅在每折的 **测试窗** 上回测（典型 walk-forward OOS）；
-        为 False 时在 **训练+测试** 全段上回测（用于对照）。
-    """
+    """在多个时间切片上分别回测，返回各折面板、明细表与聚合摘要。"""
     rows: List[Dict[str, Any]] = []
     panels: List[PerformancePanel] = []
-
     for sl in slices:
-        if use_test_only:
-            sub_ix = sl.test_index
-        else:
-            sub_ix = pd.DatetimeIndex(
-                np.unique(np.concatenate([sl.train_index.values, sl.test_index.values]))
-            ).sort_values()
+        sub_ix = sl.test_index if use_test_only else pd.DatetimeIndex(
+            np.unique(np.concatenate([sl.train_index.values, sl.test_index.values]))
+        ).sort_values()
         try:
             res = run_backtest_on_index(
                 asset_returns,
@@ -162,25 +151,15 @@ def walk_forward_backtest(
         d["n_train"] = len(sl.train_index)
         d["n_test"] = len(sl.test_index)
         rows.append(d)
-
     detail = pd.DataFrame(rows)
     agg = aggregate_walk_forward_panels(panels, method="mean") if panels else {"n_folds": 0}
     return panels, detail, agg
 
 
-def compare_full_vs_slices(
-    full_panel: PerformancePanel,
-    slice_agg: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """将全样本面板与切片聚合对比，突出过拟合风险（仅数值对比，无判断逻辑）。"""
+def compare_full_vs_slices(full_panel: PerformancePanel, slice_agg: Mapping[str, Any]) -> Dict[str, Any]:
+    """将全样本面板与切片聚合对比，输出差值。"""
     out: Dict[str, Any] = {"full_sample": full_panel.to_dict(), "slices_agg": dict(slice_agg)}
-    for k in (
-        "annualized_return",
-        "sharpe_ratio",
-        "calmar_ratio",
-        "max_drawdown",
-        "win_rate",
-    ):
+    for k in ("annualized_return", "sharpe_ratio", "calmar_ratio", "max_drawdown", "win_rate"):
         fk = f"{k}_agg"
         if fk in slice_agg and np.isfinite(slice_agg[fk]):
             out[f"delta_{k}"] = float(full_panel.to_dict()[k]) - float(slice_agg[fk])

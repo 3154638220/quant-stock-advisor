@@ -31,19 +31,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_fetcher import DuckDBManager, list_default_universe_symbols
-from src.eval_recommend_cli import run_eval_recommend
+from src.cli.eval_recommend import run_eval_recommend
+from src.features.neutralize import neutralize_size_industry_regression
 from src.features.panel import pivot_close_wide, pivot_field_aligned_to_close, wide_close_to_numpy
-from src.features.tree_dataset import long_ohlcv_last_window_table
 from src.features.tensor_alpha import compute_momentum_rsi_torch
 from src.features.tensor_base_factors import compute_base_factor_bundle
+from src.features.tree_dataset import long_ohlcv_last_window_table
 from src.logging_config import get_logger, setup_app_logging
-from src.market.tradability import filter_recommend_tradable_next_day, prefilter_stock_pool
 from src.market.regime import (
     classify_regime,
     get_benchmark_returns_from_db,
     get_regime_weights,
     regime_config_from_mapping,
 )
+from src.market.tradability import filter_recommend_tradable_next_day, prefilter_stock_pool
 from src.models.rank_score import sort_key_for_dataframe
 from src.models.recommend_explain import build_recommend_reason_column
 from src.notify import save_recommendation_csv
@@ -128,7 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=None,
-        help="配置文件路径；默认项目根目录 config.yaml",
+        help="配置文件路径；默认按 QUANT_CONFIG -> config.yaml -> config.yaml.example 顺序查找",
     )
     run_p.add_argument(
         "--sort-by",
@@ -200,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=None,
-        help="配置文件路径；默认项目根目录 config.yaml",
+        help="配置文件路径；默认按 QUANT_CONFIG -> config.yaml -> config.yaml.example 顺序查找",
     )
 
     return parser
@@ -209,6 +210,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
+    log_cfg = cfg.get("logging", {}) or {}
     feat = cfg.get("features", {})
     sig = cfg.get("signals", {})
     portfolio_cfg = portfolio_config_from_mapping(cfg.get("portfolio") or {})
@@ -247,6 +249,7 @@ def main_run(args: argparse.Namespace) -> int:
     tail_w = int(feat.get("tail_window", 10))
     vpt_w = int(feat.get("vpt_window", 20))
     range_skew_w = int(feat.get("range_skew_window", 20))
+    neutralize_enabled = bool(feat.get("neutralize", True))
 
     prefilter = cfg.get("prefilter") or {}
     regime_cfg_raw = cfg.get("regime") or {}
@@ -267,7 +270,11 @@ def main_run(args: argparse.Namespace) -> int:
     logs_dir = paths.get("logs_dir", "data/logs")
     if not Path(logs_dir).is_absolute():
         logs_dir = ROOT / logs_dir
-    setup_app_logging(logs_dir, name="daily_run")
+    setup_app_logging(
+        logs_dir,
+        name="daily_run",
+        log_format=str(log_cfg.get("format", "json")),
+    )
     log = get_logger("daily_run")
 
     if args.symbols:
@@ -457,6 +464,49 @@ def main_run(args: argparse.Namespace) -> int:
     )
     out = out.replace([float("inf"), float("-inf")], pd.NA)
     out = out.dropna(subset=["momentum"])
+
+    # ——— 市值中性化：对截面因子去除市值暴露 ———
+    # A 股市值效应极强，不中性化的因子 IC 很可能大部分来自市值暴露。
+    # 仅对打分参与列做截面回归残差，log_market_cap 本身保留原值。
+    _FACTORS_TO_NEUTRALIZE = [
+        "momentum", "rsi", "atr", "realized_vol", "turnover_roll_mean",
+        "vol_ret_corr", "short_reversal", "vol_to_turnover", "volume_skew_log",
+        "bias_short", "bias_long", "max_single_day_drop", "recent_return",
+        "price_position", "intraday_range", "upper_shadow_ratio",
+        "lower_shadow_ratio", "close_open_return", "overnight_gap",
+        "tail_strength", "volume_price_trend", "intraday_range_skew",
+    ]
+    if neutralize_enabled and "log_market_cap" in out.columns:
+        _industry_col = str(portfolio_cfg.get("industry_col") or "").strip() or None
+        _tmp = out.copy()
+        _tmp["_nd"] = "_"  # 单截面虚拟日期列
+        _neutralized = 0
+        for _fc in _FACTORS_TO_NEUTRALIZE:
+            if _fc not in _tmp.columns:
+                continue
+            _neut_col = f"{_fc}_neut"
+            try:
+                _tmp = neutralize_size_industry_regression(
+                    _tmp,
+                    _fc,
+                    size_col="log_market_cap",
+                    industry_col=_industry_col or "__no_industry__",
+                    date_col="_nd",
+                    suffix="_neut",
+                )
+                if _neut_col in _tmp.columns:
+                    out[_fc] = _tmp[_neut_col].values
+                    _neutralized += 1
+            except Exception as _e:
+                log.warning("中性化因子 %s 失败（跳过）: %s", _fc, _e)
+        log.info(
+            "截面市值中性化：已处理 %d 个因子列（industry_col=%s）",
+            _neutralized,
+            _industry_col or "未配置",
+        )
+    elif neutralize_enabled:
+        log.debug("neutralize=true 但缺少 log_market_cap 列，跳过中性化。")
+
     tree_bundle: Optional[Path] = None
     tree_feat_list: Optional[List[str]] = None
     tree_rsi_mode: Optional[str] = None
@@ -584,13 +634,21 @@ def main_run(args: argparse.Namespace) -> int:
             )
             if sort_by == "composite_extended" and effective_comp_ext:
                 effective_comp_ext = get_regime_weights(
-                    effective_comp_ext, regime_label, cfg=regime_cfg
+                    effective_comp_ext,
+                    regime_label,
+                    cfg=regime_cfg,
+                    regime_result=regime_res,
                 )
                 log.info("Regime 权重调整后（%s）: %s", regime_label, effective_comp_ext)
             elif sort_by == "composite":
                 # 动态调整动量/RSI 权重
                 base_w = {"momentum": w_mom, "rsi": w_rsi}
-                adj_w = get_regime_weights(base_w, regime_label, cfg=regime_cfg)
+                adj_w = get_regime_weights(
+                    base_w,
+                    regime_label,
+                    cfg=regime_cfg,
+                    regime_result=regime_res,
+                )
                 effective_w_mom = float(adj_w.get("momentum", w_mom))
                 effective_w_rsi = float(adj_w.get("rsi", w_rsi))
                 s = effective_w_mom + effective_w_rsi
@@ -641,15 +699,21 @@ def main_run(args: argparse.Namespace) -> int:
         lb = int(portfolio_cfg.get("cov_lookback_days", 60))
         ridge = float(portfolio_cfg.get("cov_ridge", 1e-6))
         shr = str(portfolio_cfg.get("cov_shrinkage", "ledoit_wolf")).lower()
-        if shr not in ("ledoit_wolf", "sample"):
+        if shr not in ("ledoit_wolf", "sample", "ewma", "industry_factor"):
             shr = "ledoit_wolf"
         syms_out = out["symbol"].astype(str).str.zfill(6).tolist()
+        ind_labels = None
+        ind_col_cfg = portfolio_cfg.get("industry_col")
+        if shr == "industry_factor" and isinstance(ind_col_cfg, str) and ind_col_cfg in out.columns:
+            ind_labels = out[ind_col_cfg].astype(str).fillna("_NA_").tolist()
         mu_arr, cov_mtx = mean_cov_returns_from_wide(
             wide,
             syms_out,
             lookback_days=lb,
             ridge=ridge,
             shrinkage=shr,  # type: ignore[arg-type]
+            ewma_halflife=float(portfolio_cfg.get("cov_ewma_halflife", 20.0)),
+            industry_labels=ind_labels,
         )
         if wm == "mean_variance":
             exp_ret = mu_arr
@@ -666,6 +730,7 @@ def main_run(args: argparse.Namespace) -> int:
         cov_matrix=cov_mtx,
         expected_returns=exp_ret,
         risk_aversion=float(portfolio_cfg.get("risk_aversion", 1.0)),
+        turnover_cost_model=portfolio_cfg.get("turnover_cost_model"),
     )
     out["weight"] = w
     out["sort_by"] = sort_by

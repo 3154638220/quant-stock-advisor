@@ -6,26 +6,28 @@
 
 ## 已实现能力（代码现状）
 
-| 模块 | 说明 |
-|------|------|
-| **数据** | AkShare 日线增量、股票池缓存、写入前数据质量检查（`src/data_fetcher/`） |
-| **本地 LLM 分析** | Ollama + qwen2.5 提炼当日市场宏观利好/利空、个股新闻情绪评分、财务报表关键指标提取（`src/llm/`、`scripts/llm_daily_analysis.py`） |
-| **因子** | GPU 张量动量/RSI/ATR/波动率/换手/量价相关；K 线结构高频降频代理因子（日内振幅、影线比率、隔夜跳空、尾盘强度等）；截面 winsorize、z-score、行业与市值双重中性化（`src/features/`） |
-| **因子正交化** | Löwdin 对称正交化与 Gram-Schmidt 正交化，在传入 XGBoost/线性模型前剥离因子冗余（`src/features/orthogonalize.py`，训练时 `--orthogonalize` 启用） |
-| **信号** | 线性 composite / composite_extended；**XGBoost** 截面 **Learning-to-Rank**（默认 `XGBRanker`，可选回归）；**LSTM/GRU/TCN/Transformer** 序列模型（`src/models/`、`models/train_*.py`） |
-| **Regime Switch** | 大盘状态分类器（牛/熊/震荡），根据基准近期收益与波动率动态调整 composite_extended 因子权重；可在 `config.yaml` 中 `regime:` 节配置（`src/market/regime.py`） |
-| **组合** | 等权/按得分；**Ledoit–Wolf 收缩协方差** + ridge；ERC / 最小方差 / 均值–方差（SciPy）；单票与行业上限、换手约束（`src/portfolio/`） |
-| **回测与评估** | 向量回测引擎（含涨停买入失败重分配 `redistribute` 模式）；双边约 19 bps 保守成本假设；绩效面板、IC/分层、时间切片与 rolling walk-forward（`src/backtest/`） |
-| **日更入口** | `scripts/daily_run.py`（拉数→因子→Regime Switch→推荐 CSV，输出列含 `regime`）；`scripts/fetch_only.py`（仅拉数） |
-| **事后评估** | `daily_run.py eval`：对已有 `recommend_*.csv` 标注前向收益（读 DuckDB） |
 
-算法与统计细节见 **[项目算法建模详解.md](项目算法建模详解.md)**；迭代计划见 **[算法改进.md](算法改进.md)**。
+| 模块                | 说明                                                                                                                                                              |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **数据**            | AkShare 日线增量、股票池缓存、写入前数据质量检查（`src/data_fetcher/`）                                                                                                               |
+| **新闻驱动关注度扫描**     | 从东方财富飙升榜/人气榜出发，用 Ollama + qwen2.5 识别因真实新闻事件（而非市场波动）导致关注度飙升的股票；可选市场宏观分析与财务指标补充（`src/llm/`、`scripts/llm_daily_analysis.py`）                                       |
+| **因子**            | GPU 张量动量/RSI/ATR/波动率/换手/量价相关；K 线结构高频降频代理因子（日内振幅、影线比率、隔夜跳空、尾盘强度等）；截面 winsorize、z-score、行业与市值双重中性化（`src/features/`）                                               |
+| **因子正交化**         | Löwdin 对称正交化与 Gram-Schmidt 正交化，在传入 XGBoost/线性模型前剥离因子冗余（`src/features/orthogonalize.py`，训练时 `--orthogonalize` 启用）                                                |
+| **信号**            | 线性 composite / composite_extended；**XGBoost** 截面 **Learning-to-Rank**（默认 `XGBRanker`，可选回归）；**LSTM/GRU/TCN/Transformer** 序列模型（`src/models/`、`scripts/train/train_*.py`） |
+| **Regime Switch** | 大盘状态分类器（牛/熊/震荡），根据基准近期收益与波动率动态调整 composite_extended 因子权重；可在 `config.yaml`（由 `config.yaml.example` 复制）中 `regime:` 节配置（`src/market/regime.py`）                    |
+| **组合**            | 等权/按得分；**Ledoit–Wolf 收缩协方差** + ridge；ERC / 最小方差 / 均值–方差（SciPy）；单票与行业上限、换手约束（`src/portfolio/`）                                                                   |
+| **回测与评估**         | 向量回测引擎（含涨停买入失败重分配 `redistribute` 模式）；双边约 19 bps 保守成本假设；绩效面板、IC/分层、时间切片与 rolling walk-forward（`src/backtest/`）                                                   |
+| **日更入口**          | `scripts/daily_run.py`（拉数→因子→Regime Switch→推荐 CSV，输出列含 `regime`）；`scripts/fetch_only.py`（仅拉数）                                                                   |
+| **事后评估**          | `daily_run.py eval`：对已有 `recommend_*.csv` 标注前向收益（读 DuckDB）                                                                                                      |
+
+
+算法与统计细节见 **[项目算法建模详解.md](docs/项目算法建模详解.md)**。
 
 ---
 
 ## 技术栈
 
-- **数据**：AkShare → DuckDB（路径见 `config.yaml`）
+- **数据**：AkShare → DuckDB（路径见 `config.yaml`，初始模板为 `config.yaml.example`）
 - **计算**：Polars / NumPy；因子主路径 **PyTorch**（Jetson 上**不默认**引入 RAPIDS）
 - **机器学习**：scikit-learn 基线、XGBoost、PyTorch 序列模型
 - **组合优化**：SciPy（SLSQP 等）
@@ -37,19 +39,26 @@
 
 ```text
 .
-├── config.yaml              # 全局配置（路径、GPU、因子、信号、组合、回测、regime 等）
+├── config.yaml.example      # 全局配置模板（先复制为 config.yaml 再按本机调整）
+├── config.yaml              # 本地运行配置（建议不入库，支持 QUANT_CONFIG 覆盖路径）
 ├── pyproject.toml           # 包名 quant-system、pytest 配置
 ├── environment.yml          # Conda 环境 quant-system（Python 3.10）
 ├── requirements-base.txt    # 通用 pip 依赖（不含 Jetson 专用 torch）
 ├── requirements.txt         # x86：额外从 PyPI 装 torch
 ├── data/                    # DuckDB、缓存、日志、结果 CSV、模型工件（默认路径）
+├── docs/                    # 文档与报告
+│   ├── 项目算法建模详解.md   # 算法与统计细节说明
+│   ├── 荐股算法流程说明.md
+│   ├── backtest_report.md
+│   └── plan.md
 ├── src/
 │   ├── data_fetcher/        # 拉数、DuckDB、质量检查
+│   │   └── akshare_resilience.py  # 网络超时/重试/快照回退
 │   ├── features/
 │   │   ├── tensor_alpha.py          # 动量、RSI 张量因子
 │   │   ├── tensor_base_factors.py   # 扩展基础因子（波动率、换手、量价等）
-│   │   ├── intraday_proxy_factors.py# K 线结构高频降频代理因子（新增）
-│   │   ├── orthogonalize.py         # 因子正交化：Löwdin / Gram-Schmidt（新增）
+│   │   ├── intraday_proxy_factors.py# K 线结构高频降频代理因子
+│   │   ├── orthogonalize.py         # 因子正交化：Löwdin / Gram-Schmidt
 │   │   ├── panel.py                 # 宽表透视
 │   │   ├── standardize.py           # 截面标准化
 │   │   ├── neutralize.py            # 截面/行业/市值中性化
@@ -61,19 +70,28 @@
 │   ├── market/
 │   │   ├── tradability.py   # 涨跌停、停牌、预过滤
 │   │   └── regime.py        # 大盘状态分类器
+│   ├── cli/
+│   │   └── eval_recommend.py# 推荐 CSV 前向收益标注（由 daily_run.py 调用）
 │   └── llm/
-│       ├── client.py        # Ollama 客户端封装（新增）
-│       ├── prompts.py       # Prompt 模板（新增）
-│       ├── news_analyzer.py # 新闻情绪分析（新增）
-│       └── financial_analyzer.py  # 财务报表提取（新增）
-├── models/                  # 训练脚本入口（baseline / xgboost / deep_sequence 等）
+│       ├── client.py              # Ollama 客户端封装
+│       ├── prompts.py             # Prompt 模板（关注度判定、情绪、宏观、财务）
+│       ├── attention_scanner.py   # 关注度飙升扫描 + LLM 新闻驱动过滤（核心）
+│       ├── news_analyzer.py       # 市场宏观 / 个股新闻情绪（辅助）
+│       └── financial_analyzer.py  # 财务报表提取（辅助）
 ├── scripts/
 │   ├── daily_run.py         # 日更主入口（拉数→因子→推荐 CSV）
-│   ├── llm_daily_analysis.py# 本地 LLM 新闻+财务分析（新增）
+│   ├── fetch_only.py        # 仅增量更新数据库
+│   ├── llm_daily_analysis.py# 新闻驱动关注度扫描入口
+│   ├── llm_analysis_report.py# 扫描结果 → Markdown / HTML 报告
+│   ├── run_backtest_eval.py # 回测评估
+│   ├── train/               # 离线训练脚本入口
+│   │   ├── train_baseline.py        # Ridge / ElasticNet / Random Forest
+│   │   ├── train_xgboost.py         # 截面 XGBoost（Learning-to-Rank）
+│   │   ├── train_deep_sequence.py   # OHLCV 序列深度模型（端到端入口）
+│   │   └── train_timeseries.py      # 序列模型（CSV 面板输入）
 │   └── ...                  # 环境、bootstrap、Docker 辅助
 ├── tests/                   # pytest
-├── notebooks/               # 探索与原型
-└── jetson/                  # Jetson torch wheel 默认 URL 等
+└── notebooks/               # 探索与原型（.gitkeep 占位）
 ```
 
 ---
@@ -83,6 +101,20 @@
 ### 版本要求
 
 - **Python**：**3.10.x**（推荐 **3.10.12**，见 `.python-version` 与 `pyproject.toml`）
+
+### 配置文件初始化
+
+首次使用请先创建本地配置文件：
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+可选：通过环境变量指定其他配置路径（脚本默认读取 `config.yaml`，不存在时会回退到 `config.yaml.example`）：
+
+```bash
+export QUANT_CONFIG=/absolute/path/to/config.yaml
+```
 
 ### Conda（推荐，含 Jetson）
 
@@ -107,13 +139,35 @@ pip install -e .
 
 ### Docker（L4T / Jetson）
 
-基础镜像与构建说明见仓库根目录 `Dockerfile`；一键构建与烟测可使用 `scripts/docker_run.sh`（需 `nvidia-container-toolkit`）。
+基础镜像与构建说明见仓库根目录 `Dockerfile`。推荐一键构建：
+
+```bash
+bash scripts/docker_build_jetson.sh
+```
+
+（默认 `docker build --network=host`，避免部分宿主机上 **build 阶段 DNS 解析失败**导致 pip 无法访问 PyPI。）若你已在 `/etc/docker/daemon.json` 中配置 `"dns": ["8.8.8.8","1.1.1.1"]` 等，也可直接 `docker build -t my-jetson-pytorch:latest .`。
+
+基础镜像自带的 NVIDIA pip 源（`jetson.webredirect` / NGC）与 PyPI 混用时，在部分网络下会出现 pip 与 PyPI 的 SSL 异常；当前 `Dockerfile` 已在构建阶段改为 **仅使用 PyPI** 并移除用户级 NVIDIA pip 配置。
+
+构建完成后，一键进入容器与烟测可使用 `scripts/docker_run.sh`（需 `nvidia-container-toolkit`）。
 
 ### 环境自检
 
 ```bash
 conda activate quant-system
 python scripts/env_check.py
+```
+
+若本机网络偶发抖动、`AkShare` 常见 `ReadTimeout` / SSL / DNS 问题，可先做网络诊断：
+
+```bash
+python scripts/akshare_network_doctor.py
+```
+
+需要把 DNS 固化到 `systemd-resolved` 与 Docker（Jetson/Linux，需 root）时，可执行：
+
+```bash
+sudo python scripts/akshare_network_doctor.py --apply-dns
 ```
 
 未手动 `activate` 时可用：
@@ -147,35 +201,44 @@ python scripts/daily_run.py eval --latest --horizon 5
 python scripts/daily_run.py eval --csv data/results/recommend_2026-03-27.csv
 ```
 
-**本地 LLM 日常分析（需 Ollama 运行中，模型已下载）：**
+**新闻驱动关注度扫描（需 Ollama 运行中，模型已下载）：**
+
+从东方财富飙升榜出发，逐只拉取近期新闻，用本地 LLM 判断关注度飙升是否由真实新闻事件驱动（而非股价涨停/板块联动等市场波动），输出经过滤的新闻驱动型高关注度股票。
 
 ```bash
-# 完整分析：市场宏观 + 个股新闻情绪 + 财务报表（分析最新推荐 CSV 前10只）
+# 默认：扫描飙升榜前 50 只，LLM 逐只判定
 python scripts/llm_daily_analysis.py
 
-# 只分析前5只，使用轻量模型（Jetson 内存有限时）
-python scripts/llm_daily_analysis.py --top-k 5 --model qwen2.5:3b
+# 扫描前 30 只，使用轻量模型
+python scripts/llm_daily_analysis.py --top-k 30 --model qwen2.5:3b
 
-# 仅市场宏观利好/利空快讯摘要
-python scripts/llm_daily_analysis.py --market-only
+# 指定分析基准时刻（用于区分盘中/盘后新闻时序）
+python scripts/llm_daily_analysis.py --analysis-time 2026-03-30T15:30:00
 
-# 仅财务报表分析（跳过新闻）
-python scripts/llm_daily_analysis.py --no-news
+# 同时做市场宏观分析
+python scripts/llm_daily_analysis.py --with-macro
 
-# 指定历史 CSV
-python scripts/llm_daily_analysis.py --csv data/results/recommend_2026-03-27.csv
+# 对新闻驱动的标的额外做财务指标提取
+python scripts/llm_daily_analysis.py --with-financial
+
+# 生成 Markdown / HTML 报告
+python scripts/llm_analysis_report.py --latest
 ```
 
 输出文件：
-- `data/results/llm_analysis_<date>.json` — 完整结构化 JSON
-- `data/results/llm_enriched_<date>.csv` — 推荐 CSV + LLM 分析列（`llm_sentiment`、`llm_news_score`、`fin_rating`、`fin_roe` 等）
 
-**本地算力与更大模型（7B 不必是上限）：**
+- `data/results/llm_attention_<date>.json` — 完整扫描结果（含全部飙升股 + LLM 判定）
+- `data/results/llm_attention_<date>.csv` — 仅新闻驱动股票（催化剂、显著性、类别等）
+- `data/results/llm_report_<date>.md / .html` — 可读报告（由 `llm_analysis_report.py` 生成）
 
-- **换模型**：在 `config.yaml` 的 `llm.model` 或命令行 `--model` 指定；先 `ollama pull <名称>`。常见：`qwen2.5:14b`、`qwen2.5:32b`；桌面大显存可试 `llama3.1:70b`、`qwen2.5:72b` 等。Q4 量化下显存粗估约：7B≈5GB、14B≈10GB、32B≈20GB、70B≈40GB+（随实现与上下文浮动）。
-- **吃满 GPU**：在 `llm.ollama_options` 中设置 `num_gpu: -1`（尽量把层放到 GPU）、`num_ctx`（如 4096~8192；过大占显存）。可选 `num_thread` 在部分层在 CPU 时调高。
-- **超时**：大模型单次推理更慢，把 `llm.timeout_sec` 提到 300~600，或运行 `python scripts/llm_daily_analysis.py --timeout 600`。
-- **Jetson / 边缘**：统一内存可跑更大模型，但 **tokens/s** 有限；若延迟难接受，可保留 **14B Q4** 或缩小 `default_top_k`。
+**本地算力与模型（默认 `qwen2.5:32b`）：**
+
+- **换模型**：`config.yaml`（或 `QUANT_CONFIG` 指向文件）中的 `llm.model` 默认 `qwen2.5:32b`；命令行 `--model` 可覆盖；先 `ollama pull <名称>`。降级可选 `qwen2.5:14b`、`qwen2.5:7b`。Q4 量化显存粗估：7B≈5GB、14B≈10GB、32B≈20GB、70B≈40GB+。
+- **吃满 GPU**：`llm.ollama_options` 中 `num_gpu: -1`、`num_ctx: 8192`。
+- **超时**：大模型推理慢时提高 `llm.timeout_sec`（300~600），或 `--timeout 600`。
+- **扫描量**：`llm.attention.max_surge_stocks` 控制扫描飙升榜前 N 只，越大耗时越长（每只需一次 LLM 推理）。
+- **去噪窗口**：`llm.attention.news_lookback_hours` 默认 48，仅保留近窗口新闻并按时间倒序喂给模型，降低“旧新闻干扰”。
+- **时序锚点**：可通过 `--analysis-time` 传入分析基准时刻，帮助模型区分盘中驱动与盘后复盘叙事。
 
 **烟测（固定标的、接口不稳时）：**
 
@@ -194,10 +257,12 @@ python scripts/daily_run.py --help
 
 ---
 
-## 配置要点（`config.yaml`）
+## 配置要点（`config.yaml` / `config.yaml.example`）
 
 - **paths**：`duckdb_path`、`results_dir`、`models_dir` 等
 - **akshare**：复权、超时、重试、股票池缓存策略
+- **akshare**：现还包含 HTTP 连接/读超时、HTTP 重试、本地快照回退与 DNS 诊断脚本配置
+- **akshare**：日线源优先级 `daily_source_preference` 与批量并发 `fetch_workers`（当前机器默认 2）
 - **gpu**：`device`（`cuda`/`cpu`）、`batch_symbols`、`dtype`
 - **features**：动量/RSI/ATR 窗口、回看交易日、winsorize 分位、K 线结构因子窗口（`tail_window`、`vpt_window`、`range_skew_window`）
 - **prefilter**：股票池硬规则预过滤（ST、涨跌停次数、换手极值、绝对高位）
@@ -205,27 +270,27 @@ python scripts/daily_run.py --help
 - **signals**：`top_k`、`sort_by`、composite 权重、`composite_extended`（含 K 线结构因子权重）、树模型与 `deep_sequence` 段
 - **regime**：`enabled`、`short_window`、`long_window`、各市场状态的因子权重倍数
 - **portfolio**：权重模式（默认 `risk_parity`）、风险模型、单票/行业上限（默认 5%）、换手与成本
-- **backtest**：`execution_mode`（默认 `tplus1_open`）、`limit_up_mode`（`idle` / `redistribute`）
+- **backtest**：`execution_mode`（`close_to_close` / `tplus1_open` / `vwap`，默认 `tplus1_open`）、`limit_up_mode`（`idle` / `redistribute`）、`vwap_slippage_bps_per_side`、`vwap_impact_bps`
 - **transaction_costs**：`slippage_bps_per_side` 默认调整为 4.5 bps，合计双边约 **19 bps**
-- **llm**：`model`、`timeout_sec`、`ollama_options`（`num_gpu`、`num_ctx` 等，见上文「本地算力与更大模型」）
+- **llm**：`model`、`timeout_sec`、`ollama_options`；`llm.attention` 子节控制关注度扫描参数（`max_surge_stocks`、`max_news_per_stock`、`news_lookback_hours`）
 
 ---
 
 ## 模型训练（离线）
 
-项目根目录 `models/` 下为训练入口脚本，例如：
+`scripts/train/` 下为训练入口脚本，例如：
 
 - `train_baseline.py` — Ridge / ElasticNet / Random Forest  
 - `train_xgboost.py` — 截面 XGBoost（含新增 K 线结构因子与 `--orthogonalize` 选项）
-- `train_deep_sequence.py`、`train_timeseries.py` — 序列深度模型  
+- `train_deep_sequence.py`、`train_timeseries.py` — 序列深度模型
 
 训练产出默认落在 `data/models`、`data/experiments`（与 `config.yaml` 中路径一致）。
 
 **升级与重训（与当前代码对齐时）：**
 
-- **树模型**：若仍使用旧版工件，请重新运行 `python models/train_xgboost.py --config config.yaml`。现在 `default_tree_factor_names()` 包含 8 个新 K 线结构因子（`intraday_range`、`upper_shadow_ratio` 等），特征列须对齐。可选 `--orthogonalize` 在训练前对截面因子矩阵做 Löwdin 正交化；正交化方法由 `config.yaml` 中 `orthogonalize.method` 控制，也可通过 `--orthogonalize-method gram_schmidt` 指定。
+- **树模型**：若仍使用旧版工件，请重新运行 `python scripts/train/train_xgboost.py --config config.yaml`。现在 `default_tree_factor_names()` 包含 8 个新 K 线结构因子（`intraday_range`、`upper_shadow_ratio` 等），特征列须对齐。可选 `--orthogonalize` 在训练前对截面因子矩阵做 Löwdin 正交化；正交化方法由 `config.yaml` 中 `orthogonalize.method` 控制，也可通过 `--orthogonalize-method gram_schmidt` 指定。
 - **标签变换**：支持 `--label-transform raw/sharpe/calmar/truncate`，默认从 `config.yaml` 的 `label.transform` 读取（当前为 `truncate`，截断极端收益顶 2%）。
-- **深度序列**：重训后新 checkpoint 在输出头前多了 **Dropout**；推理加载已使用 **`strict=False`**，旧 bundle 仍可加载，但建议用新超参重训。
+- **深度序列**：重训后新 checkpoint 在输出头前多了 **Dropout**；推理加载已使用 `**strict=False`**，旧 bundle 仍可加载，但建议用新超参重训。
 
 ---
 
@@ -240,13 +305,13 @@ pytest
 
 ## 路线图（未默认落地）
 
-以下在 **[项目算法建模详解.md](项目算法建模详解.md)** 中亦标注为规划或可选扩展：**GNN**（板块/产业链图）、**深度强化学习**（如 FinRL）、本地 LLM 情绪因子入模等（当前 LLM 分析以辅助阅读为主，暂未接入因子流水线）。当前仓库主线仍是日线量价 + 统计/树/序列模型 + 凸优化组合 + 向量回测。
+以下在 **[项目算法建模详解.md](docs/项目算法建模详解.md)** 中亦标注为规划或可选扩展：**GNN**（板块/产业链图）、**深度强化学习**（如 FinRL）、新闻驱动关注度因子接入量化流水线等（当前 LLM 关注度扫描独立输出，暂未接入因子打分体系）。当前仓库主线仍是日线量价 + 统计/树/序列模型 + 凸优化组合 + 向量回测。
 
 ---
 
 ## Jetson 与算力预期（简述）
 
 - **ARM + JetPack**：优先使用 NVIDIA 提供的 **PyTorch** 构建做 GPU 因子；**弱化 RAPIDS** 默认依赖，降低维护成本。  
-- **统一内存**利于较大模型与批量张量任务；**CUDA 核心数与带宽**通常低于同代桌面旗舰，大规模全图 GNN 或高并行 RL 需按「可跑通、可迭代」设预期。  
+- **统一内存**利于较大模型与批量张量任务；**CUDA 核心数与带宽**通常低于同代桌面旗舰，大规模全图 GNN 或高并行 RL 需按「可跑通、可迭代」设预期。
 
 更完整的硬件与四条算力路径讨论，若仍需保留可参考历史文档或自行归档至 `docs/`（当前以代码与 `项目算法建模详解.md` 为准）。

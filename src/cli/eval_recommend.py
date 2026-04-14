@@ -8,22 +8,23 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.backtest import attach_forward_returns, summarize_forward_returns
-from src.backtest.portfolio_eval import summarize_portfolio_eval
-from src.backtest.risk_metrics import risk_config_from_mapping
-from src.backtest.transaction_costs import (
+from ..backtest import attach_forward_returns, summarize_forward_returns
+from ..backtest.portfolio_eval import summarize_portfolio_eval
+from ..backtest.risk_metrics import risk_config_from_mapping
+from ..backtest.transaction_costs import (
     TransactionCostParams,
     transaction_cost_params_from_mapping,
 )
-from src.data_fetcher import DuckDBManager
-from src.logging_config import get_logger, setup_app_logging
-from src.notify import find_latest_recommendation_csv
-from src.settings import load_config
+from ..data_fetcher import DuckDBManager
+from ..logging_config import get_logger, setup_app_logging
+from ..notify import find_latest_recommendation_csv
+from ..settings import load_config
 
 
 def run_eval_recommend(args: Namespace, *, root: Path) -> int:
     cfg = load_config(args.config)
     paths = cfg.get("paths", {})
+    log_cfg = cfg.get("logging", {}) or {}
     portfolio_cfg = cfg.get("portfolio") or {}
     cost_cfg = cfg.get("transaction_costs") or {}
     risk_cfg = cfg.get("risk") or {}
@@ -35,7 +36,11 @@ def run_eval_recommend(args: Namespace, *, root: Path) -> int:
     logs_dir = paths.get("logs_dir", "data/logs")
     if not Path(logs_dir).is_absolute():
         logs_dir = root / logs_dir
-    setup_app_logging(logs_dir, name="eval_recommend")
+    setup_app_logging(
+        logs_dir,
+        name="eval_recommend",
+        log_format=str(log_cfg.get("format", "json")),
+    )
     log = get_logger("eval_recommend")
 
     if args.latest:

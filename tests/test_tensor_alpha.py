@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
 
 from src.features.tensor_alpha import compute_momentum_rsi_torch, momentum_n, rsi_wilder

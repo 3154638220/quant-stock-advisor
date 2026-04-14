@@ -22,10 +22,10 @@ from src.models.artifacts import (
     load_bundle_metadata,
     load_inference_config,
     load_sklearn_model,
+    save_bundle_metadata,
     save_inference_config,
     save_normalizer_stats,
     save_sklearn_model,
-    save_bundle_metadata,
     utc_now_iso,
 )
 from src.models.data_slice import (

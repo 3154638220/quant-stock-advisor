@@ -79,6 +79,7 @@ def main() -> int:
     args = _parse_args()
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
+    log_cfg = cfg.get("logging", {}) or {}
     feat = cfg.get("features", {})
 
     lookback = int(feat.get("lookback_trading_days", 160))
@@ -86,7 +87,11 @@ def main() -> int:
     logs_dir = paths.get("logs_dir", "data/logs")
     if not Path(logs_dir).is_absolute():
         logs_dir = ROOT / logs_dir
-    setup_app_logging(logs_dir, name="fetch_only")
+    setup_app_logging(
+        logs_dir,
+        name="fetch_only",
+        log_format=str(log_cfg.get("format", "json")),
+    )
     log = get_logger("fetch_only")
 
     if args.symbols:

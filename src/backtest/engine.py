@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from src.backtest.performance_panel import PerformancePanel, compute_performance_panel
-from src.backtest.transaction_costs import TransactionCostParams, turnover_cost_drag
 from src.backtest.risk_metrics import risk_config_from_mapping
+from src.backtest.transaction_costs import TransactionCostParams, turnover_cost_drag
 
 
 @dataclass
@@ -24,12 +24,18 @@ class BacktestConfig:
     max_gross_exposure: float = 1.0
     # 可选：与 risk_metrics.risk_config_from_mapping 同结构的极端行情等（预留扩展）
     risk_cfg: Dict[str, Any] = field(default_factory=dict)
-    # ``close_to_close``：asset_returns 为当日收盘/昨收 -1；``tplus1_open``：须为 open(t+1)/open(t)-1（隔夜+日内至次日开盘），与 T+1 可卖一致，避免 T+0 假高频
+    # ``close_to_close``：asset_returns 为当日收盘/昨收 -1；
+    # ``tplus1_open``：须为 open(t+1)/open(t)-1（隔夜+日内至次日开盘）；
+    # ``vwap``：与 close_to_close 同收益口径，但在调仓日额外扣减 VWAP 执行冲击。
     execution_mode: str = "close_to_close"
     # 涨停买入失败处理模式（仅 tplus1_open 模式下有效）：
     # ``idle``：资金闲置（权重归零，对应收益置 0），等价于原 zero_if_limit_up_open
     # ``redistribute``：将涨停票权重均匀分配给同日其他可买标的（顺延到下一个标的）
     limit_up_mode: str = "idle"
+    # vwap 模式额外执行惩罚（按 half L1 换手比例缩放）：
+    # extra_drag = turnover * (vwap_slippage_bps_per_side + vwap_impact_bps * turnover) / 1e4
+    vwap_slippage_bps_per_side: float = 3.0
+    vwap_impact_bps: float = 8.0
 
 
 @dataclass
@@ -231,6 +237,7 @@ def run_backtest(
 
     - **close_to_close**（默认）：``r_t`` 为当日收盘相对昨收的收益；权重在 ``t-1`` 日末确定、参与 ``t`` 日收盘口径收益（常见回测约定）。
     - **tplus1_open**：``r_t`` 须为 ``open(t+1)/open(t)-1``（见 ``build_open_to_open_returns``），与「T+1 最早次日开盘卖」一致，避免用日内 T+0 夸大夏普；收益矩阵末行可为 ``nan``（无下一开盘），将按 0 处理。
+    - **vwap**：``r_t`` 仍使用 close-to-close 收益，但在调仓日额外扣减与换手相关的 VWAP 执行冲击，降低尾盘成交过于乐观的偏差。
 
     成本：在**发生调仓**的交易日，按相对上一有效权重的 half L1 换手，用 ``turnover_cost_drag`` 从当日收益中扣减。
     默认参数（commission_buy=2.5bps, commission_sell=2.5bps, slippage=2.0bps/side, stamp_duty=5.0bps）合计约 14 bps 双边，
@@ -244,8 +251,8 @@ def run_backtest(
     cfg = config or BacktestConfig()
     cost = cfg.cost_params
     exe = str(cfg.execution_mode).lower().strip()
-    if exe not in ("close_to_close", "tplus1_open"):
-        raise ValueError("execution_mode 须为 close_to_close 或 tplus1_open")
+    if exe not in ("close_to_close", "tplus1_open", "vwap"):
+        raise ValueError("execution_mode 须为 close_to_close、tplus1_open 或 vwap")
     ar = asset_returns.sort_index().copy()
     ar.index = pd.to_datetime(ar.index).normalize()
     sym_cols = [c for c in ar.columns]
@@ -310,6 +317,12 @@ def run_backtest(
             turn_series[i] = half_l1
             if cost is not None:
                 port[i] -= turnover_cost_drag(half_l1, cost)
+            if exe == "vwap":
+                # VWAP 模式将尾盘成交冲击显式体现在调仓日：换手越大，冲击惩罚越高。
+                base_bps = max(float(cfg.vwap_slippage_bps_per_side), 0.0)
+                impact_bps = max(float(cfg.vwap_impact_bps), 0.0)
+                extra_drag = half_l1 * (base_bps + impact_bps * half_l1) / 1e4
+                port[i] -= float(extra_drag)
 
     s = pd.Series(port, index=trading_index, name="portfolio_ret")
     turn = pd.Series(turn_series, index=trading_index, name="turnover_half_l1")

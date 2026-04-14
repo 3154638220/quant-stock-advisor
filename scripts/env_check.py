@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.data_fetcher.akshare_client import fetch_a_share_daily
 from src.settings import load_config, project_root
 
 
@@ -30,6 +32,22 @@ def _ok(msg: str, *, quiet: bool) -> None:
 def _fail(msg: str, *, quiet: bool) -> None:
     if not quiet:
         print(f"[FAIL] {msg}", flush=True)
+
+
+def _dns_summary(hosts: list[str]) -> str:
+    pairs: list[str] = []
+    for host in hosts:
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            ips: list[str] = []
+            for item in infos:
+                ip = item[4][0]
+                if ip not in ips:
+                    ips.append(ip)
+            pairs.append(f"{host}={'/'.join(ips[:2])}")
+        except Exception as exc:
+            pairs.append(f"{host}=ERR:{type(exc).__name__}")
+    return "; ".join(pairs)
 
 
 def run_checks(*, config: Path | None, quiet: bool) -> int:
@@ -92,17 +110,15 @@ def run_checks(*, config: Path | None, quiet: bool) -> int:
 
     # AkShare 连通（轻量请求）
     try:
-        import akshare as ak
-
-        df = ak.stock_zh_a_hist(
-            symbol="000001",
-            period="daily",
-            start_date="20240102",
-            end_date="20240110",
-            adjust="qfq",
+        df = fetch_a_share_daily(
+            "000001",
+            "20240102",
+            "20240110",
+            adjust=cfg.get("akshare", {}).get("adjust", "qfq"),
+            timeout_sec=float(cfg.get("akshare", {}).get("request_timeout_sec", 10.0)),
         )
         if df is None or df.empty:
-            _fail("AkShare stock_zh_a_hist 返回空表（网络或接口异常）", quiet=quiet)
+            _fail("AkShare 返回空表（网络或接口异常）", quiet=quiet)
             failed += 1
         else:
             _ok(
@@ -110,7 +126,14 @@ def run_checks(*, config: Path | None, quiet: bool) -> int:
                 quiet=quiet,
             )
     except Exception as e:
-        _fail(f"AkShare 连通性失败: {e}", quiet=quiet)
+        dns_msg = _dns_summary(
+            [
+                "finance.sina.com.cn",
+                "stock.finance.sina.com.cn",
+                "push2his.eastmoney.com",
+            ]
+        )
+        _fail(f"AkShare 连通性失败: {e} | DNS: {dns_msg}", quiet=quiet)
         failed += 1
 
     # Conda 环境提示（非强制）

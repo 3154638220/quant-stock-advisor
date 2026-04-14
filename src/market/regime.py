@@ -26,7 +26,6 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-
 REGIME_BULL = "bull"
 REGIME_BEAR = "bear"
 REGIME_OSCILLATION = "oscillation"
@@ -58,6 +57,16 @@ class RegimeConfig:
     bear_size_multiplier: float = 1.5
     # 震荡市反转权重倍数
     oscillation_reversal_multiplier: float = 1.3
+    # 是否启用基于波动率/趋势的连续动态权重（替代纯状态硬切换）
+    dynamic_weighting_enabled: bool = True
+    # 动态权重目标波动率（年化）；高于该值逐步降风险
+    dynamic_vol_target_ann: float = 0.22
+    # 波动率平滑尺度（越小越敏感）
+    dynamic_vol_scale: float = 0.08
+    # 趋势平滑尺度（按短期累计收益）
+    dynamic_trend_scale: float = 0.05
+    # 动态权重变化强度
+    dynamic_strength: float = 3.0
 
 
 def regime_config_from_mapping(m: Mapping[str, Any]) -> RegimeConfig:
@@ -75,6 +84,11 @@ def regime_config_from_mapping(m: Mapping[str, Any]) -> RegimeConfig:
         bear_momentum_multiplier=float(d.get("bear_momentum_multiplier", 0.4)),
         bear_size_multiplier=float(d.get("bear_size_multiplier", 1.5)),
         oscillation_reversal_multiplier=float(d.get("oscillation_reversal_multiplier", 1.3)),
+        dynamic_weighting_enabled=bool(d.get("dynamic_weighting_enabled", True)),
+        dynamic_vol_target_ann=float(d.get("dynamic_vol_target_ann", 0.22)),
+        dynamic_vol_scale=float(d.get("dynamic_vol_scale", 0.08)),
+        dynamic_trend_scale=float(d.get("dynamic_trend_scale", 0.05)),
+        dynamic_strength=float(d.get("dynamic_strength", 3.0)),
     )
 
 
@@ -197,6 +211,7 @@ def get_regime_weights(
     regime: str,
     *,
     cfg: Optional[RegimeConfig] = None,
+    regime_result: Optional[RegimeResult] = None,
 ) -> Dict[str, float]:
     """
     根据市场状态动态调整因子权重。
@@ -244,6 +259,12 @@ def get_regime_weights(
         "reversal": cfg.oscillation_reversal_multiplier,
     }
 
+    def _pick_multiplier(factor_name: str, mapping: Mapping[str, float]) -> float:
+        for key, m in mapping.items():
+            if key in factor_name:
+                return float(m)
+        return 1.0
+
     if regime == REGIME_BULL:
         multipliers = BULL_MULTIPLIERS
     elif regime == REGIME_BEAR:
@@ -253,12 +274,25 @@ def get_regime_weights(
 
     adjusted: Dict[str, float] = {}
     for factor, w in base_weights.items():
-        mult = 1.0
-        # 子串匹配：因子名中包含关键字即应用倍数
-        for key, m in multipliers.items():
-            if key in factor:
-                mult = m
-                break
+        mult = _pick_multiplier(factor, multipliers)
+        # 动态模式：根据近期趋势和波动率连续调整，不再完全依赖离散状态。
+        if cfg.dynamic_weighting_enabled and regime_result is not None:
+            bull_m = _pick_multiplier(factor, BULL_MULTIPLIERS)
+            bear_m = _pick_multiplier(factor, BEAR_MULTIPLIERS)
+            osc_m = _pick_multiplier(factor, OSCILLATION_MULTIPLIERS)
+            trend_scale = max(float(cfg.dynamic_trend_scale), 1e-6)
+            vol_scale = max(float(cfg.dynamic_vol_scale), 1e-6)
+            k = max(float(cfg.dynamic_strength), 1e-6)
+
+            trend_score = np.tanh(float(regime_result.short_return) / trend_scale)
+            vol_score = np.tanh(
+                (float(regime_result.realized_vol_ann) - float(cfg.dynamic_vol_target_ann))
+                / vol_scale
+            )
+            risk_on = 1.0 / (1.0 + np.exp(-k * (trend_score - vol_score)))
+            high_vol = 1.0 / (1.0 + np.exp(-k * vol_score))
+            blend_tb = risk_on * bull_m + (1.0 - risk_on) * bear_m
+            mult = (1.0 - high_vol) * blend_tb + high_vol * osc_m
         adjusted[factor] = w * mult
 
     # 重新归一化（按绝对值之和，保留符号方向）
