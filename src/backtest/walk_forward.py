@@ -26,10 +26,12 @@ def contiguous_time_splits(
     *,
     n_splits: int = 5,
     min_train_days: int = 252,
+    expanding_window: bool = True,
 ) -> List[TimeSlice]:
     """
-    时间顺序 K 段切片：将样本按时间均分为 n_splits 段测试窗；
-    第 k 折训练集为该测试段之前的所有交易日（扩展窗），测试集为第 k 段。
+    时间顺序 K 段切片：将样本按时间均分为 n_splits 段测试窗。
+    - expanding_window=True: 第 k 折训练集为测试段之前全部交易日（扩展窗）
+    - expanding_window=False: 第 k 折训练集固定为测试段前 min_train_days 个交易日
     """
     if n_splits < 2:
         raise ValueError("n_splits 须 >= 2")
@@ -45,7 +47,11 @@ def contiguous_time_splits(
         a, b = bounds[k], bounds[k + 1]
         if b <= a:
             continue
-        train_ix = idx[:a]
+        if bool(expanding_window):
+            train_ix = idx[:a]
+        else:
+            train_start = max(0, a - int(min_train_days))
+            train_ix = idx[train_start:a]
         test_ix = idx[a:b]
         if len(train_ix) < min_train_days or len(test_ix) < 1:
             continue
@@ -153,6 +159,19 @@ def walk_forward_backtest(
         rows.append(d)
     detail = pd.DataFrame(rows)
     agg = aggregate_walk_forward_panels(panels, method="mean") if panels else {"n_folds": 0}
+    if panels:
+        ann = np.array(
+            [p.annualized_return for p in panels if np.isfinite(p.annualized_return)],
+            dtype=np.float64,
+        )
+        if ann.size > 0:
+            agg["median_ann_return"] = float(np.median(ann))
+            agg["p25_ann_return"] = float(np.quantile(ann, 0.25))
+            agg["p75_ann_return"] = float(np.quantile(ann, 0.75))
+        else:
+            agg["median_ann_return"] = float("nan")
+            agg["p25_ann_return"] = float("nan")
+            agg["p75_ann_return"] = float("nan")
     return panels, detail, agg
 
 

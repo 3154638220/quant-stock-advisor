@@ -1,0 +1,70 @@
+# F1 准入复核：gross_margin_delta 单因子
+
+paths:
+  duckdb_path: data/market.duckdb
+  results_dir: data/results
+  logs_dir: data/logs
+  experiments_dir: data/experiments
+  asof_trade_date: ""
+
+database:
+  table_daily: a_share_daily
+  table_fundamental: a_share_fundamental
+
+signals:
+  sort_by: composite_extended
+  top_k: 20
+  composite_extended:
+    gross_margin_delta: 1.0
+  p1_factor_filter:
+    enabled: false
+  ic_weighting:
+    enabled: false
+
+portfolio:
+  weight_method: equal_weight
+  max_turnover: 0.3
+  industry_cap_count: 5
+  cov_lookback_days: 252
+  cov_ridge: 1.0e-6
+  cov_shrinkage: ledoit_wolf
+  cov_ewma_halflife: 20
+  risk_aversion: 1.0
+
+risk:
+  benchmark_symbol: market_ew_proxy
+
+regime:
+  enabled: true
+  short_window: 20
+  long_window: 60
+  dynamic_weighting_enabled: true
+  dynamic_vol_target_ann: 0.22
+  dynamic_vol_scale: 0.08
+  dynamic_trend_scale: 0.05
+  dynamic_strength: 3.0
+
+backtest:
+  execution_mode: tplus1_open
+  eval_rebalance_rule: M
+  limit_up_mode: redistribute
+  vwap_slippage_bps_per_side: 3.0
+  vwap_impact_bps: 8.0
+
+transaction_costs:
+  commission_buy_bps: 2.5
+  commission_sell_bps: 2.5
+  slippage_bps_per_side: 4.5
+  stamp_duty_sell_bps: 5.0
+
+prefilter:
+  enabled: false
+  limit_move_max: 2
+  turnover_low_pct: 0.10
+  turnover_high_pct: 0.98
+  price_position_high_pct: 0.90
+
+universe_filter:
+  enabled: true
+  min_amount_20d: 50000000
+  require_roe_ttm_positive: true

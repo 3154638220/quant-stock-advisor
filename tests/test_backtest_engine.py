@@ -92,6 +92,31 @@ def test_run_backtest_equal_weight_no_cost():
     assert np.isfinite(res.panel.sharpe_ratio)
 
 
+def test_run_backtest_close_to_close_execution_lag_delays_weights():
+    """execution_lag=1 时新调仓权重参与收益再晚一日（相对 lag=0）。"""
+    idx = pd.bdate_range("2024-01-02", periods=4)
+    ar = pd.DataFrame(
+        [
+            [0.10, 0.0],
+            [0.0, 0.10],
+            [0.0, 0.20],
+            [0.10, 0.10],
+        ],
+        index=idx,
+        columns=["AAA", "BBB"],
+        dtype=np.float64,
+    )
+    ws = pd.DataFrame([[1.0, 0.0], [0.0, 1.0]], index=idx[[0, 1]], columns=["AAA", "BBB"])
+    r0 = run_backtest(ar, ws, config=BacktestConfig(execution_mode="close_to_close", execution_lag=0))
+    r1 = run_backtest(ar, ws, config=BacktestConfig(execution_mode="close_to_close", execution_lag=1))
+    dr0 = r0.daily_returns.reindex(idx).fillna(0.0).to_numpy()
+    dr1 = r1.daily_returns.reindex(idx).fillna(0.0).to_numpy()
+    assert abs(dr0[2] - 0.20) < 1e-9
+    assert abs(dr1[2] - 0.0) < 1e-9
+    assert abs(dr1[3] - 0.10) < 1e-9
+    assert r1.meta.get("execution_lag") == 1
+
+
 def test_run_backtest_with_cost_reduces_return():
     ar, ws = _dummy_market(80)
     c = TransactionCostParams(

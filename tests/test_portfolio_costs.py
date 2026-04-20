@@ -13,7 +13,11 @@ from src.backtest.transaction_costs import (
 )
 from src.market.regime import RegimeConfig, RegimeResult, get_regime_weights
 from src.portfolio.covariance import mean_cov_returns_from_wide
-from src.portfolio.optimizer import optimize_min_variance, optimize_risk_parity
+from src.portfolio.optimizer import (
+    optimize_min_variance,
+    optimize_risk_parity,
+    solve_weights_from_cov_method,
+)
 from src.portfolio.weights import (
     apply_turnover_constraint,
     build_portfolio_weights,
@@ -137,6 +141,55 @@ def test_build_portfolio_risk_parity():
     )
     assert w.sum() == pytest.approx(1.0)
     assert np.all(w >= 0)
+
+
+def test_solve_weights_from_cov_method_reports_equal_like_risk_parity():
+    cov = np.array(
+        [
+            [0.04, 0.01, 0.01],
+            [0.01, 0.04, 0.01],
+            [0.01, 0.01, 0.04],
+        ],
+        dtype=np.float64,
+    )
+    w, diag = solve_weights_from_cov_method("risk_parity", cov)
+    assert w.sum() == pytest.approx(1.0)
+    assert diag["solver_success"] is True
+    assert diag["weights"]["is_close_to_reference"] is True
+    assert diag["fallback_reason"] == "equal_like_solution"
+    assert diag["covariance"]["diag_share"] > 0
+
+
+def test_build_portfolio_weights_return_diagnostics_for_min_variance():
+    df = pd.DataFrame(
+        {
+            "symbol": ["600519", "000001", "300750"],
+            "momentum": [1.0, 2.0, 3.0],
+        }
+    )
+    cov = np.array(
+        [
+            [0.01, 0.002, 0.001],
+            [0.002, 0.09, 0.003],
+            [0.001, 0.003, 0.16],
+        ],
+        dtype=np.float64,
+    )
+    w, diag = build_portfolio_weights(
+        df,
+        weight_method="min_variance",
+        score_col="auto",
+        max_single_weight=1.0,
+        max_industry_weight=None,
+        industry_col=None,
+        max_turnover=1.0,
+        cov_matrix=cov,
+        return_diagnostics=True,
+    )
+    assert w.sum() == pytest.approx(1.0)
+    assert diag["optimizer"]["solver_success"] is True
+    assert diag["post_constraints"]["l1_diff_vs_reference"] > 0.05
+    assert diag["post_constraint_l1_shift"] == pytest.approx(0.0)
 
 
 def test_covariance_ewma_and_industry_factor():

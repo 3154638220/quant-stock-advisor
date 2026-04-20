@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
 
 from src.models.artifacts import (
     BundleMetadata,
@@ -100,6 +101,52 @@ def _mean_rank_ic_per_group(pred: np.ndarray, y: np.ndarray, groups: np.ndarray)
     return float(np.mean(ics)) if ics else float("nan")
 
 
+def _fit_rank_and_eval_rank_ic(
+    *,
+    params: Dict[str, Any],
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    g_tr: np.ndarray,
+    X_va: np.ndarray,
+    y_va: np.ndarray,
+    g_va: np.ndarray,
+) -> float:
+    """训练 ranker 并返回验证集按组 Rank IC。"""
+    y_tr_fit = _integer_relevance_labels(y_tr, g_tr)
+    y_va_fit = _integer_relevance_labels(y_va, g_va)
+    est = XGBRanker(**params)
+    try:
+        est.fit(
+            X_tr,
+            y_tr_fit,
+            group=g_tr,
+            eval_set=[(X_va, y_va_fit)],
+            eval_group=[g_va],
+        )
+    except TypeError:
+        est.fit(X_tr, y_tr_fit, group=g_tr)
+    pred_va = est.predict(X_va)
+    return _mean_rank_ic_per_group(pred_va, y_va, g_va)
+
+
+def _fit_reg_and_eval_mse(
+    *,
+    params: Dict[str, Any],
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    X_va: np.ndarray,
+    y_va: np.ndarray,
+) -> float:
+    """训练 regressor 并返回验证集 MSE。"""
+    est = XGBRegressor(**params)
+    try:
+        est.fit(X_tr, y_tr, eval_set=[(X_va, y_va)])
+    except TypeError:
+        est.fit(X_tr, y_tr)
+    pred_va = est.predict(X_va)
+    return float(np.mean((y_va - pred_va) ** 2))
+
+
 def _prepare_xy_z(
     df: pd.DataFrame,
     *,
@@ -182,6 +229,8 @@ def train_xgboost_panel(
     guard_metric_key: str = "val_rank_ic",
     guard_quantile: float = 0.25,
     guard_min_history: int = 4,
+    min_rank_ic_to_publish: float = 0.03,
+    time_cv_splits: int = 3,
     keep_recent_versions: int = 8,
     publish_bundle_dir: Optional[Union[str, Path]] = None,
     out_root: Union[str, Path] = "data/models",
@@ -284,6 +333,92 @@ def train_xgboost_panel(
         default_params.setdefault("ndcg_exp_gain", False)
     default_params.update({k: v for k, v in xgb_params.items() if k != "use_gpu"})
 
+    cv_metrics: Dict[str, float] = {}
+    n_cv = int(max(0, time_cv_splits))
+    if n_cv >= 2:
+        train_dates = np.sort(pd.to_datetime(train_df[date_col]).dt.normalize().unique())
+        if len(train_dates) >= n_cv + 1:
+            cv_values: List[float] = []
+            tscv = TimeSeriesSplit(n_splits=n_cv)
+            for tr_idx_date, va_idx_date in tscv.split(train_dates):
+                tr_dates = set(train_dates[tr_idx_date])
+                va_dates = set(train_dates[va_idx_date])
+                fold_tr = train_df[pd.to_datetime(train_df[date_col]).dt.normalize().isin(tr_dates)]
+                fold_va = train_df[pd.to_datetime(train_df[date_col]).dt.normalize().isin(va_dates)]
+                if fold_tr.empty or fold_va.empty:
+                    continue
+                if use_rank:
+                    X_ftr, y_ftr, g_ftr, _ = _prepare_xy_z_grouped(
+                        fold_tr,
+                        raw_feature_names=raw_feature_names,
+                        target_column=target_column,
+                        rsi_mode=rsi_mode,
+                        date_col=date_col,
+                        min_group_size=2,
+                    )
+                    X_fva, y_fva, g_fva, _ = _prepare_xy_z_grouped(
+                        fold_va,
+                        raw_feature_names=raw_feature_names,
+                        target_column=target_column,
+                        rsi_mode=rsi_mode,
+                        date_col=date_col,
+                        min_group_size=2,
+                    )
+                    if len(X_ftr) < 10 or len(X_fva) < 5:
+                        continue
+                    v = _fit_rank_and_eval_rank_ic(
+                        params=default_params,
+                        X_tr=X_ftr,
+                        y_tr=y_ftr,
+                        g_tr=g_ftr,
+                        X_va=X_fva,
+                        y_va=y_fva,
+                        g_va=g_fva,
+                    )
+                else:
+                    X_ftr, y_ftr, _ = _prepare_xy_z(
+                        fold_tr,
+                        raw_feature_names=raw_feature_names,
+                        target_column=target_column,
+                        rsi_mode=rsi_mode,
+                        date_col=date_col,
+                    )
+                    X_fva, y_fva, _ = _prepare_xy_z(
+                        fold_va,
+                        raw_feature_names=raw_feature_names,
+                        target_column=target_column,
+                        rsi_mode=rsi_mode,
+                        date_col=date_col,
+                    )
+                    if len(X_ftr) < 10 or len(X_fva) < 5:
+                        continue
+                    reg_params = {k: v for k, v in default_params.items() if k != "objective"}
+                    v = _fit_reg_and_eval_mse(
+                        params=reg_params,
+                        X_tr=X_ftr,
+                        y_tr=y_ftr,
+                        X_va=X_fva,
+                        y_va=y_fva,
+                    )
+                if np.isfinite(v):
+                    cv_values.append(float(v))
+            if cv_values:
+                arr = np.asarray(cv_values, dtype=np.float64)
+                if use_rank:
+                    cv_metrics = {
+                        "cv_rank_ic_mean": float(np.nanmean(arr)),
+                        "cv_rank_ic_std": float(np.nanstd(arr)),
+                        "cv_rank_ic_min": float(np.nanmin(arr)),
+                        "cv_folds": float(len(arr)),
+                    }
+                else:
+                    cv_metrics = {
+                        "cv_val_mse_mean": float(np.nanmean(arr)),
+                        "cv_val_mse_std": float(np.nanstd(arr)),
+                        "cv_val_mse_min": float(np.nanmin(arr)),
+                        "cv_folds": float(len(arr)),
+                    }
+
     if use_rank:
         y_tr_fit = _integer_relevance_labels(y_tr, g_tr)
         y_va_fit = _integer_relevance_labels(y_va, g_va)
@@ -315,6 +450,7 @@ def train_xgboost_panel(
             "train_mse": float(np.mean((y_tr - pred_tr) ** 2)),
             "val_mse": float(np.mean((y_va - pred_va) ** 2)),
         }
+        metrics.update(cv_metrics)
     else:
         metrics = {
             "train_mse": float(np.mean((y_tr - pred_tr) ** 2)),
@@ -322,8 +458,15 @@ def train_xgboost_panel(
             "train_mae": float(np.mean(np.abs(y_tr - pred_tr))),
             "val_mae": float(np.mean(np.abs(y_va - pred_va))),
         }
+        metrics.update(cv_metrics)
 
     guard_decision: Dict[str, Any] = {}
+    if use_rank:
+        val_rank_ic = float(metrics.get("val_rank_ic", np.nan))
+        if not np.isfinite(val_rank_ic) or val_rank_ic < float(min_rank_ic_to_publish):
+            raise RuntimeError(
+                f"候选模型 val_rank_ic={val_rank_ic:.6f} 低于最低门槛 {float(min_rank_ic_to_publish):.6f}，拒绝发布。"
+            )
     if use_rank and enforce_metric_guard:
         hist_dirs = list_bundle_dirs(out_root, prefix="xgboost_panel_")
         history_vals: List[float] = []
@@ -369,6 +512,8 @@ def train_xgboost_panel(
             "val_frac": val_frac,
             "xgboost_objective": "rank" if use_rank else "regression",
             "label_spec": label_spec,
+            "time_cv_splits": int(time_cv_splits),
+            "min_rank_ic_to_publish": float(min_rank_ic_to_publish),
         },
     )
     save_inference_config(bundle_dir, inf)
@@ -389,6 +534,8 @@ def train_xgboost_panel(
             "rsi_mode": rsi_mode,
             "xgboost_objective": "rank" if use_rank else "regression",
             "label_spec": label_spec,
+            "time_cv_splits": int(time_cv_splits),
+            "min_rank_ic_to_publish": float(min_rank_ic_to_publish),
             "metric_guard": guard_decision,
         },
     )

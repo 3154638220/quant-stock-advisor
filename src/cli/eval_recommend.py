@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from argparse import Namespace
 from pathlib import Path
 
@@ -18,10 +20,12 @@ from ..backtest.transaction_costs import (
 from ..data_fetcher import DuckDBManager
 from ..logging_config import get_logger, setup_app_logging
 from ..notify import find_latest_recommendation_csv
+from ..models.experiment import append_experiment_csv, append_experiment_jsonl, build_experiment_record
 from ..settings import load_config
 
 
 def run_eval_recommend(args: Namespace, *, root: Path) -> int:
+    t0 = time.perf_counter()
     cfg = load_config(args.config)
     paths = cfg.get("paths", {})
     log_cfg = cfg.get("logging", {}) or {}
@@ -145,6 +149,56 @@ def run_eval_recommend(args: Namespace, *, root: Path) -> int:
         "per_name": summary_row,
         "portfolio": portfolio_summary,
     }
+    # P3-C：将推荐评估结果统一写入 experiments，便于模型更新后的线上一致性追踪。
+    try:
+        experiments_dir = paths.get("experiments_dir", "data/experiments")
+        if not Path(experiments_dir).is_absolute():
+            experiments_dir = root / experiments_dir
+        duration = time.perf_counter() - t0
+        metrics = {
+            "horizon": int(args.horizon),
+            "n": int(summary_row.get("n", 0)),
+            "n_valid": int(summary_row.get("n_valid", 0)),
+            "mean": float(summary_row.get("mean", float("nan"))),
+            "median": float(summary_row.get("median", float("nan"))),
+        }
+        if isinstance(portfolio_summary, dict):
+            for k in (
+                "portfolio_gross_ret",
+                "portfolio_net_ret_long_hold",
+                "turnover",
+                "max_drawdown",
+                "annualized_return",
+                "annualized_vol",
+                "sharpe",
+            ):
+                if k in portfolio_summary:
+                    try:
+                        metrics[k] = float(portfolio_summary.get(k))
+                    except (TypeError, ValueError):
+                        pass
+        run_id = uuid.uuid4().hex[:12]
+        rec = build_experiment_record(
+            run_id=run_id,
+            model_type="recommend_eval",
+            duration_sec=duration,
+            seed=0,
+            data_slice_hash="recommend_eval",
+            content_hash=f"{csv_path.resolve()}::{args.horizon}",
+            params={
+                "csv_path": str(csv_path.resolve()),
+                "asof_trade_date_min": str(asof_ts.date()),
+                "settlement": str(settlement),
+                "no_portfolio": bool(getattr(args, "no_portfolio", False)),
+            },
+            metrics=metrics,
+            bundle_dir=out_path,
+        )
+        append_experiment_jsonl(experiments_dir, rec)
+        append_experiment_csv(experiments_dir, rec)
+    except Exception as e_exp:  # noqa: BLE001
+        log.warning("写入 experiments 失败（不影响评估主流程）: %s", e_exp)
+
     if args.json_summary:
         print(json.dumps(out_payload, ensure_ascii=False, default=str))
     else:

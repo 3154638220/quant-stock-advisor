@@ -199,7 +199,8 @@ def build_portfolio_weights(
     expected_returns: Optional[np.ndarray] = None,
     risk_aversion: float = 1.0,
     turnover_cost_model: Optional[Mapping[str, Any]] = None,
-) -> np.ndarray:
+    return_diagnostics: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
     """
     返回与 ``df`` 行对齐、和为 1 的长仅权重向量（若无可投则全 0）。
 
@@ -211,6 +212,14 @@ def build_portfolio_weights(
         return np.zeros(0, dtype=np.float64)
     method = str(weight_method).lower()
     cov_methods = ("risk_parity", "min_variance", "mean_variance")
+    diagnostics: Dict[str, Any] = {
+        "method": method,
+        "constraints": {
+            "max_single_weight": float(max_single_weight),
+            "max_industry_weight": float(max_industry_weight) if max_industry_weight is not None else None,
+            "max_turnover": float(max_turnover),
+        },
+    }
     if method in cov_methods:
         if cov_matrix is None:
             raise ValueError(
@@ -221,7 +230,7 @@ def build_portfolio_weights(
             raise ValueError(
                 f"cov_matrix 形状 {cov.shape} 与推荐表行数 {n} 不一致"
             )
-        from src.portfolio.optimizer import weights_from_cov_method
+        from src.portfolio.optimizer import solve_weights_from_cov_method, weight_diagnostics
 
         mu = None
         if method == "mean_variance":
@@ -230,16 +239,25 @@ def build_portfolio_weights(
             mu = np.asarray(expected_returns, dtype=np.float64).ravel()
             if mu.size != n:
                 raise ValueError("expected_returns 长度须与推荐表行数一致")
-        w = weights_from_cov_method(
+        w, opt_diag = solve_weights_from_cov_method(
             method,
             cov,
             mu=mu,
             risk_aversion=float(risk_aversion),
         )
+        diagnostics["optimizer"] = opt_diag
     else:
         sc = infer_score_column(df) if score_col == "auto" else str(score_col)
         scores = _scores_from_column(df, sc)
         w = _nonnegative_weights_from_scores(scores, method=weight_method)
+        from src.portfolio.optimizer import weight_diagnostics
+
+        diagnostics["optimizer"] = {
+            "method": method,
+            "score_col": sc,
+            "weights": weight_diagnostics(w),
+        }
+    w_before_constraints = np.asarray(w, dtype=np.float64).copy()
     ind_c = industry_col if industry_col and industry_col in df.columns else None
     g = None
     if ind_c is not None and max_industry_weight is not None:
@@ -286,6 +304,13 @@ def build_portfolio_weights(
     s = w.sum()
     if s > 0:
         w /= s
+    from src.portfolio.optimizer import weight_diagnostics
+
+    equal_reference = np.ones_like(w, dtype=np.float64) / float(len(w)) if len(w) > 0 else None
+    diagnostics["post_constraints"] = weight_diagnostics(w, reference=equal_reference)
+    diagnostics["post_constraint_l1_shift"] = float(np.sum(np.abs(w - w_before_constraints)))
+    if return_diagnostics:
+        return w, diagnostics
     return w
 
 

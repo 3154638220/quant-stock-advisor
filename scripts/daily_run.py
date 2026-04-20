@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -31,7 +32,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_fetcher import DuckDBManager, list_default_universe_symbols
+from src.data_fetcher.fundamental_client import FundamentalClient
 from src.cli.eval_recommend import run_eval_recommend
+from src.features.fundamental_factors import preprocess_fundamental_cross_section
+from src.features.ic_monitor import ICMonitor
 from src.features.neutralize import neutralize_size_industry_regression
 from src.features.panel import pivot_close_wide, pivot_field_aligned_to_close, wide_close_to_numpy
 from src.features.tensor_alpha import compute_momentum_rsi_torch
@@ -55,6 +59,7 @@ from src.settings import (
     load_config,
     resolve_asof_trade_end,
 )
+from scripts.run_backtest_eval import apply_p1_factor_policy, load_factor_ic_summary
 
 EPILOG = """
 子命令说明
@@ -136,7 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         choices=("momentum", "rsi", "composite", "composite_extended", "xgboost", "deep_sequence"),
-        help="排序键；默认 config signals.sort_by（xgboost=树模型；deep_sequence=阶段三 OHLCV 序列模型，需 deep_sequence.bundle_dir）",
+        help="排序键；默认 config signals.sort_by（建议默认 composite_extended；xgboost=树模型；deep_sequence=阶段三 OHLCV 序列模型，需 deep_sequence.bundle_dir）",
     )
     run_p.add_argument(
         "--asof-date",
@@ -213,26 +218,54 @@ def main_run(args: argparse.Namespace) -> int:
     log_cfg = cfg.get("logging", {}) or {}
     feat = cfg.get("features", {})
     sig = cfg.get("signals", {})
+    fund_cfg = cfg.get("fundamental", {}) or {}
     portfolio_cfg = portfolio_config_from_mapping(cfg.get("portfolio") or {})
     comp = sig.get("composite") or {}
     comp_ext = sig.get("composite_extended") or {}
+    p1_cfg = sig.get("p1_factor_filter") or {}
+    ic_cfg = sig.get("ic_weighting") or {}
     tree_m = sig.get("tree_model") or {}
     deep_m = sig.get("deep_sequence") or {}
     gpu = cfg.get("gpu", {})
 
-    top_k = args.top_k if args.top_k is not None else int(sig.get("top_k", 50))
-    sort_by = (
-        args.sort_by
-        if args.sort_by is not None
-        else str(sig.get("sort_by", "xgboost")).lower()
-    )
+    top_k = args.top_k if args.top_k is not None else int(sig.get("top_k", 10))
+    # P0 约定：生产默认排序键与回测保持一致，回退值使用 composite_extended。
+    sort_by = args.sort_by if args.sort_by is not None else str(sig.get("sort_by", "composite_extended")).lower()
     w_mom = float(comp.get("w_momentum", 0.65))
     w_rsi = float(comp.get("w_rsi", 0.35))
     rsi_mode = str(comp.get("rsi_mode", "level")).lower()
     if rsi_mode not in ("level", "mean_revert"):
         rsi_mode = "level"
+    effective_comp_ext = dict(comp_ext) if comp_ext else {}
+    p1_filter_enabled = bool(p1_cfg.get("enabled", False))
+    if sort_by == "composite_extended" and effective_comp_ext and p1_filter_enabled:
+        p1_ic_report_path = str(p1_cfg.get("ic_report_path", "")).strip()
+        ic_summary = load_factor_ic_summary(p1_ic_report_path)
+        if ic_summary.empty:
+            log.warning("P1 因子过滤已启用，但 IC 报告为空或不可读：%s；保留静态权重。", p1_ic_report_path)
+        else:
+            effective_comp_ext, p1_actions = apply_p1_factor_policy(
+                effective_comp_ext,
+                ic_summary,
+                remove_if_t1_and_t21_negative=bool(p1_cfg.get("remove_if_t1_and_t21_negative", True)),
+                zero_if_abs_t1_below=float(p1_cfg.get("zero_if_abs_t1_below", 0.0)),
+                flip_if_t1_negative_and_t21_above=float(
+                    p1_cfg.get("flip_if_t1_negative_and_t21_above", 0.005)
+                ),
+            )
+            if not p1_actions.empty:
+                vc = p1_actions["action"].value_counts().to_dict()
+                log.info(
+                    "P1 因子 IC 规则已应用：keep=%d, zero=%d, flip=%d, remove=%d",
+                    int(vc.get("keep", 0)),
+                    int(vc.get("zero", 0)),
+                    int(vc.get("flip", 0)),
+                    int(vc.get("remove", 0)),
+                )
     lookback = int(feat.get("lookback_trading_days", 160))
     min_valid = int(feat.get("min_valid_days", 30))
+    fund_auto_update = bool(fund_cfg.get("auto_update", True))
+    fund_auto_update_max_symbols = int(fund_cfg.get("auto_update_max_symbols", 0) or 0)
     mom_w = int(feat.get("momentum_window", 10))
     rsi_p = int(feat.get("rsi_period", 14))
     atr_p = int(feat.get("atr_period", 14))
@@ -266,6 +299,115 @@ def main_run(args: argparse.Namespace) -> int:
     results_dir = paths.get("results_dir", "data/results")
     if not Path(results_dir).is_absolute():
         results_dir = ROOT / results_dir
+
+    def _load_llm_attention_factor(trade_date_obj) -> pd.DataFrame:
+        """
+        读取当日 LLM 关注度 CSV，构造 ``llm_sentiment_z``。
+        文件缺失或无可用列时返回空表。
+        """
+        p = Path(results_dir) / f"llm_attention_{trade_date_obj.isoformat()}.csv"
+        if not p.exists():
+            return pd.DataFrame(columns=["symbol", "llm_sentiment_z"])
+        try:
+            tab = pd.read_csv(p, encoding="utf-8-sig")
+        except Exception as e:  # noqa: BLE001
+            log.warning("读取 LLM 关注度 CSV 失败（跳过）: %s", e)
+            return pd.DataFrame(columns=["symbol", "llm_sentiment_z"])
+        if tab.empty:
+            return pd.DataFrame(columns=["symbol", "llm_sentiment_z"])
+
+        sym_col = "symbol" if "symbol" in tab.columns else ("代码" if "代码" in tab.columns else None)
+        if sym_col is None:
+            return pd.DataFrame(columns=["symbol", "llm_sentiment_z"])
+        sig_col = "significance" if "significance" in tab.columns else None
+        rank_col = "attention_rank_change" if "attention_rank_change" in tab.columns else None
+
+        score = pd.Series(0.0, index=tab.index, dtype=float)
+        if sig_col is not None:
+            score = score + pd.to_numeric(tab[sig_col], errors="coerce").fillna(0.0)
+        if rank_col is not None:
+            score = score + pd.to_numeric(tab[rank_col], errors="coerce").fillna(0.0) * 0.5
+        sd = float(score.std(ddof=0))
+        if abs(sd) < 1e-12:
+            z = pd.Series(0.0, index=score.index, dtype=float)
+        else:
+            z = (score - float(score.mean())) / sd
+
+        out_llm = pd.DataFrame(
+            {
+                "symbol": tab[sym_col]
+                .astype(str)
+                .str.extract(r"(\d{6})", expand=False)
+                .fillna("")
+                .str.zfill(6),
+                "llm_sentiment_z": z.astype(float),
+            }
+        )
+        out_llm = out_llm[out_llm["symbol"].str.len() == 6]
+        out_llm = out_llm.drop_duplicates(subset=["symbol"], keep="last")
+        return out_llm
+
+    def _load_ic_weight_override(trade_date_obj) -> Optional[dict[str, float]]:
+        """
+        P2-A：读取滚动 ICIR 动态权重（若可用）。
+        支持两种输入：
+        1) update_ic_weights.py 生成的 JSON（含 weights 字段）
+        2) 直接读取 ic_monitor.json 并按窗口统计最新 roll_ir（回退方案）
+        """
+        if not bool(ic_cfg.get("enabled", False)):
+            return None
+        clip_abs = float(ic_cfg.get("clip_abs_weight", 0.25))
+        min_obs = int(ic_cfg.get("min_obs", 20))
+        window = int(ic_cfg.get("window", 60))
+        override_path = Path(str(ic_cfg.get("weights_path", "data/cache/ic_weights.json")))
+        if not override_path.is_absolute():
+            override_path = ROOT / override_path
+        if override_path.exists():
+            try:
+                payload = json.loads(override_path.read_text(encoding="utf-8"))
+                tab = payload.get("weights_by_date")
+                if isinstance(tab, dict):
+                    key = pd.Timestamp(trade_date_obj).strftime("%Y-%m-%d")
+                    if key in tab and isinstance(tab[key], dict):
+                        return {str(k): float(v) for k, v in tab[key].items()}
+                if isinstance(payload.get("weights"), dict):
+                    return {str(k): float(v) for k, v in payload["weights"].items()}
+            except Exception as e_json:  # noqa: BLE001
+                log.warning("读取 IC 动态权重文件失败（回退静态）: %s", e_json)
+
+        mon_path = Path(str(ic_cfg.get("monitor_path", "data/logs/ic_monitor.json")))
+        if not mon_path.is_absolute():
+            mon_path = ROOT / mon_path
+        if not mon_path.exists():
+            return None
+        try:
+            mon = ICMonitor(mon_path)
+            st = mon.rolling_ic_stats(window=window)
+            if st.empty:
+                return None
+            st = st[st["trade_date"] <= pd.Timestamp(trade_date_obj)]
+            if st.empty:
+                return None
+            latest = st.sort_values("trade_date").groupby("factor", as_index=False).tail(1)
+            latest = latest[pd.to_numeric(latest["roll_ir"], errors="coerce").notna()]
+            if latest.empty:
+                return None
+            out_w: dict[str, float] = {}
+            for _, r in latest.iterrows():
+                if int((st["factor"] == r["factor"]).sum()) < min_obs:
+                    continue
+                v = float(r["roll_ir"])
+                v = max(-clip_abs, min(clip_abs, v))
+                out_w[str(r["factor"])] = v
+            if not out_w:
+                return None
+            s_abs = float(sum(abs(v) for v in out_w.values()))
+            if s_abs <= 1e-12:
+                return None
+            return {k: v / s_abs for k, v in out_w.items()}
+        except Exception as e_mon:  # noqa: BLE001
+            log.warning("从 IC 监控构建动态权重失败（回退静态）: %s", e_mon)
+            return None
 
     logs_dir = paths.get("logs_dir", "data/logs")
     if not Path(logs_dir).is_absolute():
@@ -464,6 +606,57 @@ def main_run(args: argparse.Namespace) -> int:
     )
     out = out.replace([float("inf"), float("-inf")], pd.NA)
     out = out.dropna(subset=["momentum"])
+    out["symbol"] = out["symbol"].astype(str).str.zfill(6)
+
+    # P1-A：按公告日对齐基本面快照（point-in-time）
+    try:
+        fund_symbols = out["symbol"].astype(str).str.zfill(6).drop_duplicates().tolist()
+        with FundamentalClient(config_path=args.config) as fc:
+            if fund_auto_update and fund_symbols:
+                update_symbols = (
+                    fund_symbols[:fund_auto_update_max_symbols]
+                    if fund_auto_update_max_symbols > 0
+                    else fund_symbols
+                )
+                try:
+                    n_upsert = fc.update_symbols(update_symbols)
+                    log.info(
+                        "P1 基本面增量写入完成：symbols=%d, upsert_rows=%d",
+                        len(update_symbols),
+                        n_upsert,
+                    )
+                except Exception as e_fund_upd:  # noqa: BLE001
+                    log.warning("基本面增量写入失败（继续使用已落库快照）: %s", e_fund_upd)
+            elif not fund_auto_update:
+                log.info("P1 基本面增量写入已关闭（fundamental.auto_update=false）。")
+            fund = fc.load_point_in_time(
+                asof_date=asof_date,
+                symbols=fund_symbols,
+            )
+        if not fund.empty:
+            out = out.merge(fund, on="symbol", how="left")
+            out["trade_date"] = pd.Timestamp(asof_date)
+            out = preprocess_fundamental_cross_section(
+                out,
+                date_col="trade_date",
+                size_col="log_market_cap",
+                industry_col=portfolio_cfg.get("industry_col"),
+                neutralize=neutralize_enabled,
+            )
+            out = out.drop(columns=["trade_date"], errors="ignore")
+            log.info("P1 基本面因子已接入：%d 只标的具备 PIT 基本面快照", int(fund["symbol"].nunique()))
+        else:
+            log.info("P1 基本面因子：fundamental 表暂无可用快照，本次回退技术面因子。")
+    except Exception as e_fund:  # noqa: BLE001
+        log.warning("加载 PIT 基本面因子失败（回退技术面）: %s", e_fund)
+
+    # P1-C：接入 LLM 关注度情绪因子（若当日结果文件存在）
+    llm_fac = _load_llm_attention_factor(asof_date)
+    if not llm_fac.empty:
+        out = out.merge(llm_fac, on="symbol", how="left")
+        log.info("P1 LLM 因子已接入：%d 只标的含 llm_sentiment_z", int(llm_fac["symbol"].nunique()))
+    elif "llm_sentiment_z" not in out.columns:
+        out["llm_sentiment_z"] = np.nan
 
     # ——— 市值中性化：对截面因子去除市值暴露 ———
     # A 股市值效应极强，不中性化的因子 IC 很可能大部分来自市值暴露。
@@ -475,6 +668,10 @@ def main_run(args: argparse.Namespace) -> int:
         "price_position", "intraday_range", "upper_shadow_ratio",
         "lower_shadow_ratio", "close_open_return", "overnight_gap",
         "tail_strength", "volume_price_trend", "intraday_range_skew",
+        # P1 扩展：基本面 / 资金流 / LLM 情绪
+        "pe_ttm", "pb", "ev_ebitda", "roe_ttm", "net_profit_yoy",
+        "gross_margin_change", "debt_to_assets_change", "ocf_to_net_profit",
+        "northbound_net_inflow", "margin_buy_ratio", "llm_sentiment_z",
     ]
     if neutralize_enabled and "log_market_cap" in out.columns:
         _industry_col = str(portfolio_cfg.get("industry_col") or "").strip() or None
@@ -516,16 +713,30 @@ def main_run(args: argparse.Namespace) -> int:
     if sort_by == "composite":
         out = out.dropna(subset=["rsi"])
     elif sort_by == "composite_extended":
-        ext_w = {k: float(v) for k, v in comp_ext.items() if isinstance(k, str)}
-        need = [
+        ext_w = {k: float(v) for k, v in effective_comp_ext.items() if isinstance(k, str)}
+        need_all = [
             k
             for k, v in ext_w.items()
             if abs(v) > 1e-15 and k in out.columns
         ]
-        if not need:
+        if not need_all:
             log.error("composite_extended 权重全为 0 或无效，退出。")
             return 1
-        out = out.dropna(subset=need)
+        # P1 起部分新因子（基本面/情绪）可能缺历史或当日覆盖，按覆盖率动态启用，避免全量 dropna。
+        need = []
+        dropped_sparse: list[str] = []
+        for c in need_all:
+            cov = float(pd.to_numeric(out[c], errors="coerce").notna().mean())
+            if cov >= 0.20:
+                need.append(c)
+            else:
+                dropped_sparse.append(c)
+        if dropped_sparse:
+            log.info("composite_extended 稀疏因子暂不参与（覆盖率<20%%）: %s", dropped_sparse)
+        if not need:
+            log.error("composite_extended 无可用因子列（覆盖率不足），退出。")
+            return 1
+        out = out.dropna(subset=need, how="all")
     elif sort_by == "xgboost":
         bundle_s = str(tree_m.get("bundle_dir", "")).strip()
         if not bundle_s:
@@ -611,7 +822,6 @@ def main_run(args: argparse.Namespace) -> int:
             deep_map_loc = "cpu"
 
     # ——— Regime Switch：动态权重调整 ———
-    effective_comp_ext = dict(comp_ext) if comp_ext else {}
     effective_w_mom = w_mom
     effective_w_rsi = w_rsi
     regime_label = "oscillation"
@@ -662,6 +872,12 @@ def main_run(args: argparse.Namespace) -> int:
         except Exception as e_regime:
             log.warning("Regime Switch 失败（使用原始权重）: %s", e_regime)
 
+    ic_weights_override = None
+    if sort_by == "composite_extended":
+        ic_weights_override = _load_ic_weight_override(asof_date)
+        if ic_weights_override:
+            log.info("P2 IC 动态权重已启用：%d 个因子覆盖静态权重", len(ic_weights_override))
+
     out = sort_key_for_dataframe(
         out,
         sort_by=sort_by,
@@ -669,6 +885,7 @@ def main_run(args: argparse.Namespace) -> int:
         w_rsi=effective_w_rsi,
         rsi_mode=rsi_mode,
         composite_extended_weights=effective_comp_ext if sort_by == "composite_extended" else None,
+        composite_extended_weights_override=ic_weights_override if sort_by == "composite_extended" else None,
         tree_bundle_dir=tree_bundle,
         tree_raw_features=tree_feat_list,
         tree_rsi_mode=tree_rsi_mode,
@@ -738,7 +955,7 @@ def main_run(args: argparse.Namespace) -> int:
         out,
         sort_by=sort_by,
         rsi_mode=rsi_mode,
-        composite_extended_weights=comp_ext if sort_by == "composite_extended" else None,
+        composite_extended_weights=effective_comp_ext if sort_by == "composite_extended" else None,
         w_momentum=w_mom,
         w_rsi=w_rsi,
     )

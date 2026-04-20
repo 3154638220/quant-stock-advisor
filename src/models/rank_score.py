@@ -145,13 +145,21 @@ def composite_extended_linear_score(
     df: pd.DataFrame,
     *,
     weights: Mapping[str, float],
+    weights_override: Optional[Mapping[str, float]] = None,
     rsi_mode: str = "level",
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """
     多因子截面 z-score 线性组合：键为 ``df`` 列名，含 ``momentum``、``rsi`` 及阶段一扩展列
-    （如 ``atr``、``realized_vol``、``turnover_roll_mean``、``vol_ret_corr``、``short_reversal``）。
+    （如 ``atr``、``realized_vol``、``turnover_roll_mean``、``vol_ret_corr``、``short_reversal``），
+    以及 P1 扩展列（如 ``pe_ttm``、``roe_ttm``、``llm_sentiment_z``）。
     """
-    w_norm = _normalize_factor_weights(weights)
+    effective_weights = dict(weights)
+    if weights_override:
+        # 动态权重仅覆盖同名因子；其余回退静态配置，避免单日缺失导致不可用。
+        for k, v in weights_override.items():
+            if k in effective_weights:
+                effective_weights[k] = float(v)
+    w_norm = _normalize_factor_weights(effective_weights)
     score = np.zeros(len(df), dtype=np.float64)
     debug_cols: Dict[str, np.ndarray] = {}
     for name, wc in w_norm.items():
@@ -183,6 +191,7 @@ def sort_key_for_dataframe(
     w_rsi: float = 0.35,
     rsi_mode: str = "level",
     composite_extended_weights: Optional[Mapping[str, float]] = None,
+    composite_extended_weights_override: Optional[Mapping[str, float]] = None,
     tree_bundle_dir: Optional[Union[str, Path]] = None,
     tree_raw_features: Optional[Sequence[str]] = None,
     tree_rsi_mode: Optional[str] = None,
@@ -214,6 +223,7 @@ def sort_key_for_dataframe(
         _, dbg = composite_extended_linear_score(
             out,
             weights=cw,
+            weights_override=composite_extended_weights_override,
             rsi_mode=rsi_mode,
         )
         for c in dbg.columns:

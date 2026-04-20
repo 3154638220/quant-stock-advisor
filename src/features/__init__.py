@@ -6,6 +6,7 @@ from .factor_eval import (
     rank_ic,
     rolling_ic_stability,
 )
+from .fundamental_factors import DEFAULT_FUNDAMENTAL_COLS, preprocess_fundamental_cross_section
 from .neutralize import (
     attach_neutralized_pair,
     neutralize_cross_section,
@@ -46,6 +47,7 @@ __all__ = [
     "compute_momentum_rsi_torch",
     "daily_returns_from_close",
     "factor_standardize_pipeline",
+    "DEFAULT_FUNDAMENTAL_COLS",
     "forward_returns_from_close",
     "forward_returns_tplus1_open",
     "ic_summary",
@@ -61,6 +63,7 @@ __all__ = [
     "pivot_field_aligned_to_close",
     "pivot_field_wide",
     "price_position_in_range",
+    "preprocess_fundamental_cross_section",
     "quantile_returns",
     "rank_ic",
     "rolling_ic_stability",

@@ -28,6 +28,8 @@ class BacktestConfig:
     # ``tplus1_open``：须为 open(t+1)/open(t)-1（隔夜+日内至次日开盘）；
     # ``vwap``：与 close_to_close 同收益口径，但在调仓日额外扣减 VWAP 执行冲击。
     execution_mode: str = "close_to_close"
+    # 仅 ``close_to_close`` / ``vwap``：组合收益用 ``w_{t-1-L}^T r_t``（``L`` 为本字段；0=历史默认）。
+    execution_lag: int = 0
     # 涨停买入失败处理模式（仅 tplus1_open 模式下有效）：
     # ``idle``：资金闲置（权重归零，对应收益置 0），等价于原 zero_if_limit_up_open
     # ``redistribute``：将涨停票权重均匀分配给同日其他可买标的（顺延到下一个标的）
@@ -235,9 +237,9 @@ def run_backtest(
     -----
     组合日收益：``r_{p,t} = w_{t-1}^T r_t``（前一日权重 × 当日资产收益），首日为 0。
 
-    - **close_to_close**（默认）：``r_t`` 为当日收盘相对昨收的收益；权重在 ``t-1`` 日末确定、参与 ``t`` 日收盘口径收益（常见回测约定）。
-    - **tplus1_open**：``r_t`` 须为 ``open(t+1)/open(t)-1``（见 ``build_open_to_open_returns``），与「T+1 最早次日开盘卖」一致，避免用日内 T+0 夸大夏普；收益矩阵末行可为 ``nan``（无下一开盘），将按 0 处理。
-    - **vwap**：``r_t`` 仍使用 close-to-close 收益，但在调仓日额外扣减与换手相关的 VWAP 执行冲击，降低尾盘成交过于乐观的偏差。
+    - **close_to_close**（默认）：``r_t`` 为当日收盘相对昨收的收益；基础约定为 ``w_{t-1}^T r_t``。若 ``execution_lag>0``，则改为 ``w_{t-1-L}^T r_t``（``L`` 为滞后天数），用于避免「收盘可得信号却按收盘成交」的不可实现假设。
+    - **tplus1_open**：``r_t`` 须为 ``open(t+1)/open(t)-1``（见 ``build_open_to_open_returns``），与「T+1 最早次日开盘卖」一致，避免用日内 T+0 夸大夏普；收益矩阵末行可为 ``nan``（无下一开盘），将按 0 处理。此模式下忽略 ``execution_lag``。
+    - **vwap**：``r_t`` 仍使用 close-to-close 收益，但在调仓日额外扣减与换手相关的 VWAP 执行冲击，降低尾盘成交过于乐观的偏差；可与 ``execution_lag`` 同用。
 
     成本：在**发生调仓**的交易日，按相对上一有效权重的 half L1 换手，用 ``turnover_cost_drag`` 从当日收益中扣减。
     默认参数（commission_buy=2.5bps, commission_sell=2.5bps, slippage=2.0bps/side, stamp_duty=5.0bps）合计约 14 bps 双边，
@@ -253,6 +255,11 @@ def run_backtest(
     exe = str(cfg.execution_mode).lower().strip()
     if exe not in ("close_to_close", "tplus1_open", "vwap"):
         raise ValueError("execution_mode 须为 close_to_close、tplus1_open 或 vwap")
+    lag = int(cfg.execution_lag)
+    if lag < 0:
+        raise ValueError("execution_lag 须 >= 0")
+    if exe == "tplus1_open":
+        lag = 0
     ar = asset_returns.sort_index().copy()
     ar.index = pd.to_datetime(ar.index).normalize()
     sym_cols = [c for c in ar.columns]
@@ -290,25 +297,29 @@ def run_backtest(
     turn_series = np.full(n, np.nan, dtype=np.float64)
     rebalance_dates = ws.index.intersection(trading_index)
 
-    # r_{p,t} = w_{t-1}^T r_t（前一日权重 × 当日 r_t；tplus1_open 时 r_t 为开盘到次日开盘收益）
+    # r_{p,t} = w_{t-1-L}^T r_t（L=execution_lag；tplus1_open 固定 L=0）
     port[0] = 0.0
     for i in range(1, n):
-        w_prev = w_mat[i - 1].copy()
-        r_today = r_mat[i]
+        jw = i - 1 - lag
+        if jw < 0:
+            port[i] = 0.0
+        else:
+            w_prev = w_mat[jw].copy()
+            r_today = r_mat[i]
 
-        # 涨停买入失败处理（仅 tplus1_open 模式）
-        if exe == "tplus1_open":
-            # 近似检测：当日收益 >= 9.5% 视为涨停（主板阈值）
-            lim_mask = _is_limit_up_open_row(r_today, threshold=0.095)
-            if lim_mask.any():
-                if limit_up_mode == "redistribute":
-                    w_prev = _redistribute_limit_up_weights(w_prev, lim_mask)
-                else:
-                    # idle 模式：直接将收益置 0（已在 r_mat 填充时处理，此处兜底）
-                    r_today = r_today.copy()
-                    r_today[lim_mask] = 0.0
+            # 涨停买入失败处理（仅 tplus1_open 模式）
+            if exe == "tplus1_open":
+                # 近似检测：当日收益 >= 9.5% 视为涨停（主板阈值）
+                lim_mask = _is_limit_up_open_row(r_today, threshold=0.095)
+                if lim_mask.any():
+                    if limit_up_mode == "redistribute":
+                        w_prev = _redistribute_limit_up_weights(w_prev, lim_mask)
+                    else:
+                        # idle 模式：直接将收益置 0（已在 r_mat 填充时处理，此处兜底）
+                        r_today = r_today.copy()
+                        r_today[lim_mask] = 0.0
 
-        port[i] = float(np.dot(w_prev, r_today))
+            port[i] = float(np.dot(w_prev, r_today))
 
         w_new = w_mat[i]
         w_old = w_mat[i - 1]
@@ -339,6 +350,7 @@ def run_backtest(
         "symbols": sym_cols,
         "risk_cfg_resolved": risk_config_from_mapping(cfg.risk_cfg),
         "execution_mode": exe,
+        "execution_lag": int(lag),
     }
     return BacktestResult(daily_returns=s, rebalance_turnover=turn, panel=panel, meta=meta)
 

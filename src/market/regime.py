@@ -30,6 +30,10 @@ REGIME_BULL = "bull"
 REGIME_BEAR = "bear"
 REGIME_OSCILLATION = "oscillation"
 
+# 占位符：用全市场等权日收益（与回测脚本 ``build_market_ew_benchmark`` 一致）作为 regime 基准，
+# 避免依赖沪深300 ETF（如 510300）是否入库。
+MARKET_EW_PROXY = "market_ew_proxy"
+
 
 @dataclass
 class RegimeConfig:
@@ -117,7 +121,7 @@ def classify_regime(
     ----------
     benchmark_series
         大盘基准日收益（不是价格）序列，索引为交易日，值为简单日收益。
-        推荐使用沪深300 ETF（510300）日收益。
+        可使用沪深300 ETF（510300）日收益，或全市场等权日收益（与 ``market_ew_proxy`` 一致）。
     asof_date
         截面日期，截取 asof_date 及之前的数据。
 
@@ -306,6 +310,34 @@ def get_regime_weights(
     return {k: v * scale for k, v in adjusted.items()}
 
 
+def _market_ew_daily_returns_from_frame(
+    df: pd.DataFrame,
+    *,
+    date_col: str = "trade_date",
+    close_col: str = "close",
+    min_symbol_obs: int = 30,
+) -> pd.Series:
+    """
+    由长表日线计算全市场等权日收益（与 ``scripts/run_backtest_eval.build_market_ew_benchmark`` 同口径）。
+    """
+    if df.empty or close_col not in df.columns:
+        return pd.Series(dtype=float)
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col]).dt.normalize()
+    d = d[(d[close_col] > 0)].sort_values(["symbol", date_col])
+    d["ret"] = d.groupby("symbol")[close_col].pct_change()
+    d = d.dropna(subset=["ret"])
+    if min_symbol_obs > 1:
+        cnt = d.groupby("symbol")[date_col].count()
+        good = cnt[cnt >= int(min_symbol_obs)].index
+        d = d[d["symbol"].isin(good)]
+    if d.empty:
+        return pd.Series(dtype=float)
+    cs = d.groupby(date_col)["ret"].mean()
+    cs.index = pd.to_datetime(cs.index).normalize()
+    return cs.sort_index()
+
+
 def get_benchmark_returns_from_db(
     db,
     benchmark_symbol: str,
@@ -323,7 +355,7 @@ def get_benchmark_returns_from_db(
     db
         DuckDBManager 实例（上下文管理器内使用）。
     benchmark_symbol
-        基准标的代码，如 "510300"。
+        基准标的代码，如 "510300"；或使用占位符 ``market_ew_proxy`` 表示全市场等权收益。
     lookback_days
         回看天数（用于 BDay 推算起始日期）。
     asof_date
@@ -339,7 +371,18 @@ def get_benchmark_returns_from_db(
         asof_ts = pd.Timestamp(asof_date).normalize()
 
     start = asof_ts - pd.offsets.BDay(lookback_days + 5)
-    sym = str(benchmark_symbol).zfill(6)
+    sym_raw = str(benchmark_symbol).strip()
+    if sym_raw.lower() in (MARKET_EW_PROXY.lower(),):
+        try:
+            df = db.read_daily_frame(symbols=None, start=start, end=asof_ts)
+        except Exception:
+            return pd.Series(dtype=float)
+        min_obs = max(5, min(int(lookback_days), 30))
+        return _market_ew_daily_returns_from_frame(
+            df, date_col=date_col, close_col=close_col, min_symbol_obs=min_obs
+        )
+
+    sym = sym_raw.zfill(6)
 
     try:
         df = db.read_daily_frame(

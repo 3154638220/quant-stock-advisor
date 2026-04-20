@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -95,3 +96,33 @@ def build_experiment_record(
     if extra:
         rec.update(extra)
     return rec
+
+
+def append_backtest_result(
+    *,
+    base_dir: Union[str, Path],
+    params: Dict[str, Any],
+    metrics: Dict[str, Any],
+    run_id: Optional[str] = None,
+    bundle_dir: Union[str, Path] = "",
+    extra: Optional[Dict[str, Any]] = None,
+    duration_sec: float = 0.0,
+    seed: int = 0,
+) -> Dict[str, Path]:
+    """统一写入回测实验记录（JSONL + CSV）。"""
+    rid = (run_id or "").strip() or uuid.uuid4().hex[:12]
+    rec = build_experiment_record(
+        run_id=rid,
+        model_type="backtest_eval",
+        duration_sec=float(duration_sec),
+        seed=int(seed),
+        data_slice_hash="backtest_eval",
+        content_hash=rid,
+        params=params,
+        metrics=metrics,
+        bundle_dir=bundle_dir,
+        extra=extra,
+    )
+    jsonl_path = append_experiment_jsonl(base_dir, rec)
+    csv_path = append_experiment_csv(base_dir, rec)
+    return {"jsonl": jsonl_path, "csv": csv_path}

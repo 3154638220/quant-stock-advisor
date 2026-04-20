@@ -93,6 +93,7 @@ def test_train_xgboost_panel_smoke(tmp_path):
         label_spec={"horizons": [5], "weights": [1.0], "scope": "cross_section_relative"},
         out_root=tmp_path,
         log_experiments=False,
+        min_rank_ic_to_publish=-1.0,  # 烟雾测试仅验证流程可跑通，不要求模型质量达标
     )
     assert res.bundle_dir.is_dir()
     assert res.metrics["val_mse"] >= 0.0

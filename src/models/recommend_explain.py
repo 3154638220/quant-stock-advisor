@@ -38,6 +38,22 @@ FACTOR_LABELS: Dict[str, str] = {
     "tail_strength": "尾盘强度",
     "volume_price_trend": "量价趋势",
     "intraday_range_skew": "振幅偏度",
+    # P1 基本面 / 资金流 / 情绪
+    "pe_ttm": "市盈率TTM",
+    "pb": "市净率",
+    "ev_ebitda": "EV/EBITDA",
+    "roe_ttm": "ROE(TTM)",
+    "net_profit_yoy": "净利润同比",
+    "gross_margin_change": "毛利率变化",
+    "debt_to_assets_change": "资产负债率变化",
+    "ocf_to_net_profit": "经营现金流/净利润",
+    "ocf_to_asset": "经营现金流/总资产（近似）",
+    "gross_margin_delta": "毛利率同比变化",
+    "asset_turnover": "总资产周转率",
+    "net_margin_stability": "净利率稳定性（低波动）",
+    "northbound_net_inflow": "北向净流入",
+    "margin_buy_ratio": "融资买入占比",
+    "llm_sentiment_z": "LLM情绪分",
 }
 
 

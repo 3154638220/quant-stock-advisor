@@ -127,6 +127,18 @@ def main() -> int:
     p.add_argument("--guard-quantile", type=float, default=0.25, help="门禁分位阈值（默认 P25）")
     p.add_argument("--guard-min-history", type=int, default=4, help="触发门禁所需历史样本数")
     p.add_argument(
+        "--min-val-rank-ic",
+        type=float,
+        default=None,
+        help="发布最低门槛：验证集 Rank IC 需 >= 该值（默认读取 config.signals.tree_model.rank_ic_guard.min_rank_ic 或 0.03）",
+    )
+    p.add_argument(
+        "--time-cv-splits",
+        type=int,
+        default=None,
+        help="严格时间序列 CV 折数（TimeSeriesSplit，默认读取 config.signals.tree_model.time_cv_splits 或 3）",
+    )
+    p.add_argument(
         "--disable-guard",
         action="store_true",
         help="关闭 Rank IC 分位门禁（不建议生产使用）",
@@ -349,6 +361,16 @@ def main() -> int:
     guard_enabled = bool(guard_cfg.get("enabled", True)) and not bool(args.disable_guard)
     guard_quantile = float(guard_cfg.get("quantile", args.guard_quantile))
     guard_min_history = int(guard_cfg.get("min_history", args.guard_min_history))
+    min_val_rank_ic = float(
+        args.min_val_rank_ic
+        if args.min_val_rank_ic is not None
+        else guard_cfg.get("min_rank_ic", 0.03)
+    )
+    time_cv_splits = int(
+        args.time_cv_splits
+        if args.time_cv_splits is not None
+        else tree_sig.get("time_cv_splits", 3)
+    )
 
     res = train_xgboost_panel(
         panel,
@@ -365,6 +387,8 @@ def main() -> int:
         guard_metric_key="val_rank_ic",
         guard_quantile=guard_quantile,
         guard_min_history=guard_min_history,
+        min_rank_ic_to_publish=min_val_rank_ic,
+        time_cv_splits=time_cv_splits,
         keep_recent_versions=keep_versions,
         publish_bundle_dir=publish_dir or None,
         out_root=out_root,

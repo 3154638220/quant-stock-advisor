@@ -7,18 +7,18 @@
 ## 已实现能力（代码现状）
 
 
-| 模块                | 说明                                                                                                                                                              |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **数据**            | AkShare 日线增量、股票池缓存、写入前数据质量检查（`src/data_fetcher/`）                                                                                                               |
-| **新闻驱动关注度扫描**     | 从东方财富飙升榜/人气榜出发，用 Ollama + qwen2.5 识别因真实新闻事件（而非市场波动）导致关注度飙升的股票；可选市场宏观分析与财务指标补充（`src/llm/`、`scripts/llm_daily_analysis.py`）                                       |
-| **因子**            | GPU 张量动量/RSI/ATR/波动率/换手/量价相关；K 线结构高频降频代理因子（日内振幅、影线比率、隔夜跳空、尾盘强度等）；截面 winsorize、z-score、行业与市值双重中性化（`src/features/`）                                               |
-| **因子正交化**         | Löwdin 对称正交化与 Gram-Schmidt 正交化，在传入 XGBoost/线性模型前剥离因子冗余（`src/features/orthogonalize.py`，训练时 `--orthogonalize` 启用）                                                |
+| 模块                | 说明                                                                                                                                                                     |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **数据**            | AkShare 日线增量、股票池缓存、写入前数据质量检查（`src/data_fetcher/`）                                                                                                                      |
+| **新闻驱动关注度扫描**     | 从东方财富飙升榜/人气榜出发，用 Ollama + qwen2.5 识别因真实新闻事件（而非市场波动）导致关注度飙升的股票；可选市场宏观分析与财务指标补充（`src/llm/`、`scripts/llm_daily_analysis.py`）                                              |
+| **因子**            | GPU 张量动量/RSI/ATR/波动率/换手/量价相关；K 线结构高频降频代理因子（日内振幅、影线比率、隔夜跳空、尾盘强度等）；截面 winsorize、z-score、行业与市值双重中性化（`src/features/`）                                                      |
+| **因子正交化**         | Löwdin 对称正交化与 Gram-Schmidt 正交化，在传入 XGBoost/线性模型前剥离因子冗余（`src/features/orthogonalize.py`，训练时 `--orthogonalize` 启用）                                                       |
 | **信号**            | 线性 composite / composite_extended；**XGBoost** 截面 **Learning-to-Rank**（默认 `XGBRanker`，可选回归）；**LSTM/GRU/TCN/Transformer** 序列模型（`src/models/`、`scripts/train/train_*.py`） |
-| **Regime Switch** | 大盘状态分类器（牛/熊/震荡），根据基准近期收益与波动率动态调整 composite_extended 因子权重；可在 `config.yaml`（由 `config.yaml.example` 复制）中 `regime:` 节配置（`src/market/regime.py`）                    |
-| **组合**            | 等权/按得分；**Ledoit–Wolf 收缩协方差** + ridge；ERC / 最小方差 / 均值–方差（SciPy）；单票与行业上限、换手约束（`src/portfolio/`）                                                                   |
-| **回测与评估**         | 向量回测引擎（含涨停买入失败重分配 `redistribute` 模式）；双边约 19 bps 保守成本假设；绩效面板、IC/分层、时间切片与 rolling walk-forward（`src/backtest/`）                                                   |
-| **日更入口**          | `scripts/daily_run.py`（拉数→因子→Regime Switch→推荐 CSV，输出列含 `regime`）；`scripts/fetch_only.py`（仅拉数）                                                                   |
-| **事后评估**          | `daily_run.py eval`：对已有 `recommend_*.csv` 标注前向收益（读 DuckDB）                                                                                                      |
+| **Regime Switch** | 大盘状态分类器（牛/熊/震荡），根据基准近期收益与波动率动态调整 composite_extended 因子权重；可在 `config.yaml`（由 `config.yaml.example` 复制）中 `regime:` 节配置（`src/market/regime.py`）                           |
+| **组合**            | 等权/按得分；**Ledoit–Wolf 收缩协方差** + ridge；ERC / 最小方差 / 均值–方差（SciPy）；单票与行业上限、换手约束（`src/portfolio/`）                                                                          |
+| **回测与评估**         | 向量回测引擎（含涨停买入失败重分配 `redistribute` 模式）；双边约 19 bps 保守成本假设；绩效面板、IC/分层、时间切片与 rolling walk-forward（`src/backtest/`）                                                          |
+| **日更入口**          | `scripts/daily_run.py`（拉数→因子→Regime Switch→推荐 CSV，输出列含 `regime`）；`scripts/fetch_only.py`（仅拉数）                                                                          |
+| **事后评估**          | `daily_run.py eval`：对已有 `recommend_*.csv` 标注前向收益（读 DuckDB）                                                                                                             |
 
 
 算法与统计细节见 **[项目算法建模详解.md](docs/项目算法建模详解.md)**。
