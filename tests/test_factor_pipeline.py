@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import torch
@@ -14,7 +16,7 @@ from src.features.factor_eval import (
     rank_ic,
     rolling_ic_stability,
 )
-from src.features.neutralize import attach_neutralized_pair
+from src.features.neutralize import attach_neutralized_pair, neutralize_size_industry_regression
 from src.features.standardize import factor_standardize_pipeline
 from src.features.tensor_base_factors import (
     atr_wilder,
@@ -195,6 +197,25 @@ def test_neutralize_and_standardize():
 
     std = factor_standardize_pipeline(out, "raw_f", fill="zero", out_col="z")
     assert "z" in std.columns
+
+
+def test_neutralize_size_industry_regression_handles_all_nan_group_without_warning():
+    df = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-02"] * 3),
+            "symbol": ["000001", "000002", "000003"],
+            "industry": ["A", "A", "B"],
+            "log_market_cap": [10.0, 11.0, 12.0],
+            "raw_f": [np.nan, np.nan, np.nan],
+        }
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("error", category=RuntimeWarning)
+        out = neutralize_size_industry_regression(df, "raw_f")
+
+    assert f"raw_f_si_neutral" in out.columns
+    assert len(caught) == 0
 
 
 def test_long_table_from_wide():

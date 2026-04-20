@@ -7,18 +7,20 @@ from scripts.run_backtest_eval import _pick_topk_with_industry_cap, resolve_indu
 
 def test_resolve_industry_cap_and_map_silent_downgrade_when_map_missing(tmp_path):
     missing_csv = tmp_path / "not_found.csv"
-    cap, industry_map = resolve_industry_cap_and_map(5, str(missing_csv))
+    cap, industry_map, status = resolve_industry_cap_and_map(5, str(missing_csv))
     assert cap == 0
     assert industry_map == {}
+    assert status == "disabled_missing_map"
 
 
 def test_resolve_industry_cap_and_map_loads_map_when_available(tmp_path):
     csv_path = tmp_path / "industry_map.csv"
     csv_path.write_text("symbol,industry\n000001,银行\n000002,银行\n000003,有色\n", encoding="utf-8")
-    cap, industry_map = resolve_industry_cap_and_map(5, str(csv_path))
+    cap, industry_map, status = resolve_industry_cap_and_map(5, str(csv_path))
     assert cap == 5
     assert industry_map["000001"] == "银行"
     assert industry_map["000003"] == "有色"
+    assert status == "enabled"
 
 
 def test_pick_topk_with_industry_cap_respects_per_industry_count():

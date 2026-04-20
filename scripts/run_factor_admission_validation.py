@@ -22,6 +22,7 @@ from scripts.run_backtest_eval import (
     _attach_pit_fundamentals,
     _rebalance_dates,
     attach_universe_filter,
+    build_market_ew_benchmark,
     build_asset_returns,
     build_open_to_open_returns,
     build_regime_weight_overrides,
@@ -104,6 +105,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
 )
 
+DEFAULT_BENCHMARK_KEY_YEARS: tuple[int, ...] = (2021, 2025, 2026)
+
 
 def select_scenarios(families: list[str] | None = None) -> list[Scenario]:
     selected = [scenario for scenario in SCENARIOS if scenario.is_baseline]
@@ -143,6 +146,11 @@ def parse_args() -> argparse.Namespace:
         "--families",
         default="",
         help="只运行指定候选族（逗号分隔），如 net_margin,asset_turnover；为空则运行全部候选",
+    )
+    p.add_argument(
+        "--benchmark-key-years",
+        default="2021,2025,2026",
+        help="benchmark-first 重点观察年份，逗号分隔",
     )
     return p.parse_args()
 
@@ -190,6 +198,89 @@ def _ic_stats(ic_ser: pd.Series) -> dict[str, Any]:
     return {"n_dates": n, "ic_mean": mean_v, "ic_t_value": t_v}
 
 
+def _annualize_daily_returns(daily_returns: pd.Series) -> float:
+    arr = pd.to_numeric(daily_returns, errors="coerce").dropna()
+    if arr.empty:
+        return float("nan")
+    total = float((1.0 + arr).prod())
+    if total <= 0:
+        return float("nan")
+    return float(total ** (252.0 / len(arr)) - 1.0)
+
+
+def _summarize_relative_to_benchmark(
+    strategy_daily: pd.Series,
+    benchmark_daily: pd.Series,
+    *,
+    key_years: list[int],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    common = pd.DatetimeIndex(strategy_daily.index).intersection(pd.DatetimeIndex(benchmark_daily.index)).sort_values()
+    if len(common) == 0:
+        empty = pd.DataFrame(columns=["year", "strategy_return", "benchmark_return", "excess_return"])
+        return empty, {
+            "annualized_excess_return": np.nan,
+            "yearly_excess_median": np.nan,
+            "key_year_excess_mean": np.nan,
+            "key_year_excess_worst": np.nan,
+        }
+
+    strat = pd.to_numeric(strategy_daily.reindex(common), errors="coerce").fillna(0.0)
+    bench = pd.to_numeric(benchmark_daily.reindex(common), errors="coerce").fillna(0.0)
+    excess = strat - bench
+    yearly = pd.DataFrame(
+        {
+            "strategy_return": strat.groupby(strat.index.year).apply(lambda r: float((1.0 + r).prod() - 1.0)),
+            "benchmark_return": bench.groupby(bench.index.year).apply(lambda r: float((1.0 + r).prod() - 1.0)),
+        }
+    ).reset_index(names="year")
+    yearly["year"] = yearly["year"].astype(int)
+    yearly["excess_return"] = yearly["strategy_return"] - yearly["benchmark_return"]
+
+    key_year_df = yearly[yearly["year"].isin(key_years)].copy()
+    return yearly, {
+        "annualized_excess_return": _annualize_daily_returns(excess),
+        "yearly_excess_median": float(pd.to_numeric(yearly["excess_return"], errors="coerce").median()),
+        "key_year_excess_mean": (
+            float(pd.to_numeric(key_year_df["excess_return"], errors="coerce").mean()) if not key_year_df.empty else np.nan
+        ),
+        "key_year_excess_worst": (
+            float(pd.to_numeric(key_year_df["excess_return"], errors="coerce").min()) if not key_year_df.empty else np.nan
+        ),
+    }
+
+
+def _summarize_oos_excess(
+    strategy_daily: pd.Series,
+    benchmark_daily: pd.Series,
+    slices: list[Any],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for sl in slices:
+        common = (
+            pd.DatetimeIndex(sl.test_index)
+            .intersection(pd.DatetimeIndex(strategy_daily.index))
+            .intersection(pd.DatetimeIndex(benchmark_daily.index))
+            .sort_values()
+        )
+        if len(common) == 0:
+            continue
+        strat = pd.to_numeric(strategy_daily.reindex(common), errors="coerce").fillna(0.0)
+        bench = pd.to_numeric(benchmark_daily.reindex(common), errors="coerce").fillna(0.0)
+        rows.append(
+            {
+                "fold_id": int(getattr(sl, "fold_id", len(rows))),
+                "annualized_excess_return": _annualize_daily_returns(strat - bench),
+            }
+        )
+    detail = pd.DataFrame(rows)
+    if detail.empty:
+        return {"median_ann_excess_return": np.nan, "detail": []}
+    return {
+        "median_ann_excess_return": float(pd.to_numeric(detail["annualized_excess_return"], errors="coerce").median()),
+        "detail": detail.to_dict(orient="records"),
+    }
+
+
 def compute_factor_gate_table(
     factor_df: pd.DataFrame,
     daily_df: pd.DataFrame,
@@ -233,7 +324,9 @@ def build_admission_table(
     baseline_label: str,
     f1_min_ic: float,
     f1_min_t: float,
+    benchmark_key_years: list[int] | None = None,
 ) -> pd.DataFrame:
+    benchmark_key_years = list(benchmark_key_years or DEFAULT_BENCHMARK_KEY_YEARS)
     baseline = summary_df.loc[summary_df["scenario"] == baseline_label].iloc[0]
     gate_close = gate_df[gate_df["horizon_key"] == "close_21d"][["factor", "ic_mean", "ic_t_value"]].copy()
     gate_close = gate_close.rename(columns={"ic_mean": "close21_ic_mean", "ic_t_value": "close21_ic_t"})
@@ -256,16 +349,44 @@ def build_admission_table(
         pd.to_numeric(out["slice_oos_median_ann_return"], errors="coerce")
         - float(baseline["slice_oos_median_ann_return"])
     )
+    out["delta_ann_excess_vs_baseline"] = (
+        pd.to_numeric(out["annualized_excess_vs_market"], errors="coerce")
+        - float(baseline["annualized_excess_vs_market"])
+    )
+    out["delta_yearly_excess_median_vs_baseline"] = (
+        pd.to_numeric(out["yearly_excess_median_vs_market"], errors="coerce")
+        - float(baseline["yearly_excess_median_vs_market"])
+    )
+    out["delta_rolling_excess_vs_baseline"] = (
+        pd.to_numeric(out["rolling_oos_median_ann_excess_vs_market"], errors="coerce")
+        - float(baseline["rolling_oos_median_ann_excess_vs_market"])
+    )
+    out["delta_slice_excess_vs_baseline"] = (
+        pd.to_numeric(out["slice_oos_median_ann_excess_vs_market"], errors="coerce")
+        - float(baseline["slice_oos_median_ann_excess_vs_market"])
+    )
+    out["delta_key_year_excess_mean_vs_baseline"] = (
+        pd.to_numeric(out["key_year_excess_mean_vs_market"], errors="coerce")
+        - float(baseline["key_year_excess_mean_vs_market"])
+    )
     out["pass_combo_gate"] = (
         (pd.to_numeric(out["delta_ann_vs_baseline"], errors="coerce") > 0.0)
         & (pd.to_numeric(out["delta_rolling_vs_baseline"], errors="coerce") > 0.0)
         & (pd.to_numeric(out["delta_slice_vs_baseline"], errors="coerce") > 0.0)
     )
+    out["pass_benchmark_gate"] = (
+        (pd.to_numeric(out["annualized_excess_vs_market"], errors="coerce") >= 0.0)
+        & (pd.to_numeric(out["rolling_oos_median_ann_excess_vs_market"], errors="coerce") >= 0.0)
+        & (pd.to_numeric(out["slice_oos_median_ann_excess_vs_market"], errors="coerce") >= 0.0)
+        & (pd.to_numeric(out["delta_yearly_excess_median_vs_baseline"], errors="coerce") > 0.0)
+        & (pd.to_numeric(out["delta_key_year_excess_mean_vs_baseline"], errors="coerce") > 0.0)
+    )
     out["admission_status"] = np.where(
         out["is_baseline"],
         "baseline",
-        np.where(out["pass_f1_gate"] & out["pass_combo_gate"], "pass", "fail"),
+        np.where(out["pass_f1_gate"] & out["pass_combo_gate"] & out["pass_benchmark_gate"], "pass", "fail"),
     )
+    out["benchmark_key_years"] = ",".join(str(int(y)) for y in benchmark_key_years)
     return out
 
 
@@ -297,6 +418,13 @@ def _build_doc(
 ## 准入结论
 
 {admission_df.to_markdown(index=False)}
+
+说明：`pass` 现在必须同时通过 `IC gate + combo gate + benchmark-first gate`。其中 benchmark-first gate 至少要求：
+
+- `annualized_excess_vs_market >= 0`
+- `rolling / slice OOS` 的超额年化中位数均不为负
+- 年度超额中位数相对基线改善
+- 关键落后年份的平均超额相对基线改善
 
 ## 本轮产物
 
@@ -347,6 +475,9 @@ def main() -> None:
     print(f"  factors+pit={factors.shape}", flush=True)
 
     candidate_factors = sorted({s.candidate_factor for s in selected_scenarios if not s.is_baseline})
+    benchmark_key_years = [
+        int(item.strip()) for item in str(args.benchmark_key_years).split(",") if str(item).strip()
+    ] or list(DEFAULT_BENCHMARK_KEY_YEARS)
     gate_factor_df = attach_universe_filter(
         factors,
         daily_df,
@@ -355,6 +486,8 @@ def main() -> None:
         require_roe_ttm_positive=True,
     )
     gate_df = compute_factor_gate_table(gate_factor_df, daily_df, candidate_factors=candidate_factors)
+    benchmark_min_days = max(60, int(0.35 * max(daily_df["trade_date"].nunique(), 1)))
+    market_benchmark = build_market_ew_benchmark(daily_df, args.start, end_date, min_days=benchmark_min_days).sort_index()
 
     summary_rows: list[dict[str, Any]] = []
 
@@ -462,6 +595,13 @@ def main() -> None:
             expanding_window=not bool(args.wf_slice_fixed_window),
         )
         _, sp_detail, sp_agg = walk_forward_backtest(asset_returns, weights, slices, config=bt_cost, use_test_only=True)
+        yearly_excess_df, benchmark_summary = _summarize_relative_to_benchmark(
+            res_wc.daily_returns,
+            market_benchmark,
+            key_years=benchmark_key_years,
+        )
+        rolling_excess = _summarize_oos_excess(res_wc.daily_returns, market_benchmark, rolling)
+        slice_excess = _summarize_oos_excess(res_wc.daily_returns, market_benchmark, slices)
 
         summary_rows.append(
             {
@@ -475,6 +615,14 @@ def main() -> None:
                 "turnover_mean": float(res_wc.panel.turnover_mean),
                 "rolling_oos_median_ann_return": float(wf_agg.get("median_ann_return", np.nan)),
                 "slice_oos_median_ann_return": float(sp_agg.get("median_ann_return", np.nan)),
+                "annualized_excess_vs_market": float(benchmark_summary.get("annualized_excess_return", np.nan)),
+                "yearly_excess_median_vs_market": float(benchmark_summary.get("yearly_excess_median", np.nan)),
+                "key_year_excess_mean_vs_market": float(benchmark_summary.get("key_year_excess_mean", np.nan)),
+                "key_year_excess_worst_vs_market": float(benchmark_summary.get("key_year_excess_worst", np.nan)),
+                "rolling_oos_median_ann_excess_vs_market": float(
+                    rolling_excess.get("median_ann_excess_return", np.nan)
+                ),
+                "slice_oos_median_ann_excess_vs_market": float(slice_excess.get("median_ann_excess_return", np.nan)),
             }
         )
 
@@ -501,6 +649,15 @@ def main() -> None:
                 "agg": _json_sanitize(sp_agg),
                 "full_vs_slices": _json_sanitize(compare_full_vs_slices(res_wc.panel, sp_agg) if sp_agg else {}),
             },
+            "benchmark_first": {
+                "benchmark_symbol": "market_ew_proxy",
+                "benchmark_min_history_days": benchmark_min_days,
+                "key_years": benchmark_key_years,
+                "summary": _json_sanitize(benchmark_summary),
+                "yearly_detail": _json_sanitize(yearly_excess_df.to_dict(orient="records")),
+                "rolling_oos_excess": _json_sanitize(rolling_excess),
+                "slice_oos_excess": _json_sanitize(slice_excess),
+            },
         }
         report_path = results_dir / f"{output_prefix}_{scenario.key}.json"
         report_path.write_text(json.dumps(_json_sanitize(payload), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -513,6 +670,7 @@ def main() -> None:
         baseline_label=baseline_label,
         f1_min_ic=float(args.f1_min_ic),
         f1_min_t=float(args.f1_min_t),
+        benchmark_key_years=benchmark_key_years,
     )
 
     summary_path = results_dir / f"{output_prefix}_summary.csv"

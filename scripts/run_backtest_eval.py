@@ -139,6 +139,16 @@ def fmt_num(v: float, d: int = 3) -> str:
     return f"{v:+.{d}f}"
 
 
+def _safe_float_or_nan(value: Any) -> float:
+    try:
+        if value is None:
+            return float("nan")
+        out = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return out if np.isfinite(out) else float("nan")
+
+
 def _merge_signals(base_sig: dict, override_sig: dict) -> dict:
     """合并 signals：composite_extended 由配置文件整表覆盖，不与内置默认逐键合并。"""
     out = dict(base_sig)
@@ -472,9 +482,97 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
     return pd.concat(out, ignore_index=True)
 
 
+def _factor_cache_meta_path(cache_path: Path) -> Path:
+    return cache_path.with_name(f"{cache_path.name}.meta.json")
+
+
+def _prepared_factors_cache_expected_meta(
+    *,
+    start_date: str,
+    end_date: str,
+    lookback_days: int,
+    min_hist_days: int,
+    db_path: str,
+    results_dir: str,
+    universe_filter_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "start_date": str(start_date),
+        "end_date": str(end_date),
+        "lookback_days": int(lookback_days),
+        "min_hist_days": int(min_hist_days),
+        "db_path": str(db_path),
+        "results_dir": str(results_dir),
+        "universe_filter_cfg": _json_sanitize(universe_filter_cfg),
+        "cache_format_version": 1,
+    }
+
+
+def load_prepared_factors_cache(cache_path: Path, expected_meta: dict[str, Any]) -> pd.DataFrame | None:
+    meta_path = _factor_cache_meta_path(cache_path)
+    if not cache_path.exists() or not meta_path.exists():
+        return None
+    try:
+        actual_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if actual_meta != expected_meta:
+        return None
+    try:
+        cached = pd.read_parquet(cache_path)
+    except Exception:  # noqa: BLE001
+        return None
+    if "trade_date" in cached.columns:
+        cached["trade_date"] = pd.to_datetime(cached["trade_date"], errors="coerce")
+    if "symbol" in cached.columns:
+        cached["symbol"] = cached["symbol"].astype(str).str.zfill(6)
+    return cached
+
+
+def write_prepared_factors_cache(cache_path: Path, factors: pd.DataFrame, meta: dict[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    factors.to_parquet(cache_path, index=False)
+    _factor_cache_meta_path(cache_path).write_text(
+        json.dumps(_json_sanitize(meta), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def prepare_factors_for_backtest(
+    daily_df: pd.DataFrame,
+    *,
+    min_hist_days: int,
+    db_path: str,
+    results_dir: Path,
+    universe_filter_cfg: dict[str, Any],
+    cache_path: Path | None = None,
+    refresh_cache: bool = False,
+    cache_meta: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, bool]:
+    expected_meta = dict(cache_meta or {})
+    if cache_path is not None and not refresh_cache:
+        cached = load_prepared_factors_cache(cache_path, expected_meta)
+        if cached is not None:
+            return cached, True
+
+    factors = compute_factors(daily_df, min_hist_days=min_hist_days)
+    factors = _attach_pit_fundamentals(factors, db_path)
+    factors = _attach_llm_sentiment(factors, results_dir)
+    factors = attach_universe_filter(
+        factors,
+        daily_df,
+        enabled=bool(universe_filter_cfg.get("enabled", False)),
+        min_amount_20d=float(universe_filter_cfg.get("min_amount_20d", 50_000_000)),
+        require_roe_ttm_positive=bool(universe_filter_cfg.get("require_roe_ttm_positive", True)),
+    )
+    if cache_path is not None:
+        write_prepared_factors_cache(cache_path, factors, expected_meta)
+    return factors, False
+
+
 def _attach_pit_fundamentals(factors: pd.DataFrame, db_path: str) -> pd.DataFrame:
     """按公告日 merge_asof，将基本面快照对齐到每个交易日（PIT）。"""
-    out = factors.copy()
+    out = factors.copy(deep=False)
     con = duckdb.connect(db_path, read_only=True)
     try:
         exists = con.execute(
@@ -517,11 +615,13 @@ def _attach_pit_fundamentals(factors: pd.DataFrame, db_path: str) -> pd.DataFram
         return out
 
     out["symbol"] = out["symbol"].astype(str).str.zfill(6)
-    out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce").dt.normalize()
+    out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
     out = out.dropna(subset=["trade_date"])
     fund["symbol"] = fund["symbol"].astype(str).str.zfill(6)
-    fund["announcement_date"] = pd.to_datetime(fund["announcement_date"], errors="coerce").dt.normalize()
-    fund["report_period"] = pd.to_datetime(fund["report_period"], errors="coerce")
+    fund["announcement_date"] = (
+        pd.to_datetime(fund["announcement_date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
+    )
+    fund["report_period"] = pd.to_datetime(fund["report_period"], errors="coerce").astype("datetime64[ns]")
     fund = fund.dropna(subset=["announcement_date"])
     if fund.empty:
         return out
@@ -533,25 +633,46 @@ def _attach_pit_fundamentals(factors: pd.DataFrame, db_path: str) -> pd.DataFram
     )
     fund = fund.drop_duplicates(["symbol", "announcement_date"], keep="last")
     fund = fund.drop(columns=["report_period"], errors="ignore")
-    # merge_asof 要求 on 列在整表上单调递增；先按日期、再按 symbol 打破并列（pandas 对 by=symbol 的分组仍校验全局时间序）
+    # `merge_asof + preprocess_fundamental_cross_section` 在全量 700w+ 行上峰值内存过高，
+    # 改为按日期块分批处理，保持同日截面处理语义不变，同时显著降低峰值内存。
     out = out.sort_values(["trade_date", "symbol"], kind="mergesort").reset_index(drop=True)
     fund = fund.sort_values(["announcement_date", "symbol"], kind="mergesort").reset_index(drop=True)
-    merged = pd.merge_asof(
-        out,
-        fund,
-        left_on="trade_date",
-        right_on="announcement_date",
-        by="symbol",
-        direction="backward",
-        allow_exact_matches=True,
-    )
-    merged = preprocess_fundamental_cross_section(
-        merged,
-        date_col="trade_date",
-        size_col="log_market_cap",
-        neutralize=True,
-    )
-    return merged
+    chunked: list[pd.DataFrame] = []
+    for _, chunk in out.groupby(pd.Grouper(key="trade_date", freq="31D"), sort=True):
+        if chunk.empty:
+            continue
+        chunk = chunk.sort_values(["trade_date", "symbol"], kind="mergesort").reset_index(drop=True)
+        chunk_end = pd.Timestamp(chunk["trade_date"].max())
+        chunk_symbols = chunk["symbol"].astype(str).unique().tolist()
+        fund_chunk = fund[
+            (fund["announcement_date"] <= chunk_end) & fund["symbol"].astype(str).isin(chunk_symbols)
+        ].copy()
+        if fund_chunk.empty:
+            merged = chunk.copy()
+            for c in want_cols:
+                if c not in merged.columns:
+                    merged[c] = np.nan
+        else:
+            fund_chunk = fund_chunk.sort_values(["announcement_date", "symbol"], kind="mergesort").reset_index(drop=True)
+            merged = pd.merge_asof(
+                chunk,
+                fund_chunk,
+                left_on="trade_date",
+                right_on="announcement_date",
+                by="symbol",
+                direction="backward",
+                allow_exact_matches=True,
+            )
+        merged = preprocess_fundamental_cross_section(
+            merged,
+            date_col="trade_date",
+            size_col="log_market_cap",
+            neutralize=True,
+        )
+        chunked.append(merged)
+    if not chunked:
+        return out
+    return pd.concat(chunked, ignore_index=True)
 
 
 def _attach_llm_sentiment(factors: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
@@ -758,6 +879,58 @@ def _pick_topk_with_industry_cap(
     return pd.DataFrame(picked).nlargest(top_k, "score")
 
 
+def _select_topk_with_holding_buffer(
+    day_df: pd.DataFrame,
+    *,
+    top_k: int,
+    entry_top_k: int,
+    hold_buffer_top_k: int,
+    prev_holdings: set[str],
+    industry_map: Dict[str, str] | None,
+    industry_cap_count: int | None,
+) -> pd.DataFrame:
+    """
+    进入/退出缓冲带：
+    - 新买入只从 ``entry_top_k`` 内挑选；
+    - 旧持仓只要仍在 ``hold_buffer_top_k`` 内即可继续保留；
+    - 最终持仓数仍固定为 ``top_k``。
+    """
+    ranked = day_df.sort_values("score", ascending=False).reset_index(drop=True)
+    base_buy = _pick_topk_with_industry_cap(
+        ranked,
+        top_k=max(1, int(entry_top_k)),
+        industry_map=industry_map,
+        industry_cap_count=industry_cap_count,
+    ).sort_values("score", ascending=False)
+    if not prev_holdings or int(hold_buffer_top_k) <= int(top_k):
+        return base_buy.nlargest(top_k, "score")
+
+    buffer_pool = _pick_topk_with_industry_cap(
+        ranked,
+        top_k=max(int(top_k), int(hold_buffer_top_k)),
+        industry_map=industry_map,
+        industry_cap_count=industry_cap_count,
+    ).sort_values("score", ascending=False)
+    keep = buffer_pool[buffer_pool["symbol"].astype(str).isin(prev_holdings)].copy()
+    keep = keep.sort_values("score", ascending=False)
+
+    prioritized = []
+    if not keep.empty:
+        prioritized.append(keep.assign(_priority=0))
+    if not base_buy.empty:
+        prioritized.append(base_buy.assign(_priority=1))
+    if not buffer_pool.empty:
+        prioritized.append(buffer_pool.assign(_priority=2))
+    if not prioritized:
+        return pd.DataFrame(columns=["symbol", "score"])
+
+    selected = pd.concat(prioritized, ignore_index=True)
+    selected["symbol"] = selected["symbol"].astype(str).str.zfill(6)
+    selected = selected.drop_duplicates(subset=["symbol"], keep="first")
+    selected = selected.sort_values(["_priority", "score"], ascending=[True, False]).head(top_k)
+    return selected.drop(columns=["_priority"], errors="ignore").sort_values("score", ascending=False).reset_index(drop=True)
+
+
 def build_regime_weight_overrides(
     factors: pd.DataFrame,
     daily_df: pd.DataFrame,
@@ -883,6 +1056,10 @@ def build_topk_weights(
     rebalance_rule: str,
     prefilter_cfg: dict,
     max_turnover: float,
+    entry_top_k: int | None = None,
+    hold_buffer_top_k: int | None = None,
+    top_tier_count: int | None = None,
+    top_tier_weight_share: float | None = None,
     industry_map: Dict[str, str] | None = None,
     industry_cap_count: int | None = None,
     portfolio_method: str = "equal_weight",
@@ -905,6 +1082,8 @@ def build_topk_weights(
     rows = []
     diag_rows: list[dict[str, Any]] = []
     prev_holdings: set[str] = set()
+    entry_top_k = int(max(1, int(entry_top_k if entry_top_k is not None else top_k)))
+    hold_buffer_top_k = int(max(top_k, int(hold_buffer_top_k if hold_buffer_top_k is not None else top_k)))
 
     pf_enabled = bool(prefilter_cfg.get("enabled", True))
     limit_move_max = int(prefilter_cfg.get("limit_move_max", 2))
@@ -937,12 +1116,23 @@ def build_topk_weights(
             if len(filtered) < top_k:
                 filtered = day_s
 
-        topk = _pick_topk_with_industry_cap(
-            filtered,
-            top_k=top_k,
-            industry_map=industry_map,
-            industry_cap_count=industry_cap_count,
-        )
+        if hold_buffer_top_k > top_k:
+            topk = _select_topk_with_holding_buffer(
+                filtered,
+                top_k=top_k,
+                entry_top_k=entry_top_k,
+                hold_buffer_top_k=hold_buffer_top_k,
+                prev_holdings=prev_holdings,
+                industry_map=industry_map,
+                industry_cap_count=industry_cap_count,
+            )
+        else:
+            topk = _pick_topk_with_industry_cap(
+                filtered,
+                top_k=top_k,
+                industry_map=industry_map,
+                industry_cap_count=industry_cap_count,
+            )
         if topk.empty:
             continue
 
@@ -989,6 +1179,47 @@ def build_topk_weights(
                     "solver_iterations": 0,
                     "fallback_reason": "",
                     "post_constraint_l1_shift": 0.0,
+                }
+            )
+        elif pm in ("tiered_equal_weight", "two_tier_equal_weight"):
+            ww, weight_diag = build_portfolio_weights(
+                topk,
+                weight_method=pm,
+                score_col="score",
+                top_tier_count=top_tier_count,
+                top_tier_weight_share=top_tier_weight_share,
+                max_single_weight=1.0,
+                max_industry_weight=None,
+                industry_col=None,
+                prev_weights_aligned=None,
+                max_turnover=1.0,
+                return_diagnostics=True,
+            )
+            opt_diag = dict(weight_diag.get("optimizer", {}))
+            final_w_diag = dict(weight_diag.get("post_constraints", {}))
+            diag_rows.append(
+                {
+                    "trade_date": pd.Timestamp(rd),
+                    "portfolio_method": pm,
+                    "n_assets": int(len(topk)),
+                    "effective_n": final_w_diag.get("effective_n"),
+                    "weight_std": final_w_diag.get("weight_std"),
+                    "max_weight": final_w_diag.get("max_weight"),
+                    "diag_share": None,
+                    "condition_number": None,
+                    "mean_abs_offdiag": None,
+                    "mean_correlation": None,
+                    "l1_diff_vs_equal": final_w_diag.get("l1_diff_vs_reference"),
+                    "max_abs_diff_vs_equal": final_w_diag.get("max_abs_diff_vs_reference"),
+                    "is_equal_like": final_w_diag.get("is_close_to_reference"),
+                    "solver_success": True,
+                    "solver_status": 0,
+                    "solver_iterations": 0,
+                    "fallback_reason": "",
+                    "risk_contribution_std": None,
+                    "post_constraint_l1_shift": weight_diag.get("post_constraint_l1_shift"),
+                    "top_tier_count": opt_diag.get("top_tier_count"),
+                    "top_tier_weight_share": opt_diag.get("top_tier_weight_share"),
                 }
             )
         else:
@@ -1155,8 +1386,42 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--portfolio-method",
         default="",
-        choices=("", "equal_weight", "risk_parity", "min_variance", "mean_variance"),
+        choices=(
+            "",
+            "equal_weight",
+            "tiered_equal_weight",
+            "two_tier_equal_weight",
+            "risk_parity",
+            "min_variance",
+            "mean_variance",
+        ),
         help="组合权重方法；为空则读取 config.portfolio.weight_method（兼容 equal）",
+    )
+    p.add_argument("--top-k", type=int, default=None, help="覆盖 config.signals.top_k")
+    p.add_argument("--max-turnover", type=float, default=None, help="覆盖 config.portfolio.max_turnover")
+    p.add_argument(
+        "--entry-top-k",
+        type=int,
+        default=None,
+        help="进入持仓时只允许从前 N 名买入；为空则读取 config.portfolio.entry_top_k",
+    )
+    p.add_argument(
+        "--hold-buffer-top-k",
+        type=int,
+        default=None,
+        help="旧持仓只要仍留在前 N 名就允许继续持有；为空则读取 config.portfolio.hold_buffer_top_k",
+    )
+    p.add_argument(
+        "--top-tier-count",
+        type=int,
+        default=None,
+        help="tiered_equal_weight 下前层持仓数；为空则读取 config.portfolio.top_tier_count",
+    )
+    p.add_argument(
+        "--top-tier-weight-share",
+        type=float,
+        default=None,
+        help="tiered_equal_weight 下前层权重占比；为空则读取 config.portfolio.top_tier_weight_share",
     )
     p.add_argument(
         "--ic-weights-json",
@@ -1172,6 +1437,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ic-min-obs", type=int, default=None, help="IC 动态权重最小样本")
     p.add_argument("--ic-half-life", type=float, default=None, help="IC 动态权重半衰期")
     p.add_argument("--ic-clip-abs-weight", type=float, default=None, help="IC 动态权重裁剪上限")
+    p.add_argument(
+        "--prepared-factors-cache",
+        default="",
+        help="prepared factors parquet 缓存路径；命中后跳过 compute_factors/PIT/LLM/universe 预处理",
+    )
+    p.add_argument(
+        "--refresh-prepared-factors-cache",
+        action="store_true",
+        help="忽略已有 prepared factors 缓存并强制重建",
+    )
+    p.add_argument(
+        "--prepare-factors-only",
+        action="store_true",
+        help="只构建并写出 prepared factors cache，然后退出；需配合 --prepared-factors-cache 使用",
+    )
     p.add_argument("--grid-search", action="store_true", help="执行 Top-K/换手/调仓频率网格搜索")
     p.add_argument(
         "--grid-search-out",
@@ -1254,6 +1534,7 @@ def main() -> None:
 
     db_path = str(PROJECT_ROOT / cfg["paths"]["duckdb_path"])
     costs = transaction_cost_params_from_mapping(cfg.get("transaction_costs", {}))
+    results_dir = PROJECT_ROOT / str(cfg.get("paths", {}).get("results_dir", "data/results"))
 
     signals = cfg.get("signals", {})
     backtest_cfg = cfg.get("backtest", {})
@@ -1265,10 +1546,26 @@ def main() -> None:
     p1_cfg = signals.get("p1_factor_filter", {}) or {}
     ic_cfg = signals.get("ic_weighting", {}) or {}
     top_k = int(signals.get("top_k", 10))
+    if args.top_k is not None:
+        top_k = int(args.top_k)
     rebalance_rule = str(backtest_cfg.get("eval_rebalance_rule", "M"))
     if str(args.rebalance_rule).strip():
         rebalance_rule = str(args.rebalance_rule).strip()
     max_turnover = float(portfolio_cfg.get("max_turnover", 1.0))
+    if args.max_turnover is not None:
+        max_turnover = float(args.max_turnover)
+    entry_top_k = portfolio_cfg.get("entry_top_k")
+    hold_buffer_top_k = portfolio_cfg.get("hold_buffer_top_k")
+    top_tier_count = portfolio_cfg.get("top_tier_count")
+    top_tier_weight_share = portfolio_cfg.get("top_tier_weight_share")
+    if args.entry_top_k is not None:
+        entry_top_k = int(args.entry_top_k)
+    if args.hold_buffer_top_k is not None:
+        hold_buffer_top_k = int(args.hold_buffer_top_k)
+    if args.top_tier_count is not None:
+        top_tier_count = int(args.top_tier_count)
+    if args.top_tier_weight_share is not None:
+        top_tier_weight_share = float(args.top_tier_weight_share)
     portfolio_method_cfg = str(portfolio_cfg.get("weight_method", "equal_weight")).lower().strip()
     portfolio_method = str(args.portfolio_method or portfolio_method_cfg or "equal_weight").lower().strip()
     if portfolio_method == "score":
@@ -1371,22 +1668,41 @@ def main() -> None:
     print(f"  日线: {len(daily_df):,} 行, 标的: {daily_df['symbol'].nunique():,}")
 
     print("[2/7] 计算因子...")
-    factors = compute_factors(daily_df, min_hist_days=args.min_hist_days)
-    factors = _attach_pit_fundamentals(factors, db_path)
-    results_dir = PROJECT_ROOT / str(cfg.get("paths", {}).get("results_dir", "data/results"))
-    factors = _attach_llm_sentiment(factors, results_dir)
     uf = cfg.get("universe_filter", {}) or {}
-    factors = attach_universe_filter(
-        factors,
-        daily_df,
-        enabled=bool(uf.get("enabled", False)),
-        min_amount_20d=float(uf.get("min_amount_20d", 50_000_000)),
-        require_roe_ttm_positive=bool(uf.get("require_roe_ttm_positive", True)),
+    prepared_factors_cache = _resolve_optional_path(args.prepared_factors_cache)
+    if bool(args.prepare_factors_only) and prepared_factors_cache is None:
+        raise SystemExit("--prepare-factors-only 需要配合 --prepared-factors-cache 使用")
+    prepared_factors_cache_meta = _prepared_factors_cache_expected_meta(
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=int(args.lookback_days),
+        min_hist_days=int(args.min_hist_days),
+        db_path=db_path,
+        results_dir=str(results_dir),
+        universe_filter_cfg=uf,
     )
+    factors, factors_cache_hit = prepare_factors_for_backtest(
+        daily_df,
+        min_hist_days=int(args.min_hist_days),
+        db_path=db_path,
+        results_dir=results_dir,
+        universe_filter_cfg=uf,
+        cache_path=prepared_factors_cache,
+        refresh_cache=bool(args.refresh_prepared_factors_cache),
+        cache_meta=prepared_factors_cache_meta,
+    )
+    if prepared_factors_cache is not None:
+        cache_state = "hit" if factors_cache_hit else "rebuilt"
+        print(f"  prepared_factors_cache: {cache_state} -> {prepared_factors_cache}")
     print(f"  因子长表: {len(factors):,} 行")
     if bool(uf.get("enabled", False)):
         ne = int(factors["_universe_eligible"].sum())
         print(f"  M2.4 universe 过滤: 合格截面行 {ne:,} / {len(factors):,}")
+    if bool(args.prepare_factors_only):
+        print("-" * 70)
+        print("prepared factors cache 已完成，按参数要求提前退出。")
+        print("完成。")
+        return
 
     print("[3/7] 截面打分...")
     regime_overrides: Dict[pd.Timestamp, Dict[str, float]] = {}
@@ -1438,6 +1754,10 @@ def main() -> None:
         rebalance_rule=rebalance_rule,
         prefilter_cfg=prefilter_cfg,
         max_turnover=max_turnover,
+        entry_top_k=entry_top_k,
+        hold_buffer_top_k=hold_buffer_top_k,
+        top_tier_count=top_tier_count,
+        top_tier_weight_share=top_tier_weight_share,
         industry_map=industry_map,
         industry_cap_count=industry_cap_count,
         portfolio_method=portfolio_method,
@@ -1461,6 +1781,10 @@ def main() -> None:
             rebalance_rule=rebalance_rule,
             prefilter_cfg=prefilter_cfg,
             max_turnover=max_turnover,
+            entry_top_k=entry_top_k,
+            hold_buffer_top_k=hold_buffer_top_k,
+            top_tier_count=top_tier_count,
+            top_tier_weight_share=top_tier_weight_share,
             industry_map=industry_map,
             industry_cap_count=industry_cap_count,
             portfolio_method=portfolio_method,
@@ -1604,9 +1928,9 @@ def main() -> None:
     if portfolio_method not in ("", "equal", "equal_weight"):
         print(
             "组合优化诊断: "
-            f"mean L1(diff vs equal)={fmt_num(float(portfolio_diag_summary.get('mean_l1_diff_vs_equal', np.nan)))} | "
-            f"equal-like ratio={fmt_pct(float(portfolio_diag_summary.get('equal_like_ratio', np.nan)))} | "
-            f"median cond={fmt_num(float(portfolio_diag_summary.get('median_condition_number', np.nan)))}"
+            f"mean L1(diff vs equal)={fmt_num(_safe_float_or_nan(portfolio_diag_summary.get('mean_l1_diff_vs_equal')))} | "
+            f"equal-like ratio={fmt_pct(_safe_float_or_nan(portfolio_diag_summary.get('equal_like_ratio')))} | "
+            f"median cond={fmt_num(_safe_float_or_nan(portfolio_diag_summary.get('median_condition_number')))}"
         )
     for name in ("hs300_510300", "csi500_510500", "market_ew"):
         bp = benchmark_panels.get(name, {})
@@ -1690,6 +2014,10 @@ def main() -> None:
                             rebalance_rule=str(rb),
                             prefilter_cfg=prefilter_cfg,
                             max_turnover=float(mt),
+                            entry_top_k=entry_top_k,
+                            hold_buffer_top_k=hold_buffer_top_k,
+                            top_tier_count=top_tier_count,
+                            top_tier_weight_share=top_tier_weight_share,
                             industry_map=industry_map,
                             industry_cap_count=industry_cap_count,
                             portfolio_method=portfolio_method,
@@ -1782,6 +2110,10 @@ def main() -> None:
             "top_k": top_k,
             "rebalance_rule": rebalance_rule,
             "max_turnover": max_turnover,
+            "entry_top_k": entry_top_k,
+            "hold_buffer_top_k": hold_buffer_top_k,
+            "top_tier_count": top_tier_count,
+            "top_tier_weight_share": top_tier_weight_share,
             "portfolio_method": portfolio_method,
             "execution_mode": execution_mode,
             "execution_lag": execution_lag,
@@ -1797,6 +2129,8 @@ def main() -> None:
             "ic_min_obs": ic_min_obs,
             "ic_half_life": ic_half_life,
             "ic_clip_abs_weight": ic_clip_abs_weight,
+            "prepared_factors_cache": str(prepared_factors_cache) if prepared_factors_cache is not None else "",
+            "refresh_prepared_factors_cache": bool(args.refresh_prepared_factors_cache),
             "wf_train_window": wf_train_window,
             "wf_test_window": wf_test_window,
             "wf_step_window": wf_step_window,
@@ -1845,6 +2179,10 @@ def main() -> None:
                 "top_k": top_k,
                 "rebalance_rule": rebalance_rule,
                 "max_turnover": max_turnover,
+                "entry_top_k": entry_top_k,
+                "hold_buffer_top_k": hold_buffer_top_k,
+                "top_tier_count": top_tier_count,
+                "top_tier_weight_share": top_tier_weight_share,
                 "portfolio_method": portfolio_method,
                 "cov_lookback_days": cov_lookback_days,
                 "cov_ridge": cov_ridge,
@@ -1866,6 +2204,8 @@ def main() -> None:
                 "ic_min_obs": ic_min_obs,
                 "ic_half_life": ic_half_life,
                 "ic_clip_abs_weight": ic_clip_abs_weight,
+                "prepared_factors_cache": str(prepared_factors_cache) if prepared_factors_cache is not None else "",
+                "refresh_prepared_factors_cache": bool(args.refresh_prepared_factors_cache),
                 "composite_extended_weights": ce_weights,
                 "prefilter": prefilter_cfg,
                 "p1_factor_filter_enabled": p1_filter_enabled,

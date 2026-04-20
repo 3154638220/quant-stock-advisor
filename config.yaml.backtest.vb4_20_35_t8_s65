@@ -1,0 +1,84 @@
+# VB4 follow-up：在 Top-20 / 持有缓冲 20/35 下，前 8 名占 65%，后 12 名占 35%
+
+paths:
+  duckdb_path: data/market.duckdb
+  results_dir: data/results
+  logs_dir: data/logs
+  experiments_dir: data/experiments
+  asof_trade_date: ""
+
+database:
+  table_daily: a_share_daily
+  table_fundamental: a_share_fundamental
+
+signals:
+  sort_by: composite_extended
+  top_k: 20
+  composite_extended:
+    vol_to_turnover: 1.0
+  p1_factor_filter:
+    enabled: false
+    ic_report_path: data/results/factor_ic_report.csv
+    remove_if_t1_and_t21_negative: true
+    zero_if_abs_t1_below: 0.0
+    flip_if_t1_negative_and_t21_above: 0.005
+  ic_weighting:
+    enabled: false
+    weights_path: data/cache/ic_weights.json
+    monitor_path: data/logs/ic_monitor.json
+    window: 60
+    min_obs: 20
+    half_life: 20.0
+    clip_abs_weight: 0.25
+
+portfolio:
+  weight_method: tiered_equal_weight
+  max_turnover: 0.3
+  entry_top_k: 20
+  hold_buffer_top_k: 35
+  top_tier_count: 8
+  top_tier_weight_share: 0.65
+  industry_cap_count: 5
+  cov_lookback_days: 252
+  cov_ridge: 1.0e-6
+  cov_shrinkage: ledoit_wolf
+  cov_ewma_halflife: 20
+  risk_aversion: 1.0
+
+risk:
+  benchmark_symbol: market_ew_proxy
+
+regime:
+  enabled: true
+  short_window: 20
+  long_window: 60
+  dynamic_weighting_enabled: true
+  dynamic_vol_target_ann: 0.22
+  dynamic_vol_scale: 0.08
+  dynamic_trend_scale: 0.05
+  dynamic_strength: 3.0
+
+backtest:
+  execution_mode: tplus1_open
+  eval_rebalance_rule: M
+  limit_up_mode: redistribute
+  vwap_slippage_bps_per_side: 3.0
+  vwap_impact_bps: 8.0
+
+transaction_costs:
+  commission_buy_bps: 2.5
+  commission_sell_bps: 2.5
+  slippage_bps_per_side: 4.5
+  stamp_duty_sell_bps: 5.0
+
+prefilter:
+  enabled: false
+  limit_move_max: 2
+  turnover_low_pct: 0.10
+  turnover_high_pct: 0.98
+  price_position_high_pct: 0.90
+
+universe_filter:
+  enabled: true
+  min_amount_20d: 50000000
+  require_roe_ttm_positive: true

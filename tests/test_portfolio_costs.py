@@ -56,6 +56,29 @@ def test_build_portfolio_equal():
     assert np.allclose(w, 1.0 / 3.0)
 
 
+def test_build_portfolio_tiered_equal_weight():
+    df = pd.DataFrame(
+        {
+            "symbol": ["300750", "600519", "000001", "600000"],
+            "momentum": [1.0, 4.0, 2.0, 3.0],
+        }
+    )
+    w = build_portfolio_weights(
+        df,
+        weight_method="tiered_equal_weight",
+        score_col="momentum",
+        top_tier_count=2,
+        top_tier_weight_share=0.6,
+        max_single_weight=1.0,
+        max_industry_weight=None,
+        industry_col=None,
+        max_turnover=1.0,
+    )
+    assert w.sum() == pytest.approx(1.0)
+    expected = np.array([0.2, 0.3, 0.2, 0.3], dtype=np.float64)
+    assert np.allclose(w, expected)
+
+
 def test_build_portfolio_industry_cap():
     df = pd.DataFrame(
         {

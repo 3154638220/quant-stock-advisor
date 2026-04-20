@@ -55,9 +55,52 @@ def _nonnegative_weights_from_scores(scores: np.ndarray, *, method: str) -> np.n
             return _nonnegative_weights_from_scores(scores, method="equal")
         return x / s
     raise ValueError(
-        f"未知 weight_method: {method!r}（期望 equal | score | risk_parity | "
-        "min_variance | mean_variance）"
+        f"未知 weight_method: {method!r}（期望 equal | score | tiered_equal_weight | "
+        "risk_parity | min_variance | mean_variance）"
     )
+
+
+def _tiered_equal_weights_from_scores(
+    scores: np.ndarray,
+    *,
+    top_tier_count: int | None,
+    top_tier_weight_share: float | None,
+) -> np.ndarray:
+    """
+    将候选按分数拆成两层：
+    - Top tier 内等权；
+    - 其余标的内等权；
+    - 两层之间按 ``top_tier_weight_share`` 分配总权重。
+
+    这是介于完全等权与连续 score 权重之间的轻量表达，用来保留一部分排名信息，
+    同时避免把分数微小波动直接放大成连续权重差异。
+    """
+    x = np.asarray(scores, dtype=np.float64).ravel()
+    w = np.zeros_like(x, dtype=np.float64)
+    finite_idx = np.flatnonzero(np.isfinite(x))
+    n = int(finite_idx.size)
+    if n == 0:
+        return w
+    if n == 1:
+        w[finite_idx[0]] = 1.0
+        return w
+
+    top_n = int(top_tier_count) if top_tier_count is not None else int(np.ceil(n / 2.0))
+    top_n = max(1, min(top_n, n - 1))
+    top_share = float(top_tier_weight_share) if top_tier_weight_share is not None else 0.60
+    if not (0.0 < top_share < 1.0):
+        raise ValueError("top_tier_weight_share 必须位于 (0, 1) 区间内")
+
+    order = finite_idx[np.argsort(-x[finite_idx], kind="mergesort")]
+    top_idx = order[:top_n]
+    bottom_idx = order[top_n:]
+    if bottom_idx.size == 0:
+        w[top_idx] = 1.0 / float(top_idx.size)
+        return w
+
+    w[top_idx] = top_share / float(top_idx.size)
+    w[bottom_idx] = (1.0 - top_share) / float(bottom_idx.size)
+    return w
 
 
 def redistribute_individual_cap(w: np.ndarray, cap: float) -> np.ndarray:
@@ -190,6 +233,8 @@ def build_portfolio_weights(
     *,
     weight_method: str = "score",
     score_col: str = "auto",
+    top_tier_count: int | None = None,
+    top_tier_weight_share: float | None = None,
     max_single_weight: float = 1.0,
     max_industry_weight: Optional[float] = None,
     industry_col: Optional[str] = None,
@@ -206,6 +251,8 @@ def build_portfolio_weights(
 
     ``weight_method`` 为 ``risk_parity`` / ``min_variance`` / ``mean_variance`` 时须提供
     与行数一致的 ``cov_matrix``；``mean_variance`` 另须 ``expected_returns``（与行顺序一致）。
+    ``weight_method=tiered_equal_weight`` 时，使用 ``top_tier_count`` 与
+    ``top_tier_weight_share`` 控制双层等权分配。
     """
     n = len(df)
     if n == 0:
@@ -249,12 +296,23 @@ def build_portfolio_weights(
     else:
         sc = infer_score_column(df) if score_col == "auto" else str(score_col)
         scores = _scores_from_column(df, sc)
-        w = _nonnegative_weights_from_scores(scores, method=weight_method)
+        if method in ("tiered_equal_weight", "two_tier_equal_weight"):
+            w = _tiered_equal_weights_from_scores(
+                scores,
+                top_tier_count=top_tier_count,
+                top_tier_weight_share=top_tier_weight_share,
+            )
+        else:
+            w = _nonnegative_weights_from_scores(scores, method=weight_method)
         from src.portfolio.optimizer import weight_diagnostics
 
         diagnostics["optimizer"] = {
             "method": method,
             "score_col": sc,
+            "top_tier_count": int(top_tier_count) if top_tier_count is not None else None,
+            "top_tier_weight_share": (
+                float(top_tier_weight_share) if top_tier_weight_share is not None else None
+            ),
             "weights": weight_diagnostics(w),
         }
     w_before_constraints = np.asarray(w, dtype=np.float64).copy()
@@ -355,6 +413,10 @@ def portfolio_config_from_mapping(sig: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "weight_method": str(p.get("weight_method", "score")).lower(),
         "score_col": str(p.get("score_col", "auto")),
+        "top_tier_count": int(p.get("top_tier_count", 0)) or None,
+        "top_tier_weight_share": (
+            float(p.get("top_tier_weight_share")) if p.get("top_tier_weight_share") is not None else None
+        ),
         "max_single_weight": float(p.get("max_single_weight", 0.1)),
         "max_industry_weight": float(mi) if mi is not None else None,
         "industry_col": p.get("industry_col"),

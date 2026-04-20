@@ -12,6 +12,16 @@ from typing import Optional
 import pandas as pd
 
 
+def _safe_nanmean(values) -> float:
+    import numpy as np
+
+    arr = np.asarray(values, dtype=np.float64)
+    valid = arr[np.isfinite(arr)]
+    if valid.size == 0:
+        return 0.0
+    return float(valid.mean())
+
+
 def neutralize_cross_section(
     df: pd.DataFrame,
     factor_col: str,
@@ -110,7 +120,7 @@ def neutralize_size_industry_regression(
                 design_cols.append(dummies[c].to_numpy(dtype=np.float64))
 
         if not design_cols or valid.sum() < 3:
-            residuals.loc[idx] = y - np.nanmean(y)
+            residuals.loc[idx] = y - _safe_nanmean(y)
             continue
 
         X = np.column_stack(design_cols)
@@ -119,7 +129,7 @@ def neutralize_size_industry_regression(
 
         m = valid
         if m.sum() < X.shape[1] + 1:
-            residuals.loc[idx] = y - np.nanmean(y[m]) if m.any() else y
+            residuals.loc[idx] = y - (_safe_nanmean(y[m]) if m.any() else 0.0)
             continue
 
         try:
@@ -127,7 +137,7 @@ def neutralize_size_industry_regression(
             pred = X @ beta
             res = y - pred
         except np.linalg.LinAlgError:
-            res = y - np.nanmean(y[m])
+            res = y - _safe_nanmean(y[m])
 
         residuals.loc[idx] = res
 
