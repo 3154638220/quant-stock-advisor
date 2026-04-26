@@ -11,7 +11,7 @@ from typing import Optional
 
 import torch
 
-from .tensor_alpha import momentum_n
+from .tensor_alpha import momentum_n, weekly_kdj_from_daily
 
 
 # 延迟导入避免循环（intraday_proxy_factors 依赖本模块辅助函数）
@@ -433,6 +433,7 @@ def compute_base_factor_bundle(
     high: Optional[torch.Tensor] = None,
     low: Optional[torch.Tensor] = None,
     open_px: Optional[torch.Tensor] = None,
+    trade_dates: Optional[list] = None,
     *,
     vol_window: int = 20,
     turnover_window: int = 20,
@@ -465,6 +466,10 @@ def compute_base_factor_bundle(
     - ``price_position``：当前价格在过去 1 年区间中的位置（绝对高位过滤）
     - ``log_market_cap``：对数流通市值代理（小微盘过滤）
     - ``limit_move_count``：过去 5 天涨跌停次数（妖股识别）
+    - ``weekly_kdj_k`` / ``weekly_kdj_d`` / ``weekly_kdj_j``：最近已完成周线 KDJ
+    - ``weekly_kdj_oversold``：周线 ``J <= -5`` 触发
+    - ``weekly_kdj_oversold_depth``：周线超卖深度 ``max(0, -5-J)``
+    - ``weekly_kdj_rebound``：周线 J 脱离极端超卖后的回升确认
 
     K 线结构高频降频代理因子（需传入 ``open_px``、``high``、``low``）：
     - ``intraday_range``：日内振幅 (high-low)/open
@@ -516,6 +521,51 @@ def compute_base_factor_bundle(
     out["limit_move_count"] = limit_move_count(
         close, limit_move_window, threshold=limit_move_threshold
     )
+    weekly_kdj_keys = (
+        "weekly_kdj_k",
+        "weekly_kdj_d",
+        "weekly_kdj_j",
+        "weekly_kdj_oversold",
+        "weekly_kdj_oversold_depth",
+        "weekly_kdj_rebound",
+    )
+    if high is not None and low is not None and trade_dates is not None:
+        wk_k, wk_d, wk_j = weekly_kdj_from_daily(
+            close,
+            high,
+            low,
+            trade_dates=trade_dates,
+            device=close.device,
+            dtype=close.dtype,
+        )
+        out["weekly_kdj_k"] = wk_k
+        out["weekly_kdj_d"] = wk_d
+        out["weekly_kdj_j"] = wk_j
+        oversold = torch.where(
+            torch.isfinite(wk_j),
+            (wk_j <= -5.0).to(dtype=close.dtype),
+            torch.full_like(wk_j, float("nan")),
+        )
+        out["weekly_kdj_oversold"] = oversold
+        depth = torch.where(
+            torch.isfinite(wk_j),
+            torch.clamp(-5.0 - wk_j, min=0.0),
+            torch.full_like(wk_j, float("nan")),
+        )
+        out["weekly_kdj_oversold_depth"] = depth
+        rebound = torch.full_like(wk_j, float("nan"))
+        prev_j = wk_j[:, :-1]
+        cur_j = wk_j[:, 1:]
+        valid_pair = torch.isfinite(prev_j) & torch.isfinite(cur_j)
+        rebound[:, 1:] = torch.where(
+            valid_pair,
+            ((prev_j <= -5.0) & (cur_j > prev_j)).to(dtype=close.dtype),
+            torch.full_like(cur_j, float("nan")),
+        )
+        out["weekly_kdj_rebound"] = rebound
+    else:
+        for k in weekly_kdj_keys:
+            out[k] = None
     if volume is not None and turnover is not None:
         out["log_market_cap"] = log_float_market_cap_proxy(close, volume, turnover)
     else:
@@ -551,4 +601,3 @@ def compute_base_factor_bundle(
             out[k] = None
 
     return out
-

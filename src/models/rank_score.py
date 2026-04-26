@@ -20,11 +20,13 @@ def cross_section_zscore(x: np.ndarray, *, eps: float = 1e-12) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
     if x.ndim != 1:
         raise ValueError("x 须为一维")
+    valid = np.isfinite(x)
+    if not valid.any():
+        return np.full_like(x, np.nan, dtype=np.float64)
     m = np.nanmean(x)
     s = np.nanstd(x)
     if not np.isfinite(s) or s < eps:
         out = np.full_like(x, np.nan, dtype=np.float64)
-        valid = np.isfinite(x)
         out[valid] = 0.0
         return out
     return (x - m) / s

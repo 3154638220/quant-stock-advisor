@@ -10,14 +10,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
-import akshare as ak
-import duckdb
 import pandas as pd
+
+try:  # 离线研究脚本只读 DuckDB 时，不应被在线抓取依赖阻断导入。
+    import akshare as ak
+except ModuleNotFoundError:  # pragma: no cover - 取决于运行环境是否安装 akshare
+    ak = None
+
+try:
+    import duckdb
+except ModuleNotFoundError:  # pragma: no cover - 取决于运行环境是否安装 duckdb
+    duckdb = None
 
 from .akshare_resilience import call_with_timeout, install_akshare_requests_resilience
 from ..settings import load_config, project_root
 
 _LOG = logging.getLogger(__name__)
+
+
+def _require_akshare():
+    if ak is None:
+        raise ModuleNotFoundError(
+            "缺少 akshare 依赖；在线抓取日线/股票池前请先安装 akshare，"
+            "或使用本地 DuckDB / universe cache。"
+        )
+    return ak
 
 
 def _standardize_daily_df(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -145,7 +162,8 @@ def _fetch_a_share_daily_via_em(
     *,
     adjust: str = "qfq",
 ) -> pd.DataFrame:
-    raw = ak.stock_zh_a_hist(
+    ak_mod = _require_akshare()
+    raw = ak_mod.stock_zh_a_hist(
         symbol=symbol,
         period="daily",
         start_date=start_date.replace("-", ""),
@@ -167,7 +185,8 @@ def _fetch_a_share_daily_via_sina(
     *,
     adjust: str = "qfq",
 ) -> pd.DataFrame:
-    raw = ak.stock_zh_a_daily(
+    ak_mod = _require_akshare()
+    raw = ak_mod.stock_zh_a_daily(
         symbol=_symbol_with_exchange_prefix(symbol),
         start_date=start_date,
         end_date=end_date,
@@ -306,6 +325,9 @@ def _list_symbols_via_akshare(
     config_path: Optional[Union[str, Path]] = None,
 ) -> List[str]:
     """与日线拉取共用 requests 超时/重试注入，config 与 ``fetch_only`` / DB 路径一致。"""
+    if ak is None:
+        _LOG.warning("AkShare 未安装，跳过股票池来源 %s。", api_name)
+        return []
     install_akshare_requests_resilience(_load_config(config_path))
     fn = getattr(ak, api_name, None)
     if fn is None:
@@ -317,6 +339,9 @@ def _list_symbols_from_duckdb(
     *,
     config_path: Optional[Union[str, Path]] = None,
 ) -> List[str]:
+    if duckdb is None:
+        _LOG.warning("DuckDB 未安装，跳过 DuckDB 股票池来源。")
+        return []
     cfg = _load_config(config_path)
     paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
     db_cfg = cfg.get("database", {}) if isinstance(cfg, dict) else {}

@@ -15,6 +15,11 @@ from scripts.run_alpha_expression_scout import (
     resolve_expression_candidates,
     select_expression_source_candidates,
 )
+from scripts.light_strategy_proxy import (
+    build_light_proxy_period_detail,
+    infer_periods_per_year,
+    summarize_light_strategy_proxy,
+)
 from scripts.run_alpha_expression_diagnostics import build_overlay_diagnostics_summary, classify_defensive_overlay
 
 
@@ -213,6 +218,58 @@ def test_build_overlay_diagnostics_summary_mentions_defensive_overlay():
     assert "防守型 overlay" in out
 
 
+def test_infer_periods_per_year_respects_rebalance_frequency():
+    assert infer_periods_per_year("M") == 12.0
+    assert infer_periods_per_year("2M") == 6.0
+    assert infer_periods_per_year("W-FRI") == 52.0
+    assert infer_periods_per_year("2W") == 26.0
+    assert infer_periods_per_year("D") == 252.0
+
+
+def test_summarize_light_strategy_proxy_annualizes_by_proxy_frequency():
+    monthly_df = pd.DataFrame(
+        {
+            "strategy_return": [0.01, 0.02, -0.01],
+            "benchmark_return": [0.00, 0.01, 0.00],
+            "excess_return": [0.01, 0.01, -0.01],
+        }
+    )
+
+    out = summarize_light_strategy_proxy(monthly_df, periods_per_year=12.0)
+
+    assert out["n_periods"] == 3
+    assert abs(out["strategy_annualized_return"] - ((1.01 * 1.02 * 0.99) ** 4 - 1.0)) < 1e-12
+    assert abs(out["benchmark_annualized_return"] - ((1.0 * 1.01 * 1.0) ** 4 - 1.0)) < 1e-12
+    assert abs(out["annualized_excess_vs_market"] - ((1.01 * 1.01 * 0.99) ** 4 - 1.0)) < 1e-12
+
+
+def test_build_light_proxy_period_detail_groups_by_rebalance_rule():
+    idx = pd.to_datetime(["2026-01-05", "2026-01-20", "2026-02-03", "2026-02-19"])
+    strat = pd.Series([0.01, 0.02, -0.01, 0.03], index=idx)
+    bench = pd.Series([0.00, 0.01, 0.00, 0.01], index=idx)
+
+    out = build_light_proxy_period_detail(strat, bench, rebalance_rule="M", scenario="demo")
+
+    assert out["period"].tolist() == ["2026-01", "2026-02"]
+    assert out["scenario"].tolist() == ["demo", "demo"]
+    assert abs(float(out.iloc[0]["strategy_return"]) - (1.01 * 1.02 - 1.0)) < 1e-12
+    assert abs(float(out.iloc[1]["benchmark_return"]) - (1.0 * 1.01 - 1.0)) < 1e-12
+
+
+def test_build_light_proxy_period_detail_supports_month_alias_used_by_expression_diagnostics():
+    idx = pd.to_datetime(["2026-01-05", "2026-01-20", "2026-02-03"])
+    strat = pd.Series([0.01, 0.02, -0.01], index=idx)
+    bench = pd.Series([0.00, 0.01, 0.00], index=idx)
+
+    monthly = build_light_proxy_period_detail(strat, bench, rebalance_rule="M", scenario="expr").rename(
+        columns={"period": "month"}
+    )
+
+    assert "month" in monthly.columns
+    assert monthly["month"].tolist() == ["2026-01", "2026-02"]
+    assert monthly["scenario"].tolist() == ["expr", "expr"]
+
+
 def test_select_expression_source_candidates_skips_overlay_only_by_default():
     scout_df = pd.DataFrame(
         [
@@ -262,3 +319,57 @@ def test_resolve_expression_candidates_prefers_scout_source_and_can_include_over
     assert out_overlay == ["realized_vol", "intraday_range"]
     assert str(scout_path) in src_default
     assert str(scout_path) in src_overlay
+
+
+def test_expression_scout_summary_can_carry_light_proxy_fields():
+    summary_df = pd.DataFrame(
+        [
+            {
+                "scenario": "flip_resid_blend_20_realized_vol",
+                "candidate_factor": "flip_resid_realized_vol",
+                "base_factor": "realized_vol",
+                "family": "flip_residual",
+                "expression_type": "residual_blend",
+                "factor_weight": -0.2,
+                "is_baseline": False,
+                "result_type": "light_strategy_proxy",
+                "research_topic": "alpha_expression_scout",
+                "research_config_id": "demo_cfg",
+                "output_stem": "demo_stem",
+                "rebalance_rule": "M",
+                "periods_per_year": 12.0,
+                "proxy_periods": 12,
+                "proxy_annualized_return": 0.10,
+                "proxy_benchmark_annualized_return": 0.04,
+                "annualized_return": 0.09,
+                "annualized_excess_vs_market": 0.06,
+                "full_backtest_annualized_excess_vs_market": 0.03,
+            }
+        ]
+    )
+
+    assert summary_df.loc[0, "result_type"] == "light_strategy_proxy"
+    assert summary_df.loc[0, "research_topic"] == "alpha_expression_scout"
+    assert float(summary_df.loc[0, "periods_per_year"]) == 12.0
+    assert float(summary_df.loc[0, "full_backtest_annualized_excess_vs_market"]) == 0.03
+
+
+def test_expression_diagnostics_summary_can_carry_research_identity_fields():
+    summary_df = pd.DataFrame(
+        [
+            {
+                "scenario": "flip_resid_blend_20_realized_vol",
+                "candidate_factor": "flip_resid_realized_vol",
+                "family": "flip_residual",
+                "expression_type": "residual_blend",
+                "result_type": "light_strategy_proxy",
+                "research_topic": "alpha_expression_diagnostics",
+                "research_config_id": "demo_cfg",
+                "output_stem": "demo_stem",
+                "periods_per_year": 12.0,
+                "annualized_excess_vs_market": 0.04,
+            }
+        ]
+    )
+    assert summary_df.loc[0, "research_topic"] == "alpha_expression_diagnostics"
+    assert summary_df.loc[0, "result_type"] == "light_strategy_proxy"

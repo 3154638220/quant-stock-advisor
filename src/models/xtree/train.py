@@ -62,7 +62,7 @@ def _require_xgb():
 def _integer_relevance_labels(y: np.ndarray, groups: np.ndarray) -> np.ndarray:
     """
     XGBoost 2.x 的 ``rank:pairwise`` 在校验集上要求标签为非负整数相关度；
-    组内按前瞻收益降序赋 dense rank（收益越高，整数越大）。
+    组内按前瞻收益升序赋 dense rank（收益越高，整数越大）。
     """
     y = np.asarray(y, dtype=np.float64).ravel()
     groups = np.asarray(groups, dtype=np.int32).ravel()
@@ -73,7 +73,7 @@ def _integer_relevance_labels(y: np.ndarray, groups: np.ndarray) -> np.ndarray:
         if g <= 0:
             continue
         sl = y[pos : pos + g]
-        rk = pd.Series(sl).rank(method="dense", ascending=False).astype(np.int32).to_numpy()
+        rk = pd.Series(sl).rank(method="dense", ascending=True).astype(np.int32).to_numpy()
         out[pos : pos + g] = rk
         pos += g
     return out
@@ -251,6 +251,10 @@ def train_xgboost_panel(
     xgb_params = dict(xgb_params or {})
     label_spec = dict(label_spec or {})
     use_rank = str(xgboost_objective).lower() == "rank"
+    research_topic = str(label_spec.get("research_topic") or "").strip()
+    research_config_id = str(label_spec.get("research_config_id") or "").strip()
+    research_group = str(label_spec.get("research_group") or "").strip()
+    bundle_label = str(label_spec.get("bundle_label") or "").strip()
 
     if df.empty or len(df) < 20:
         raise ValueError("训练样本过少")
@@ -295,22 +299,22 @@ def train_xgboost_panel(
             min_group_size=2,
         )
     else:
-        X_tr, y_tr, _ = _prepare_xy_z(
+        X_tr, y_tr, g_tr, _ = _prepare_xy_z_grouped(
             train_df,
             raw_feature_names=raw_feature_names,
             target_column=target_column,
             rsi_mode=rsi_mode,
             date_col=date_col,
+            min_group_size=2,
         )
-        X_va, y_va, _ = _prepare_xy_z(
+        X_va, y_va, g_va, _ = _prepare_xy_z_grouped(
             val_df,
             raw_feature_names=raw_feature_names,
             target_column=target_column,
             rsi_mode=rsi_mode,
             date_col=date_col,
+            min_group_size=2,
         )
-        g_tr = np.array([], dtype=np.int32)
-        g_va = np.array([], dtype=np.int32)
 
     if len(X_tr) < 10:
         raise ValueError("有效训练样本过少")
@@ -457,6 +461,8 @@ def train_xgboost_panel(
             "val_mse": float(np.mean((y_va - pred_va) ** 2)),
             "train_mae": float(np.mean(np.abs(y_tr - pred_tr))),
             "val_mae": float(np.mean(np.abs(y_va - pred_va))),
+            "train_rank_ic": _mean_rank_ic_per_group(pred_tr, y_tr, g_tr),
+            "val_rank_ic": _mean_rank_ic_per_group(pred_va, y_va, g_va),
         }
         metrics.update(cv_metrics)
 
@@ -514,6 +520,10 @@ def train_xgboost_panel(
             "label_spec": label_spec,
             "time_cv_splits": int(time_cv_splits),
             "min_rank_ic_to_publish": float(min_rank_ic_to_publish),
+            "research_topic": research_topic,
+            "research_config_id": research_config_id,
+            "research_group": research_group,
+            "bundle_label": bundle_label,
         },
     )
     save_inference_config(bundle_dir, inf)
@@ -537,6 +547,10 @@ def train_xgboost_panel(
             "time_cv_splits": int(time_cv_splits),
             "min_rank_ic_to_publish": float(min_rank_ic_to_publish),
             "metric_guard": guard_decision,
+            "research_topic": research_topic,
+            "research_config_id": research_config_id,
+            "research_group": research_group,
+            "bundle_label": bundle_label,
         },
     )
     save_bundle_metadata(bundle_dir, meta)

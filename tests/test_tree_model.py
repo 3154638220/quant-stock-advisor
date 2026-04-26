@@ -16,9 +16,10 @@ from src.models.artifacts import (
     save_sklearn_model,
     should_promote_by_quantile,
 )
-from src.models.inference import predict_xgboost_tree
+from src.features.tree_dataset import default_tree_factor_names
+from src.models.inference import _AUTO_FLIP_WARNED_BUNDLES, predict_xgboost_tree
 from src.models.rank_score import apply_cross_section_z_by_date, cross_section_z_columns
-from src.models.xtree.train import train_xgboost_panel
+from src.models.xtree.train import _integer_relevance_labels, train_xgboost_panel
 
 
 class _DummyTreeModel:
@@ -36,6 +37,12 @@ def test_cross_section_z_single_day():
     z = cross_section_z_columns(df, ["momentum", "rsi"], rsi_mode="level")
     assert "z_momentum" in z.columns and "z_rsi" in z.columns
     assert z["z_momentum"].notna().sum() == 2
+
+
+def test_default_tree_factor_names_include_weekly_kdj():
+    names = default_tree_factor_names()
+    assert "weekly_kdj_j" in names
+    assert "weekly_kdj_oversold_depth" in names
 
 
 def test_apply_cross_section_z_by_date():
@@ -90,7 +97,15 @@ def test_train_xgboost_panel_smoke(tmp_path):
         rsi_mode="level",
         val_frac=0.25,
         xgb_params={"n_estimators": 20, "max_depth": 3},
-        label_spec={"horizons": [5], "weights": [1.0], "scope": "cross_section_relative"},
+        label_spec={
+            "horizons": [5],
+            "weights": [1.0],
+            "scope": "cross_section_relative",
+            "research_topic": "p1_tree_groups",
+            "research_config_id": "rb_m_top20_lh_5_px_5_val25",
+            "research_group": "G1",
+            "bundle_label": "p1_tree_g1_rb_m_top20_lh_5_px_5_val25",
+        },
         out_root=tmp_path,
         log_experiments=False,
         min_rank_ic_to_publish=-1.0,  # 烟雾测试仅验证流程可跑通，不要求模型质量达标
@@ -100,6 +115,18 @@ def test_train_xgboost_panel_smoke(tmp_path):
     assert "val_rank_ic" in res.metrics
     meta = load_bundle_metadata(res.bundle_dir)
     assert "label_spec" in meta.params
+    assert meta.params["research_topic"] == "p1_tree_groups"
+    assert meta.params["research_config_id"] == "rb_m_top20_lh_5_px_5_val25"
+    assert meta.params["research_group"] == "G1"
+    assert meta.params["bundle_label"] == "p1_tree_g1_rb_m_top20_lh_5_px_5_val25"
+
+
+def test_xgboost_rank_relevance_labels_treat_higher_return_as_more_relevant():
+    y = np.asarray([0.02, -0.01, 0.05, 0.00, 0.03], dtype=np.float64)
+    labels = _integer_relevance_labels(y, np.asarray([3, 2], dtype=np.int32))
+    assert labels.tolist() == [2, 1, 3, 1, 2]
+    assert labels[2] > labels[0] > labels[1]
+    assert labels[4] > labels[3]
 
 
 def test_train_xgboost_panel_regression_smoke(tmp_path):
@@ -168,6 +195,45 @@ def test_predict_xgboost_tree_auto_flip_when_negative_rank_ic(tmp_path):
     df = pd.DataFrame({"z_momentum": [1.0, 2.0, 3.0]})
     pred = predict_xgboost_tree(bundle_dir, df)
     assert np.allclose(pred, [-1.0, -2.0, -3.0])
+
+
+def test_predict_xgboost_tree_auto_flip_logs_once_per_bundle(tmp_path, caplog):
+    bundle_dir = tmp_path / "xgb_bundle_once"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    save_sklearn_model(_DummyTreeModel(), bundle_dir)
+    save_inference_config(
+        bundle_dir,
+        InferenceConfig(
+            feature_columns=["z_momentum"],
+            target_column="forward_ret_5d",
+            normalize="none",
+            extra={"backend": "xgboost"},
+        ),
+    )
+    save_bundle_metadata(
+        bundle_dir,
+        BundleMetadata(
+            model_version="1.0.0",
+            feature_version="tree_z_v1",
+            model_type="xgboost_panel",
+            backend="sklearn",
+            training_seed=42,
+            data_slice_hash="dummy_slice",
+            content_hash="dummy_content",
+            created_at="2026-01-01T00:00:00Z",
+            metrics={"val_rank_ic": -0.25},
+            params={},
+        ),
+    )
+    df = pd.DataFrame({"z_momentum": [1.0, 2.0, 3.0]})
+    _AUTO_FLIP_WARNED_BUNDLES.clear()
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        pred1 = predict_xgboost_tree(bundle_dir, df)
+        pred2 = predict_xgboost_tree(bundle_dir, df)
+    assert np.allclose(pred1, [-1.0, -2.0, -3.0])
+    assert np.allclose(pred2, [-1.0, -2.0, -3.0])
+    assert caplog.text.count("已自动翻转 tree_score 方向") == 1
 
 
 def test_should_promote_by_quantile_guard():

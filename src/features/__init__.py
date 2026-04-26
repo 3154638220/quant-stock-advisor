@@ -20,7 +20,7 @@ from .panel import (
     wide_close_to_numpy,
 )
 from .standardize import factor_standardize_pipeline, winsorize_by_date, zscore_by_date
-from .tensor_alpha import compute_momentum_rsi_torch
+from .tensor_alpha import compute_momentum_rsi_torch, weekly_kdj_from_daily
 from .tensor_base_factors import (
     atr_wilder,
     bias_from_close,
@@ -39,6 +39,26 @@ from .tensor_base_factors import (
     true_range,
 )
 
+try:
+    from .fund_flow_factors import DEFAULT_FUND_FLOW_WINDOWS, attach_fund_flow
+except ModuleNotFoundError:  # pragma: no cover - 轻量测试环境可不装 duckdb
+    DEFAULT_FUND_FLOW_WINDOWS = (5, 10, 20)
+
+    def attach_fund_flow(*args, **kwargs):
+        raise ModuleNotFoundError("attach_fund_flow 需要安装 duckdb")
+
+
+try:
+    from .shareholder_factors import (
+        DEFAULT_SHAREHOLDER_AVAILABILITY_LAG_DAYS,
+        attach_shareholder_factors,
+    )
+except ModuleNotFoundError:  # pragma: no cover - 轻量测试环境可不装 duckdb
+    DEFAULT_SHAREHOLDER_AVAILABILITY_LAG_DAYS = 30
+
+    def attach_shareholder_factors(*args, **kwargs):
+        raise ModuleNotFoundError("attach_shareholder_factors 需要安装 duckdb")
+
 __all__ = [
     "atr_wilder",
     "attach_neutralized_pair",
@@ -48,6 +68,8 @@ __all__ = [
     "daily_returns_from_close",
     "factor_standardize_pipeline",
     "DEFAULT_FUNDAMENTAL_COLS",
+    "DEFAULT_FUND_FLOW_WINDOWS",
+    "DEFAULT_SHAREHOLDER_AVAILABILITY_LAG_DAYS",
     "forward_returns_from_close",
     "forward_returns_tplus1_open",
     "ic_summary",
@@ -64,6 +86,8 @@ __all__ = [
     "pivot_field_wide",
     "price_position_in_range",
     "preprocess_fundamental_cross_section",
+    "attach_fund_flow",
+    "attach_shareholder_factors",
     "quantile_returns",
     "rank_ic",
     "rolling_ic_stability",
@@ -72,6 +96,7 @@ __all__ = [
     "rolling_volume_return_corr",
     "short_term_reversal",
     "true_range",
+    "weekly_kdj_from_daily",
     "winsorize_by_date",
     "wide_close_to_numpy",
     "zscore_by_date",

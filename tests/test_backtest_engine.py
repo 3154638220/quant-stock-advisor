@@ -11,6 +11,7 @@ from src.backtest.transaction_costs import TransactionCostParams
 from src.backtest.walk_forward import (
     contiguous_time_splits,
     rolling_walk_forward_windows,
+    summarize_oos_excess_returns,
     walk_forward_backtest,
 )
 
@@ -146,3 +147,13 @@ def test_rolling_walk_forward():
     assert len(wins) >= 2
     panels, detail, agg = walk_forward_backtest(ar, ws, wins, use_test_only=True)
     assert len(panels) >= 1
+
+
+def test_summarize_oos_excess_returns_reports_median():
+    idx = pd.bdate_range("2024-01-01", periods=10)
+    strategy = pd.Series([0.02, 0.01, -0.01, 0.00, 0.03, 0.01, -0.02, 0.01, 0.00, 0.02], index=idx)
+    benchmark = pd.Series([0.01, 0.00, -0.01, -0.01, 0.01, 0.00, -0.01, 0.00, 0.00, 0.01], index=idx)
+    wins = rolling_walk_forward_windows(idx, train_days=5, test_days=2, step_days=2)
+    out = summarize_oos_excess_returns(strategy, benchmark, wins)
+    assert len(out["detail"]) == len(wins)
+    assert np.isfinite(out["median_ann_excess_return"])

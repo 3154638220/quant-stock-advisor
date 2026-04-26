@@ -35,6 +35,7 @@ from .walk_forward import (
     contiguous_time_splits,
     rolling_walk_forward_windows,
     run_backtest_on_index,
+    summarize_oos_excess_returns,
     walk_forward_backtest,
 )
 
@@ -61,6 +62,7 @@ __all__ = [
     "rolling_walk_forward_windows",
     "run_backtest",
     "run_backtest_on_index",
+    "summarize_oos_excess_returns",
     "summarize_forward_returns",
     "summarize_portfolio_eval",
     "transaction_cost_params_from_mapping",

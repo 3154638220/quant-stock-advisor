@@ -95,3 +95,36 @@ def test_resolve_directional_candidate_pool_prefers_scout_source(tmp_path):
     assert out_all == ["momentum", "bias_long"]
     assert str(scout_path) in src_default
     assert str(scout_path) in src_all
+
+
+def test_directional_scout_summary_can_carry_light_proxy_fields():
+    summary_df = pd.DataFrame(
+        [
+            {
+                "scenario": "flip_blend_20_momentum",
+                "candidate_factor": "flip_momentum",
+                "base_factor": "momentum",
+                "family": "direction_flip",
+                "weight_style": "blend_20",
+                "factor_weight": -0.2,
+                "is_baseline": False,
+                "result_type": "light_strategy_proxy",
+                "research_topic": "alpha_directional_scout",
+                "research_config_id": "demo_cfg",
+                "output_stem": "demo_stem",
+                "rebalance_rule": "W",
+                "periods_per_year": 52.0,
+                "proxy_periods": 20,
+                "proxy_annualized_return": 0.09,
+                "proxy_benchmark_annualized_return": 0.04,
+                "annualized_return": 0.08,
+                "annualized_excess_vs_market": 0.05,
+                "full_backtest_annualized_excess_vs_market": 0.03,
+            }
+        ]
+    )
+
+    assert summary_df.loc[0, "result_type"] == "light_strategy_proxy"
+    assert summary_df.loc[0, "research_topic"] == "alpha_directional_scout"
+    assert float(summary_df.loc[0, "periods_per_year"]) == 52.0
+    assert float(summary_df.loc[0, "full_backtest_annualized_excess_vs_market"]) == 0.03

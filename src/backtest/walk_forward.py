@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.engine import BacktestConfig, BacktestResult, run_backtest
-from src.backtest.performance_panel import PerformancePanel, aggregate_walk_forward_panels
+from src.backtest.performance_panel import PerformancePanel, aggregate_walk_forward_panels, compute_performance_panel
 
 
 @dataclass(frozen=True)
@@ -183,3 +183,42 @@ def compare_full_vs_slices(full_panel: PerformancePanel, slice_agg: Mapping[str,
         if fk in slice_agg and np.isfinite(slice_agg[fk]):
             out[f"delta_{k}"] = float(full_panel.to_dict()[k]) - float(slice_agg[fk])
     return out
+
+
+def summarize_oos_excess_returns(
+    strategy_daily: pd.Series,
+    benchmark_daily: pd.Series,
+    slices: Sequence[TimeSlice],
+    *,
+    periods_per_year: float = 252.0,
+) -> Dict[str, Any]:
+    """按给定 walk-forward slices 统计测试窗内策略相对基准的超额年化。"""
+    rows: List[Dict[str, Any]] = []
+    for sl in slices:
+        common = (
+            pd.DatetimeIndex(sl.test_index)
+            .intersection(pd.DatetimeIndex(strategy_daily.index))
+            .intersection(pd.DatetimeIndex(benchmark_daily.index))
+            .sort_values()
+        )
+        if len(common) == 0:
+            continue
+        strat = pd.to_numeric(strategy_daily.reindex(common), errors="coerce").fillna(0.0)
+        bench = pd.to_numeric(benchmark_daily.reindex(common), errors="coerce").fillna(0.0)
+        excess = (strat - bench).to_numpy(dtype=np.float64)
+        panel = compute_performance_panel(excess, periods_per_year=periods_per_year)
+        rows.append(
+            {
+                "fold_id": int(getattr(sl, "fold_id", len(rows))),
+                "annualized_excess_return": float(panel.annualized_return),
+                "total_excess_return": float(panel.total_return),
+                "n_periods": int(panel.n_periods),
+            }
+        )
+    detail = pd.DataFrame(rows)
+    if detail.empty:
+        return {"median_ann_excess_return": np.nan, "detail": []}
+    return {
+        "median_ann_excess_return": float(pd.to_numeric(detail["annualized_excess_return"], errors="coerce").median()),
+        "detail": detail.to_dict(orient="records"),
+    }

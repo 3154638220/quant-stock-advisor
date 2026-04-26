@@ -15,6 +15,12 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.light_strategy_proxy import (
+    build_light_proxy_period_detail,
+    infer_periods_per_year,
+    summarize_light_strategy_proxy,
+)
+from scripts.research_identity import build_light_research_identity
 from scripts.run_alpha_factor_scout import DEFAULT_BASELINE_FACTOR
 from scripts.run_backtest_eval import (
     BacktestConfig,
@@ -448,6 +454,7 @@ def _build_doc(
 - 固定执行：`Top-{int(summary_df['top_k'].iloc[0]) if not summary_df.empty else 20}` / `tplus1_open` / `prefilter=false` / `universe=true`
 - blend 权重：`{", ".join(f"{int(w * 100)}%" for w in blend_weights)}`
 - 条件化阈值：`{", ".join(f"z>={v:g}" for v in condition_z_thresholds)}`
+- 结果类型：`light_strategy_proxy`（用于 expression 方向性和 benchmark-first proxy 判断，不等价于 full backtest）
 
 ## Expression 排名
 
@@ -592,6 +599,22 @@ def main() -> None:
     portfolio_cfg = cfg.get("portfolio", {}) or {}
     backtest_cfg = cfg.get("backtest", {}) or {}
     prefilter_cfg = cfg.get("prefilter", {}) or {}
+    rebalance_rule = str(backtest_cfg.get("eval_rebalance_rule", "M"))
+    periods_per_year = infer_periods_per_year(rebalance_rule)
+    research_identity = build_light_research_identity(
+        topic="alpha_expression_scout",
+        output_prefix=output_prefix,
+        baseline_factor=baseline_factor,
+        rebalance_rule=rebalance_rule,
+        top_k=int(args.top_k),
+        benchmark_key_years=benchmark_key_years,
+        selector_parts={
+            "candidates": candidates[:4],
+            "weights": blend_weights,
+            "thresholds": condition_z_thresholds,
+            "allow_overlay": bool(args.allow_overlay_candidates),
+        },
+    )
     costs = transaction_cost_params_from_mapping(cfg.get("transaction_costs", {}))
     execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open")).lower().strip()
     bt_cost = BacktestConfig(cost_params=costs, execution_mode=execution_mode, execution_lag=1)
@@ -615,7 +638,7 @@ def main() -> None:
             factor_df=scenario_factors,
             daily_df=daily_df,
             top_k=int(args.top_k),
-            rebalance_rule=str(backtest_cfg.get("eval_rebalance_rule", "M")),
+            rebalance_rule=rebalance_rule,
             prefilter_cfg=prefilter_cfg,
             max_turnover=float(portfolio_cfg.get("max_turnover", 0.3)),
             industry_map=industry_map,
@@ -669,6 +692,13 @@ def main() -> None:
         )
         rolling_excess = _summarize_oos_excess(res_wc.daily_returns, market_benchmark, rolling)
         slice_excess = _summarize_oos_excess(res_wc.daily_returns, market_benchmark, slices)
+        proxy_period_df = build_light_proxy_period_detail(
+            res_wc.daily_returns,
+            market_benchmark,
+            rebalance_rule=rebalance_rule,
+            scenario=scenario["scenario"],
+        )
+        proxy_summary = summarize_light_strategy_proxy(proxy_period_df, periods_per_year=periods_per_year)
 
         summary_rows.append(
             {
@@ -679,14 +709,26 @@ def main() -> None:
                 "expression_type": scenario["expression_type"],
                 "factor_weight": float(scenario["factor_weight"]),
                 "is_baseline": bool(scenario["is_baseline"]),
+                "result_type": "light_strategy_proxy",
+                "research_topic": research_identity["research_topic"],
+                "research_config_id": research_identity["research_config_id"],
+                "output_stem": research_identity["output_stem"],
+                "rebalance_rule": rebalance_rule,
+                "periods_per_year": float(periods_per_year),
+                "proxy_periods": int(proxy_summary["n_periods"]),
                 "top_k": int(args.top_k),
                 "annualized_return": float(res_wc.panel.annualized_return),
+                "proxy_annualized_return": float(proxy_summary["strategy_annualized_return"]),
+                "proxy_benchmark_annualized_return": float(proxy_summary["benchmark_annualized_return"]),
                 "sharpe_ratio": float(res_wc.panel.sharpe_ratio),
                 "max_drawdown": float(res_wc.panel.max_drawdown),
                 "turnover_mean": float(res_wc.panel.turnover_mean),
                 "rolling_oos_median_ann_return": float(wf_agg.get("median_ann_return", np.nan)),
                 "slice_oos_median_ann_return": float(sp_agg.get("median_ann_return", np.nan)),
-                "annualized_excess_vs_market": float(benchmark_summary.get("annualized_excess_return", np.nan)),
+                "annualized_excess_vs_market": float(proxy_summary["annualized_excess_vs_market"]),
+                "full_backtest_annualized_excess_vs_market": float(
+                    benchmark_summary.get("annualized_excess_return", np.nan)
+                ),
                 "yearly_excess_median_vs_market": float(benchmark_summary.get("yearly_excess_median", np.nan)),
                 "key_year_excess_mean_vs_market": float(benchmark_summary.get("key_year_excess_mean", np.nan)),
                 "key_year_excess_worst_vs_market": float(benchmark_summary.get("key_year_excess_worst", np.nan)),
@@ -699,6 +741,10 @@ def main() -> None:
 
         payload = {
             "generated_at": pd.Timestamp.utcnow().isoformat(),
+            "result_type": "light_strategy_proxy",
+            "research_topic": research_identity["research_topic"],
+            "research_config_id": research_identity["research_config_id"],
+            "output_stem": research_identity["output_stem"],
             "config_source": config_source,
             "scenario": scenario,
             "parameters": {
@@ -754,6 +800,15 @@ def main() -> None:
         f1_min_t=float(args.f1_min_t),
         benchmark_key_years=benchmark_key_years,
     ).rename(columns={"admission_status": "scout_status"})
+    if not gate_df.empty:
+        gate_df.insert(0, "result_type", "factor_gate")
+        gate_df.insert(1, "research_topic", research_identity["research_topic"])
+        gate_df.insert(2, "research_config_id", research_identity["research_config_id"])
+        gate_df.insert(3, "output_stem", research_identity["output_stem"])
+    scout_df["result_type"] = "alpha_expression_scout"
+    scout_df["research_topic"] = research_identity["research_topic"]
+    scout_df["research_config_id"] = research_identity["research_config_id"]
+    scout_df["output_stem"] = research_identity["output_stem"]
     scout_df = classify_expression_promotion(scout_df)
     scout_df = scout_df.sort_values(
         [
@@ -793,6 +848,8 @@ def main() -> None:
     manifest_path = results_dir / f"{output_prefix}_manifest.json"
     manifest = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
+        "result_type": "research_manifest",
+        **research_identity,
         "baseline_factor": baseline_factor,
         "candidates": candidates,
         "candidate_source_desc": candidate_source_desc,

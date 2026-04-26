@@ -16,6 +16,7 @@ from src.models.timeseries.ohlcv_norm import normalize_ohlcv_anchor
 from src.models.timeseries.train import load_timeseries_bundle
 
 _LOG = logging.getLogger(__name__)
+_AUTO_FLIP_WARNED_BUNDLES: set[str] = set()
 
 
 def predict_baseline_bundle(
@@ -65,11 +66,14 @@ def predict_xgboost_tree(
             rank_ic = val
             break
     if rank_ic is not None and rank_ic < 0:
-        _LOG.warning(
-            "检测到模型 Rank IC<0（%.4f），已自动翻转 tree_score 方向: %s",
-            rank_ic,
-            root,
-        )
+        bundle_key = str(root.resolve())
+        if bundle_key not in _AUTO_FLIP_WARNED_BUNDLES:
+            _LOG.warning(
+                "检测到模型 Rank IC<0（%.4f），已自动翻转 tree_score 方向: %s",
+                rank_ic,
+                root,
+            )
+            _AUTO_FLIP_WARNED_BUNDLES.add(bundle_key)
         pred = -pred
     return np.asarray(pred, dtype=np.float64)
 

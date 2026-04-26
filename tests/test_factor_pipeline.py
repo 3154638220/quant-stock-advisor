@@ -26,6 +26,7 @@ from src.features.tensor_base_factors import (
     forward_returns_tplus1_open,
     true_range,
 )
+from src.features.tensor_alpha import weekly_kdj_from_daily
 from src.models.rank_score import sort_key_for_dataframe
 from src.models.recommend_explain import build_recommend_reason
 
@@ -106,19 +107,21 @@ def test_forward_returns_tplus1_open():
 
 def test_base_factor_bundle():
     close = torch.tensor(
-        [[100.0, 101.0, 102.0, 103.0, 104.0] * 1],
+        [[100.0, 101.0, 102.0, 103.0, 104.0] * 4],
         dtype=torch.float32,
     )
     vol = torch.ones_like(close) * 1e6
     to = torch.ones_like(close) * 0.02
     hi = close * 1.001
     lo = close * 0.999
+    trade_dates = pd.bdate_range("2024-01-01", periods=close.shape[1])
     b = compute_base_factor_bundle(
         close,
         volume=vol,
         turnover=to,
         high=hi,
         low=lo,
+        trade_dates=trade_dates,
         vol_window=3,
         turnover_window=2,
         vp_corr_window=3,
@@ -131,6 +134,33 @@ def test_base_factor_bundle():
     assert b["atr"] is not None
     assert b["vol_to_turnover"] is not None
     assert b["volume_skew_log"] is not None
+    assert b["weekly_kdj_j"] is not None
+    assert torch.isfinite(b["weekly_kdj_j"][:, -1]).all()
+
+
+def test_weekly_kdj_from_daily_uses_completed_week_values():
+    trade_dates = pd.bdate_range("2024-01-01", periods=10)
+    close = torch.tensor([[10.0, 10.2, 10.4, 10.1, 10.5, 10.6, 10.7, 10.8, 10.9, 11.0]], dtype=torch.float64)
+    high = close + 0.2
+    low = close - 0.2
+
+    k_day, d_day, j_day = weekly_kdj_from_daily(
+        close,
+        high,
+        low,
+        trade_dates=trade_dates,
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    assert torch.isnan(j_day[0, 0])
+    first_week_end = 4
+    second_week_start = 5
+    second_week_end = 9
+    assert torch.isfinite(j_day[0, first_week_end])
+    assert abs(j_day[0, second_week_start].item() - j_day[0, first_week_end].item()) < 1e-9
+    assert torch.isfinite(k_day[0, second_week_end])
+    assert torch.isfinite(d_day[0, second_week_end])
 
 
 def test_ic_and_rank_ic():

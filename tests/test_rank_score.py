@@ -19,6 +19,13 @@ def test_cross_section_zscore_constant():
     assert np.allclose(z, 0.0)
 
 
+def test_cross_section_zscore_all_nan():
+    x = np.array([np.nan, np.nan, np.nan])
+    z = cross_section_zscore(x)
+    assert z.shape == x.shape
+    assert np.isnan(z).all()
+
+
 def test_composite_linear_score_weights():
     mom = np.array([0.1, 0.2, 0.3])
     rsi = np.array([40.0, 50.0, 60.0])

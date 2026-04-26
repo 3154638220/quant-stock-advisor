@@ -1,41 +1,104 @@
 # 策略优化主计划
 
-**文档角色**：当前唯一主计划（canonical）  
-**整理范围**：基于截至 `2026-04-20` 的回测、IC、PIT、一致性检查与基准对比结果  
-**当前阶段主题**：从“内部基线修复”切换为“相对全市场等权基准的稳定超额验证”  
+**文档角色**：当前唯一主计划（canonical）
+**更新时间**：`2026-04-26`
+**当前阶段**：P1 树模型目标/标签诊断 + P2 新数据质量归档
 **归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
 ---
 
-## 1. 阶段切换
+## 0. 当前决策
 
-### 1.1 过去一轮已经解决了什么
+项目已经从“系统性负收益修复”进入“能否稳定跑赢全市场等权基准”的阶段。当前没有任何新方案可以写回默认主线。
 
-过去一轮的主任务，是把“显著负收益、配置漂移、诊断与回测口径不一致”的状态，收敛到一个可重复、可解释、绝对收益已经改善的研究基线。
+当前执行判断：
 
-当前已经确认的关键进展如下：
+1. `V3 = S2(vol_to_turnover) + equal_weight + Top-20 + M + prefilter=false + universe=true` 是默认研究基线，但只是对照基线，不是可生产策略。
+2. 线性技术面主干已经接近饱和，继续做 `Top-K / 缓冲带 / 分层等权 / 同类反转因子加权` 的收益很低。
+3. `weekly_kdj_*` 只保留为树模型或条件表达素材，不再直接加入 `composite_extended`。
+4. P0 评估硬化已完成第一轮收口，不再阻塞 P1。
+5. P1 rank-fix 同窗正式对照与 G0/G1 失效诊断已完成：`G1 = G0 + weekly_kdj_*` 没有超过同口径 `G0`。
+6. P1 的核心问题不是“缺更多特征”，而是训练目标、标签口径、light proxy 与 full backtest 之间的断层。
+7. 资金流和股东人数链路已经接入，但研究结论偏弱；它们目前是候选原料，不是主线。
 
-| 口径 | CAGR | 夏普 | MaxDD | rolling OOS 中位年化 | slice OOS 中位年化 | 年度超额中位数 | 当前含义 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `V1 = S2 + equal_weight + prefilter on + universe off` | `-10.19%` | `-0.457` | `51.08%` | `-3.63%` | `-4.25%` | `-15.13%` | 旧研究基线，已不再适合作为默认口径 |
-| `V2 = S2 + equal_weight + prefilter off + universe off` | `+1.68%` | `+0.188` | `20.62%` | `+6.07%` | `+1.66%` | `-7.62%` | 说明 `prefilter` 在当前主线上存在明显误伤 |
-| `V3 = S2 + equal_weight + prefilter off + universe on` | `+3.74%` | `+0.319` | `20.15%` | `+9.48%` | `+3.73%` | `-5.19%` | 当前最优研究基线，绝对收益与稳定性均优于 `V1/V2` |
+一句话：**先补新数据质量归档，再只做 `regression + rank_fusion + G0` 正式回测和 `market_relative + G1` 断层诊断；在这些结果出来前，不扩线性网格、不扩 weekly KDJ 网格、不重复 G2/G4 直拼。**
 
-`V3` 已经证明，当前系统并非完全没有可用信号，也不是只能得到持续负收益。  
-但同一组结果也同时说明，**“绝对收益改善” 还不等于 “相对全市场等权基准已经成立”**：
+---
 
-1. `V3` 的年度超额中位数仍为 `-5.19%`，尚未建立稳定的正超额。
-2. `V3` 仅在 `2022 / 2023 / 2024` 三个年度跑赢基准，在 `2021 / 2025 / 2026` 仍显著落后。
-3. 其中 `2025` 年超额为 `-35.67%`，说明当前模型在广谱上涨年份的市场参与能力仍然不足。
+## 1. 下一步执行队列
 
-结论：上一阶段已经把问题从“系统性失效”收敛到了“存在绝对收益，但尚未战胜强基准”。  
-因此主计划必须切换阶段，不再以“谁比旧方案好一些”为终点，而要以“是否能相对全市场等权产生稳定超额”为主目标。
+### 1.1 立即做：新数据质量归档
 
-### 1.2 当前默认研究基线
+目的：把当前 DuckDB 中 `fund_flow` 和 `shareholder` 的覆盖、缺失、重复、全零、时间错位写入正式研究产物，决定后续是否继续给 P2 研究预算。
 
-除非实验明确另行声明，后续一切比较都以以下口径为默认研究基线：
+建议命令：
 
-- `score = S2 = vol_to_turnover` 单因子
+```bash
+python scripts/run_newdata_quality_checks.py \
+  --config config.yaml.backtest \
+  --families fund_flow,shareholder \
+  --output-prefix newdata_quality_current
+```
+
+完成标准：
+
+1. 生成 `data/results/*newdata_quality_current*_summary.csv`。
+2. 生成 `data/results/*newdata_quality_current*.json` 与 manifest。
+3. 生成 `docs/*newdata_quality_current*.md`。
+4. 报告中明确写出 `fund_flow` 和 `shareholder` 是否继续保留研究预算。
+
+### 1.2 紧接着做：`regression + rank_fusion + G0` 正式回测
+
+目的：验证第一轮目标函数实验中最值得补 full backtest 的候选。只跑 `G0`，不扩特征组。
+
+建议命令：
+
+```bash
+python scripts/run_p1_tree_groups.py \
+  --config config.yaml.backtest \
+  --groups G0 \
+  --label-horizons 5,10,20 \
+  --label-mode rank_fusion \
+  --xgboost-objective regression \
+  --proxy-horizon 5 \
+  --rebalance-rule M \
+  --top-k 20 \
+  --val-frac 0.2 \
+  --run-full-backtest \
+  --backtest-config config.yaml.backtest \
+  --backtest-start 2021-01-01 \
+  --backtest-top-k 20 \
+  --backtest-max-turnover 0.3 \
+  --backtest-portfolio-method equal_weight \
+  --out-tag p1_label_objective_reg_rankfusion
+```
+
+判读规则：
+
+1. 若 full backtest 仍显著负超额，目标函数方向降温，P1 先转向断层诊断。
+2. 若 full backtest 明显改善但未过 gate，只允许做同窗 `G1` 对照，不允许直接 promotion。
+3. 若过 gate，仍需补 rolling / slice OOS、年度拆解和关键年份解释。
+
+### 1.3 可并行或随后做：`market_relative + G1` 断层诊断
+
+目的：解释为什么 `rank + market_relative + G1` 在 light proxy 上最好，但 full backtest 严重失败。
+
+诊断范围：
+
+1. rank bucket：特别是 Top-20 与 `21-40` 桶的机会损失。
+2. 持仓暴露：市值、成交额、波动率、近期动量、价格位置、换手。
+3. 年份退化：重点解释 `2022 / 2024 / 2025`。
+4. 换手与执行：确认 light proxy 是否低估了月频换仓与成本冲击。
+
+完成标准：输出一页诊断文档，结论必须写清“是标签口径失效、proxy 断层、执行口径断层，还是三者共同作用”。
+
+---
+
+## 2. 默认研究口径
+
+除非实验明确另行声明，后续所有 benchmark-first 比较都以这一组口径为默认参考：
+
+- `score = S2 = vol_to_turnover`
 - `portfolio_method = equal_weight`
 - `top_k = 20`
 - `rebalance_rule = M`
@@ -45,354 +108,277 @@
 - `universe_filter = true`
 - `benchmark_symbol = market_ew_proxy`
 
-这条基线来自 `2026-04-19` 的 `prefilter / universe` 复核，相关证据见：
-
-- `docs/prefilter_universe_validation_2026-04-19.md`
-- `docs/p1_residual_diag_2026-04-19.md`
-
-### 1.3 当前主问题
-
-从 `2026-04-20` 开始，主问题不再是：
-
-1. 哪个旧方案比 `P1 静态` 更接近。
-2. 哪个权重方法在当前错误候选集合上少亏一点。
-3. 哪个未准入因子能把 IC 再抬高一点。
-
-新的主问题是下面这三个：
-
-1. 为什么 `V3` 已经把绝对收益拉正，却仍然稳定跑输全市场等权基准？
-2. 这种弱势主要来自 `score` 的选股方向、Top-K 覆盖宽度，还是组合构建对排名信息的浪费？
-3. 下一轮实验怎样才能以“基准超额”为放行标准，而不是继续被“内部相对最优”误导？
+这条基线的含义是“当前最稳的研究对照”，不是“生产默认答案”。已知它仍存在稳定负超额：上涨月份参与不足，尤其在 `2021 / 2025 / 2026` 明显落后。
 
 ---
 
-## 2. 已冻结结论
+## 3. Promotion Gate
 
-以下结论已经足够稳定，不再作为当前主矛盾反复重跑：
+任何新方案要进入默认研究基线候选，必须同时满足：
 
-1. `PIT` 当前不是主要问题。`2026-04-20` 抽查中，公告日前 `40/40`、公告后 `30/30` 均通过，没有明显前视性证据。
-2. 当前 `score` 主干已经阶段性收敛为 `S2 = vol_to_turnover`。在统一 `Top-20 / M / equal_weight` 口径下，它显著优于 `ocf_to_net_profit` 单因子与双因子、三因子组合。
-3. `ocf_to_net_profit` 当前不是“还不够强”，而是会系统性把候选集合从当前最优主线拉开，因此不再作为默认 score 的一部分。
-4. `lower_shadow_ratio` 已不应继续作为核心默认因子。诊断与一致性检查已经确认，它不该再占据主分数的重要权重。
-5. `portfolio_method` 只改变 Top-K 内部配权，不改变 Top-K 选股集合，因此不能修复前端打分被弱因子污染的问题。
-6. `risk_parity` 当前在 `S2` 主线上稳定收敛为等权型解，已降级为诊断工具，不再视为默认优化方向。
-7. `min_variance` 确实能改变持仓，但改善主要停留在全样本，尚未通过 OOS 放行标准，且换手更高，因此暂不升级为主线。
-8. `mean_variance` 已判定失控，退出主线。
-9. `prefilter=true` 在当前主线下并非中性保护层，而是在显著误伤有效候选，当前默认应保持关闭。
-10. `Universe` 过滤不能单独证明 alpha，但在 `prefilter=false` 条件下显示出稳定正向交互，因此当前默认应保持开启。
-11. `regime` 对当前 `S2` 主线没有可见贡献，可暂时从主矛盾中移除。
-12. `gross_margin_delta`、`ocf_to_asset`、`net_margin_stability`、`asset_turnover` 目前都还没有通过“IC 门槛 + 组合门槛 + 基准超额门槛”的三级准入，不得直接加入默认 score。
-13. `P1 静态` 的历史残余差异已可由组合结构参数复现，这一问题已经完成归因；它现在只是归档背景，不再是主计划的第一目标。
+1. 正式 full backtest 的 `annualized_excess_vs_market >= 0`。
+2. 年度超额中位数 `>= 0`。
+3. `rolling / slice OOS` 的超额中位数不为负。
+4. `2021 / 2025 / 2026` 不能明显更差，至少要解释清楚改善或退化来源。
+5. MaxDD 不明显劣于当前默认研究基线，除非超额改善足够大且可解释。
+6. 换手上升必须有明确收益补偿。
+7. 树模型必须使用同一标签口径、同一训练窗口、同一执行口径做同窗比较。
+8. 如果模型依赖 `tree_score_auto_flipped=True` 才能工作，必须先解释方向问题，不能 promotion。
 
-对应证据入口如下：
+结果层级：
 
-- `docs/score_ablation_2026-04-19.md`
-- `docs/s2_portfolio_diagnostics_2026-04-19.md`
-- `docs/p1_residual_diag_2026-04-19.md`
-- `docs/prefilter_universe_validation_2026-04-19.md`
-- `docs/factor_admission_validation_2026-04-19.md`
-- `docs/factor_admission_validation_2026-04-20_next.md`
-- `docs/m2_5c_consistency_check_2026-04-20.md`
-- `docs/pit_check_2026-04-20.md`
-
----
-
-## 3. 新阶段的核心假设树
-
-当前不应再把“跑输全市场等权”当作一个笼统现象，而应拆成可以证伪的假设。
-
-| 假设 | 含义 | 当前为何值得优先检查 | 通过什么证据验证 |
+| 层级 | `result_type` | 用途 | 能否直接 promotion |
 | --- | --- | --- | --- |
-| `H1 覆盖宽度不足` | `Top-20` 过于集中，错过了广谱上涨年份的市场 beta 与中位数收益 | `V3` 在 `2025` 年显著跑输基准，且基准是全市场等权，天然更受市场广度影响 | Top-K 宽度、缓冲持仓、持有带宽实验能否改善年度超额与上涨月份参与率 |
-| `H2 当前 score 偏防守 / 偏交易摩擦` | `vol_to_turnover` 可能更擅长回避劣质票，但不足以在强势市场里抓住最强扩散段 | `2022-2024` 相对更好，但 `2021/2025/2026` 仍明显落后，表现出环境依赖性 | 按市场宽度、上涨扩散度、风格环境拆分后的超额归因 |
-| `H3 组合构建浪费了排名信息` | 当前“硬切 Top-K + 月频换仓 + 等权”可能把中间排名的有效信息丢掉了 | `V3` 已有正收益，但不代表当前组合表达方式已最优 | 排名缓冲、持有阈值、分层加权是否能在不明显增大回撤的前提下改善超额 |
-| `H4 研究目标错位` | `T+21 IC` 或单项绝对收益，并不等于 `tplus1_open` 的长期相对超额能力 | 前两轮因子准入已经显示“IC 改善 != 组合收益改善”，现在还需进一步升级到“!= 基准超额改善” | 因子准入流程必须新增 benchmark-first 检查，不再只看 IC 或绝对收益 |
+| 信号诊断 | `signal_diagnostic` | 看方向、覆盖、频率感知风险收益 | 不能 |
+| 轻量代理 | `light_strategy_proxy` | 快速筛候选、做 A/B | 不能 |
+| 因子准入 | `admission` | 检查 `IC + combo + benchmark` 门槛 | 仍需 full backtest |
+| 正式回测 | `full_backtest` | promotion 的必要条件 | 可以作为最终依据 |
 
-这四个假设里，`H1/H2/H3` 是当前主线，`H4` 是实验纪律。  
-后续实验必须按这棵假设树组织，而不是重新回到“多找一个因子、再调一次权重”的旧节奏。
+轻量结果只能决定“要不要进入下一层”，不能直接解释成正式策略收益。
 
 ---
 
-## 4. 执行顺序
+## 4. 状态看板
 
-### 4.1 第一优先级：先做基准差距归因，而不是继续扩因子
+| 模块 | 状态 | 当前判断 | 下一步 |
+| --- | --- | --- | --- |
+| P0 评估硬化 | 第一轮完成 | 不再阻塞 P1 | 维护 schema/version、身份字段、结果分层 |
+| P1 树模型 | 主线 | G1 未超过同窗 G0，目标/标签断层待解释 | 补 `regression + rank_fusion + G0` full backtest |
+| P2 新数据 | 链路完成、价值未证 | fund flow / shareholder 均不能直接进主线 | 跑正式质量报告 |
+| P3 interaction alpha | 诊断驱动 | 不再扩同质网格 | 每轮最多 3 个明确机制假设 |
+| P4 研究/生产边界 | 已开始 | 不能把研究轻量结果写入日更推荐 | 继续固化 canonical config 与 bundle 追踪 |
 
-状态：已完成首轮归因；结论已写入 `docs/benchmark_gap_diagnostics_2026-04-20_v3.md`，当前不再是最高优先级。
+---
 
-**目标**：解释 `V3` 为何已经把绝对收益拉到 `+3.74%`，却仍然没有形成相对全市场等权的稳定超额。
+## 5. P1 树模型主线
 
-**本轮必须产出的内容**：
+### 5.1 目标
 
-1. 一份按月份和按年份的超额收益拆解，至少写清：
-   - 哪些月份 / 年份在贡献负超额。
-   - 负超额是来自大幅跑输少数区间，还是广泛小幅落后。
-2. 一份“市场参与能力”诊断，至少写清：
-   - 基准上涨月份中，策略的上涨捕获率与中位超额。
-   - 基准下跌月份中，策略的防守能力是否足以抵消上涨期落后。
-3. 一份“持仓暴露 vs 基准”诊断，至少比较：
-   - 市值
-   - 换手 / 流动性
-   - 波动率
-   - 价格位置 / 近期强弱
-   - 行业分布
-4. 一份“排名覆盖”诊断，至少回答：
-   - 当前 `Top-20` 之外是否还存在大量表现不差但被硬切掉的候选。
-   - `Top-20` 的进入 / 退出阈值是否过于敏感，导致在市场扩散期丢失持续持有收益。
+验证非线性模型是否能把“线性主干里重复或弱势的特征”转化成真实 benchmark-first 增量。当前重点不是再加特征，而是解释训练目标、标签方向、年份失效和执行口径。
 
-**通过标准**：
+### 5.2 分组状态
 
-- 至少识别出 `1~2` 个能解释主要基准差距的稳定机制。
-- 必须能解释 `2021 / 2025 / 2026` 为何落后，而不只是重复描述“整体跑输”。
-
-**`2026-04-20` 首轮归因结论**：
-
-1. `V3` 的弱势更接近“上涨月份参与不足”，而不是“下跌月份防守失效”。在基准上涨月份里，策略中位超额约 `-3.43%`，仅约 `18.4%` 的上涨月份跑赢基准；而在基准下跌月份里，中位超额约 `+2.96%`，约 `80.8%` 的月份能跑赢基准。这已经足以解释 `2021 / 2025 / 2026` 这类强基准年份为何持续落后。
-2. 当前持仓并不支持“因为偏小盘、低流动性、交易摩擦过大而落后”这一简单叙事。相反，暴露显示组合整体偏向更大市值、更高成交额、较低波动、较高价格位置，但近期相对动量偏弱；这更像是在持有“相对稳”的股票，而不是在广谱上涨阶段抓住最强扩散段，因而更支持 `H2`。
-3. 排名覆盖诊断表明，`21-40` 桶的平均前向收益与 `01-20` 很接近，但其中位收益仍为负；同时，前一期 `Top-20` 掉到 `21-40` 的股票里，仍有一部分具备后续正收益。含义不是“应当简单把 `top_k` 线性放大”，而是“边界附近存在保留价值，更适合用缓冲持有或轻量分层表达”，这与 `B3/B4` 的首轮结果一致。
-4. 行业分布对比本轮因缺少 `data/cache/industry_map.csv` 尚未输出，但现有证据已经足以支持主计划从“继续做归因”转入“只在 `B3/B4` 类克制方案上做少量后续验证，或直接转向新的 alpha 构造”。
-
-**失败后的转向**：
-
-- 如果做完归因后仍无法解释基准差距，就停止在参数层继续试错，直接转入新的 alpha 构造与数据扩展。
-
-### 4.2 第二优先级：在冻结 score 的前提下验证“覆盖宽度 / 持有机制”
-
-状态：首轮与 follow-up 均已完成；`B1/B2/B3/B4` 以及更克制的 `VB3/VB4` 变体已在 `2026-04-20` 口径下完成验证，当前应停止继续沿该方向微调。
-
-**目标**：验证当前弱于基准，是否主要是因为组合覆盖宽度太窄、切换过于生硬，而不是因为 `vol_to_turnover` 本身完全无效。
-
-**固定不变项**：
-
-- `score = S2 = vol_to_turnover`
-- `prefilter = false`
-- `universe_filter = true`
-- `execution_mode = tplus1_open`
-- 不重新引入 `risk_parity`、`mean_variance`
-
-**建议实验矩阵**：
-
-| 编号 | 只改一个旋钮 | 目的 |
+| 分组 | 定义 | 当前判断 |
 | --- | --- | --- |
-| `B1` | `top_k: 20 -> 30` | 检查适度扩宽是否改善超额而不明显抬升回撤 |
-| `B2` | `top_k: 20 -> 40` | 检查更广覆盖能否提升强势年份的参与能力 |
-| `B3` | 进入 / 退出缓冲带 | 例如“买入看 `Top-20`，卖出放宽到 `Top-40`”，降低扩散行情中的误杀 |
-| `B4` | 分层等权 / 简单双层权重 | 检查是否能在不依赖复杂优化器的前提下保留更多排名信息 |
+| `G0` | baseline technical | rank-fix 同窗 full backtest 已补；仍负超额，作为正式诊断基准 |
+| `G1` | `G0 + weekly_kdj_*` | light proxy 好，但同窗 full backtest 未超过 `G0` |
+| `G2` | `G0 + fund_flow_*` | full backtest 明显劣化，暂停主线 promotion |
+| `G3` | `G0 + shareholder_*` | 无增量，降级 |
+| `G4` | `G0 + weekly_kdj_* + fund_flow_*` | 未超过 `G1`，暂停 |
+| `G5` | `G0 + weekly_kdj_* + weekly_kdj_interaction_*` | light proxy 未超过 `G1`，观察 |
+| `G6` | `G0 + weekly_kdj_interaction_*` | light proxy 未超过 `G1`，观察 |
 
-**注意事项**：
+### 5.3 已完成结论
 
-1. 不得直接用旧的 `P1 top_k=50` 结论否定这一轮实验，因为 `prefilter/universe` 已经发生变化，旧结论不再是同一口径。
-2. 这一轮比较的胜负标准，必须以基准超额为主，而不是只看 CAGR 是否继续抬升。
-3. 如果某个方案让绝对收益略降，但年度超额和 OOS 超额明显改善，它仍然值得保留。
+1. rank 标签方向问题已修正，`tree_score_auto_flipped=False`。
+2. rank-fix 同窗 full backtest 已补：`G1` 没有 benchmark-first 增量。
+3. G0/G1 年份失效诊断已补：两组共同弱点仍是上涨月捕获不足。
+4. `weekly_kdj_*` 更像强化头部反转排序，没有稳定解决 `21-40` 桶机会损失。
+5. 第一轮目标/标签实验已完成：
+   - `rank + rank_fusion`、`regression + rank_fusion`、`rank + market_relative` 已做 light proxy。
+   - `rank + market_relative` 的 G0/G1 已补 full backtest，未过 gate，且 G1 明显劣化。
+   - `regression + rank_fusion + G0` 仍待正式回测。
 
-**`2026-04-20` 首轮结果**：
+### 5.4 P1 禁区
 
-1. `B1 (Top-30)` 未通过。相对 `V3`，绝对收益、基准年化超额、年度超额中位数均恶化；虽然换手下降，但没有换来 benchmark-first 意义上的改善。
-2. `B2 (Top-40)` 同样未通过，且退化幅度大于 `B1`。这说明当前主线不是“越宽越好”，简单扩宽持仓会继续稀释前端排名信号。
-3. `B3 (买入 Top-20 / 持有放宽到 Top-40)` 仍是首轮里第一个值得保留的方案。它没有让年度超额中位数转正，但相对 `B1/B2` 明显更好，并改善了 `2025` 年超额、滚动 OOS 超额中位数与持仓连续性。
-4. `B4 (Top-20` 内做 `10/10` 双层等权，前 `10` 名占 `60%` 权重，后 `10` 名占 `40%`，并保留 `20/40` 持有缓冲) 已完成。它相对 `B3` 改善了绝对收益、夏普、MaxDD、全样本基准年化超额、年度超额中位数与切片 OOS 超额，但仍未优于 `V3`，且年度超额中位数仍为负 (`-4.66%`)；因此可作为保留候选，但尚不足以升级为默认基线。
-5. 因此，当前不应继续沿 `Top-30 / Top-40` 的纯扩宽方向微调；若还要继续验证 `H1/H3`，应优先在 `B3/B4` 这类“缓冲 + 轻量分层表达”上做更克制的变体，或直接转向新的 alpha 构造，而不是继续线性放大 `top_k`。
-
-**`2026-04-20` follow-up 结果（共享 prepared-factors cache 后的全样本复核）**：
-
-1. 已对 `V3/B3/B4` 与两组更克制变体完成统一口径复核：`VB3 = 20/35` 持有缓冲，`VB4 = 20/35 + 8/12 双层 + 65/35 权重`。相关结果文件见：
-   - `data/results/v3_full_eval.json`
-   - `data/results/b3_full_eval.json`
-   - `data/results/b4_full_eval.json`
-   - `data/results/vb3_20_35_full_eval.json`
-   - `data/results/vb4_20_35_t8_s65_full_eval.json`
-2. `V3` 仍是这一组里最稳妥的默认研究基线。其含成本年化约 `+5.69%`、相对 `market_ew` 年化超额约 `-11.19%`、年度超额中位数约 `-4.59%`。含义不变：绝对收益为正，但 benchmark-first 仍未过线。
-3. `B3 (20/40)` 未能在 follow-up 中保住“更值得继续推进”的地位。相对 `V3`，它的含成本年化降至约 `+5.25%`，全样本年化超额恶化到约 `-11.44%`，年度超额中位数也降至约 `-5.34%`；虽然换手继续下降到约 `15.0%`，但这没有换来更好的基准超额。
-4. `VB3 (20/35)` 同样未通过。更克制的缓冲并没有带来 benchmark-first 改善，反而把含成本年化进一步压到约 `+4.91%`，全样本年化超额约 `-11.76%`，年度超额中位数仍为负；因此“只要把缓冲再收窄一点就能改善”的叙事当前没有证据支持。
-5. `B4 (20/40 + 10/10 + 60/40)` 仍是 follow-up 里最接近保留候选的一项。它的含成本年化约 `+5.65%`、全样本年化超额约 `-11.16%`，与 `V3` 基本持平；年度超额中位数约 `-4.66%`，略优于 `B3` 但仍未转正，因此依然不足以升级为默认基线。
-6. `VB4 (20/35 + 8/12 + 65/35)` 没有给出“更克制的双层表达可以越过门槛”的证据。它在 `2023/2024` 的年度超额有所抬升，年度超额中位数也改善到约 `-2.81%`，但代价是 `2021` 与 `2025` 明显更差、全样本年化超额仍约 `-11.59%`、MaxDD 也高于 `V3/B4`；因此它最多只能说明“分层表达会重排年份表现”，不能说明主问题已经被解决。
-7. 综上，这一支 follow-up 已经足够说明：当前并不存在一个“再轻一点的 `B3/B4` 参数变体”能够把基准超额拉回非负。后续不应再继续扩展 `20/35/40/50`、`8/10/12`、`55/60/65` 这类 restrained grid，而应把 `B4` 记为“可保留但未过线”的组合表达候选，并将主研究时间转回新的 alpha 构造。
-
-**升级条件**：
-
-- 相对 `V3`，全样本年度超额中位数上升并转为非负。
-- `rolling / slice` 样本外的超额中位数不恶化。
-- MaxDD 不得明显劣于 `V3`，除非超额改善足够大且可解释。
-
-**止损条件**：
-
-- 如果 `B1~B4` 都无法让年度超额中位数转正，就停止继续微调 `top_k / max_turnover / 持有带宽`。
-
-**当前执行结论**：
-
-- 上述止损条件已被实际触发；`B1~B4` 以及 follow-up 的 `VB3/VB4` 都没有让 benchmark-first 指标过线，因此本计划后续默认不再继续推进覆盖宽度 / 持有机制的参数微调。
-
-### 4.3 第三优先级：把因子准入规则升级为 benchmark-first
-
-状态：规则已落地；`2026-04-20` 已按 `asset_turnover / net_margin_stability` 完成首轮三层准入复核，当前没有新增通过者。
-
-**目标**：以后任何新因子或新 score 方案，都不能只因为 IC 提升或绝对收益转正就进入默认主线，必须证明它能改善相对基准的稳定超额。
-
-**新的准入顺序**：
-
-1. 先过单因子统计门槛：
-   - `T+21 IC > 0.01`
-   - `t > 2`
-2. 再过组合层门槛：
-   - 相对 `V3` 的全样本与 OOS 表现不能恶化
-3. 最后过基准层门槛：
-   - 年度超额中位数改善
-   - 关键落后年份的超额显著收敛，尤其是 `2021 / 2025 / 2026`
-
-**当前候选处理**：
-
-- `net_margin_stability` 仍是最接近门槛的后备因子，但在升级后的 benchmark-first 口径下仍未通过三级准入；`20% blend` 虽然保住了滚动 OOS 超额中位数为正，但全样本年化超额、年度超额中位数与切片 OOS 超额仍为负，不可直接升级。
-- `gross_margin_delta`、`ocf_to_asset`、`asset_turnover` 暂时继续留在主线外。
-- 若短期内还要找增量 alpha，优先做新的因子构造，而不是继续对这四个旧候选微调权重。
-
-### 4.4 第四优先级：组合优化只在“选股已能创造超额”之后再回到主线
-
-状态：已降级，但不是永久废弃。
-
-**当前规则**：
-
-1. `risk_parity` 继续保留为诊断工具，不进入默认主比较矩阵。
-2. `min_variance` 只有在新的选股 / 覆盖方案已经实现非负基准超额后，才允许回到主线验证。
-3. `mean_variance` 继续停用。
-4. 行业约束、映射缺失、回测 fallback 必须显式记录，不允许再出现“配置写着启用、结果实际关闭”的静默漂移。
-
-### 4.5 第五优先级：启动 alpha scout，作为“新 alpha 构造”的第一步
-
-状态：首轮已完成；`2026-04-20` 已对当前仓库可直接构造的 `30` 个单因子完成第一轮 benchmark-first 侦察，结果见 `docs/alpha_factor_scout_2026-04-20.md`。
-
-**目标**：
-
-1. 用与 `V3` 一致的执行口径，快速识别哪些单因子至少具备“值得进入下一轮构造”的相对基准潜力。
-2. 把“新的 alpha 构造”从拍脑袋挑因子，变成先侦察、再组合、再准入的顺序。
-3. 为后续新的 score 设计提供候选池，而不是继续围绕当前四个未通过因子做局部调权。
-
-**当前执行规则**：
-
-1. 统一采用 `Top-20 / M / tplus1_open / prefilter=false / universe=true` 的研究口径。
-2. 基线单因子默认仍为 `vol_to_turnover`，其余候选一律先按“单因子 vs 基线”比较。
-3. 侦察输出至少包含：`IC gate`、全样本收益、年度超额中位数、关键落后年份超额、`rolling / slice OOS` 超额中位数。
-4. 只有在 alpha scout 中显示出 benchmark-first 潜力的因子，才允许进入下一轮 score 构造或双因子实验。
-
-**`2026-04-20` 首轮结果**：
-
-1. 本轮扫描的 `30` 个单因子里，没有任何一个通过 `combo gate + benchmark-first gate`，因此当前默认研究基线仍保持 `V3 = vol_to_turnover`，不能因为“扩大了侦察范围”就误判为已经找到可替代主线的新 alpha。
-2. 仅有 `ocf_to_asset`、`ocf_to_net_profit`、`debt_to_assets_change`、`gross_margin_change` 四个因子通过了 `F1 IC gate`；但它们在单因子组合层全部明显跑输 `V3`，年度超额中位数、全样本基准超额以及 `rolling / slice OOS` 超额中位数也都为负，因此不具备直接进入下一轮默认 score 构造的资格。
-3. 大量技术面 / 交易拥挤类单因子在当前方向上呈系统性负贡献，包含 `momentum`、`momentum_12_1`、`recent_return`、`rsi`、`bias_long`、`bias_short`、`intraday_range`、`tail_strength`、`turnover_rel_pct_252` 等；含义不是“这些信息永远无效”，而是“在当前口径下继续直接正向叠加，大概率只会放大跑输基准的问题”。
-4. 因此，alpha scout 的第一轮结论不是“找到新默认因子”，而是进一步确认：下一步若要继续做新 alpha 构造，应优先探索方向翻转、残差化、分段条件化或与 `V3` 的克制型互补构造，而不是继续在线性正向 blend 上做旧候选因子的权重微调。
-
-**`2026-04-20` directional scout 补充结果**：
-
-1. 已对 `bias_long`、`bias_short`、`intraday_range`、`realized_vol`、`rsi`、`tail_strength` 六个“`T+1 / T+21` 同时为负”的技术因子完成方向翻转验证，结果见 `docs/alpha_directional_scout_2026-04-20.md`。
-2. 纯翻转单因子全部失败，且大多比 `V3` 更差很多；这说明“把负因子整列取反”本身不是可直接升级的答案，方向修正必须保持克制，不能脱离 `V3` 主干独立使用。
-3. 反向 `10% / 20%` blend 中，`flip_realized_vol_20%` 是目前最接近保留候选的一项：它改善了绝对收益、夏普、MaxDD、全样本年化超额、年度超额中位数，以及 `rolling / slice` 样本外绝对收益；但由于全样本基准超额仍为负 (`-11.83%`) 且切片 OOS 超额中位数仍为负，仍未通过 benchmark-first gate。
-4. `flip_intraday_range_10%`、`flip_tail_strength_10%`、`flip_bias_short_10%` 也表现出“比正向 blend 更可取”的迹象，尤其在年度超额中位数或滚动 OOS 超额上有所改善；但它们同样没有把基准超额拉到非负，因此目前只能视作下一轮条件化 / 残差化构造的弱候选，而不是准入通过者。
-5. 因此，当前主计划可以进一步收紧为：若继续推进新 alpha 构造，应优先从 `realized_vol / intraday_range / tail_strength / bias_short` 的小权重反向表达出发，并显式限制其占比；不再值得继续验证“纯翻转单因子”或“大权重反向覆盖”。
-
-**`2026-04-20` expression scout / diagnostics 补充结果**：
-
-1. 已对 `realized_vol` 与 `intraday_range` 的“小权重反向 + 残差化 / 条件化表达”完成首轮全样本验证，结果见 `docs/alpha_expression_scout_2026-04-20_v1.md`。其中 `flip_resid_blend_20_realized_vol` 是当前最强的 expression 候选：相对 `V3`，它把年化从 `+3.74%` 提到 `+4.64%`，夏普从 `0.319` 提到 `0.391`，MaxDD 从 `20.15%` 降到 `16.80%`，并把滚动 OOS 超额中位数从 `-0.80%` 提到 `+4.29%`；但切片 OOS 超额仍为负，因此仍未通过 benchmark-first gate。
-2. 在 `realized_vol` 的进一步网格里，`flip_resid_blend_20_realized_vol`、`flip_cond_z0p5_blend_15_realized_vol`、`flip_cond_z0p5_blend_20_realized_vol` 是当前仅有值得保留的三个版本，结果见 `docs/alpha_expression_scout_2026-04-20_realized_vol_grid.md`。其中残差化 `20%` 更偏“收益/风险改善最完整”，条件化 `z>=0.5` 的 `15%/20%` 更偏“换手更低、切片收益更平滑”。
-3. 但在把 `IC gate` 升级为“直接对 expression 列本身计算”之后，上述保留版本的 expression-level `T+21 / T+1` IC 全部为负，结果见 `docs/alpha_expression_scout_2026-04-20_realized_vol_finalists.md`。这说明它们不能再被解释成“统计上已经成立的新 alpha 因子”，而只能被解释成“可能具有组合补偿价值的表达候选”。
-4. `docs/alpha_expression_diagnostics_2026-04-20_v1.md` 的月度诊断进一步说明，这类 `realized_vol` overlay 的主要作用不是提高上涨月份参与率，而是增强下跌月份防守：相对 `V3`，其 `down_month_beat_rate` 从约 `80.8%` 抬到约 `84.6%`，`down_month_median_excess` 也略有改善；但 `up_month_beat_rate` 仍仅约 `18%~21%`，上涨月份中位超额仍明显为负。因此它更像“坏暴露抑制器”或“防守型 overlay”，而不是可准入的主排序信号。
-5. 因此，`realized_vol` 反向表达当前应被明确降格为“可保留的组合层 overlay 候选”，而不再按“新 alpha 准入因子”继续推进。后续若保留，优先保留 `flip_resid_blend_20_realized_vol` 作为防守增强器候选；若主线继续推进，应把主要研究时间转回新的 alpha 构造，而不是继续围绕 `realized_vol` 扫权重。
-
-**下一步约束**：
-
-1. 没有通过 alpha scout 首轮侦察的单因子，不得直接进入新的双因子 / 多因子主比较矩阵。
-2. 若继续做 alpha 构造，优先选择“`F1` 有一定统计迹象但组合层明显失效”的少数候选做方向与表达方式重构，而不是扩大 brute-force 候选池。
-3. 若后续新构造仍重复出现“`IC` 可过、组合不行、基准更差”的模式，就停止在现有特征库上局部微调，转向新的数据源或新的训练目标定义。
-4. 对 `realized_vol` 这类 expression overlay，后续最多只允许作为组合层防守增强器做少量对照保留，不再作为“待准入新因子”进入主比较矩阵。
+1. 不继续扩 `weekly_kdj` interaction 网格。
+2. 不把 `weekly_kdj_*` 写回默认 `composite_extended`。
+3. 不用跨窗口、跨标签口径、跨缓存版本的结果做 promotion 判断。
+4. 不把 `signal_diagnostic` 或 `light_strategy_proxy` 当成正式回测结论。
 
 ---
 
-## 5. Benchmark-First 放行标准
+## 6. P2 新数据家族
 
-从本计划起，默认研究配置的升级标准改为以下顺序。
+### 6.1 资金流
 
-| 维度 | 放行条件 | 备注 |
-| --- | --- | --- |
-| 基准超额 | 全样本年化超额为非负 | 只看绝对 CAGR 不再足够 |
-| 年度稳定性 | 年度超额中位数为非负 | 当前 `V3` 为 `-5.19%`，尚未达标 |
-| OOS 稳定性 | `rolling / slice` 的超额中位数不为负 | 后续实验必须补充输出这一列 |
-| 风险控制 | MaxDD 不明显劣于 `V3` | 当前参考线为约 `20.15%` |
-| 换手纪律 | 换手上升必须有清晰收益补偿 | 不能为了追求超额而无约束放大交易摩擦 |
+当前判断：保留数据链路，暂停主线 promotion。
 
-只要上表第一项和第二项没有过线，就不能把任何新方案写回默认研究基线。  
-也就是说，**“绝对收益转正但仍稳定跑输基准” 只代表阶段性进步，不代表计划完成。**
+已知状态：
+
+1. 在线抓取和 cache 阻塞已经解除。
+2. `a_share_fund_flow` 已有约 `58.1` 万行、`4,866` 个标的，最新 `trade_date = 2026-04-24`。
+3. `G2 = G0 + fund_flow_*` 明显劣化。
+4. `G4 = G0 + weekly_kdj_* + fund_flow_*` 未超过 `G1`。
+
+下一步：
+
+1. 跑正式质量报告并归档到 `docs/`。
+2. 只在出现明确机制假设时重新研究，例如“资金流只在低换手反转候选里有效”。
+3. 不再重复 `G2/G4` 这种直接拼接。
+
+### 6.2 股东人数
+
+当前判断：低优先级保留。
+
+已知状态：
+
+1. 单因子未通过 IC、组合层和基准层验证。
+2. `G3 = G0 + shareholder_*` 无增量。
+3. 只有 PIT/覆盖质量明显好于当前认知时，才继续投入研究预算。
+
+下一步：
+
+1. 跑正式 PIT/覆盖质量报告。
+2. 若质量报告没有改善认知，则不再做大规模表达式或树模型网格。
 
 ---
 
-## 6. 暂不推进事项
+## 7. P3 Gated / Interaction Alpha
 
-在完成第 `4.1 ~ 4.3` 节之前，以下方向一律降级：
+当前判断：需要更结构化的 alpha 表达，但不能靠“多试一些”推进。
 
-1. 不继续把 `P1 静态` 当作唯一胜负标准。
-2. 不重新把 `lower_shadow_ratio` 放回默认核心组合。
-3. 不在 `top_k=10 / 20 / 50`、`M / 3M`、`prefilter on/off`、`universe on/off` 之间随意混用口径后再比较结论。
-4. 不把 `risk_parity` 与 `mean_variance` 重新拉回主线。
-5. 不把 “IC 更高” 或 “CAGR 更高” 直接解释成 “相对市场 alpha 已成立”。
-6. 不在基准差距尚未解释清楚前，就再次大规模扩展旧 F1 候选的微调实验。
+规则：
+
+1. 每轮最多提出 `3` 个有明确失效机制来源的 interaction 假设。
+2. 每个假设先跑 `signal_diagnostic` 或 light proxy，再决定是否进入 scout。
+3. 若一个 interaction 只是重复放大已有反转簇，应立即淘汰。
+4. `realized_vol` 反向表达保留为防守 overlay 候选，不按新 alpha 主线推进。
+
+可保留但不立即执行的候选方向：
+
+- “低周线 J + 非高波动”的反转修正
+- “资金流背离 + 低换手”的条件表达
+- “弱近期动量但未破坏价格位置”的上涨参与修正
+
+这些方向必须先由失效诊断证明有对应问题，再进入实验。
 
 ---
 
-## 7. 文档与产出规范
+## 8. P4 研究链路与生产链路分离
 
-### 7.1 文档分工
+当前边界：
 
-- `docs/plan.md`：当前主计划，只保留仍然有效的结论、下一步与放行标准
-- `docs/plan-04-20.md`：`2026-04-20` 当日执行归档
-- `docs/score_ablation_2026-04-19.md`：`S1~S5` score 消融证据
-- `docs/s2_portfolio_diagnostics_2026-04-19.md`：`S2` 配权可观测性结论
-- `docs/p1_residual_diag_2026-04-19.md`：`P1` 残余优势归因
-- `docs/prefilter_universe_validation_2026-04-19.md`：`V1/V2/V3` 研究基线演进证据
-- `docs/factor_admission_validation_2026-04-19.md` 与 `docs/factor_admission_validation_2026-04-20_next.md`：新因子准入复核
-- `docs/alpha_factor_scout_2026-04-20.md` 与 `docs/alpha_directional_scout_2026-04-20.md`：新 alpha 侦察与方向翻转验证
-- `docs/alpha_expression_scout_2026-04-20_v1.md`、`docs/alpha_expression_scout_2026-04-20_realized_vol_grid.md`、`docs/alpha_expression_scout_2026-04-20_realized_vol_finalists.md`：expression 层验证与正式 gate 复核
-- `docs/alpha_expression_diagnostics_2026-04-20_v1.md`：解释“expression IC 为负但组合改善”的月度/防守诊断
-- `docs/m2_5c_consistency_check_2026-04-20.md`：诊断口径与回测口径一致性检查
-- `docs/pit_check_2026-04-20.md`：PIT 抽查证据
+- 生产链路：`daily_run.py`、推荐 CSV、日更配置。
+- 研究链路：benchmark-first 回测、alpha scout、admission、P1 树模型训练、新数据质量检查。
 
-### 7.2 新实验最少产物
+规则：
 
-每一轮新实验至少保留以下三项：
+1. 两条链路不能混用默认配置。
+2. 研究分支的 light proxy 结果不能直接影响日更推荐。
+3. `config.yaml.example` 只表达可运行默认，不承载未 promotion 的研究结论。
+4. 每个模型 bundle 都要能追溯训练窗口、特征组、label spec、数据 cache 和代码入口。
+5. 每份研究报告必须写清“是否改变主计划”；没有改变时，明确写“仅归档，不 promotion”。
 
-1. 一份独立配置快照：`config.yaml.backtest.<label>`
-2. 一份结果文件：`data/results/<label>.json` 或汇总 CSV
+当前 canonical research configs：
+
+- `v3_market_ew_full_backtest`
+- `p1_tree_full_backtest`
+- 待补：`newdata_quality_current`
+
+---
+
+## 9. 冻结结论
+
+这些判断当前不再反复重跑，除非后续出现新数据或口径修正：
+
+1. `prefilter=true` 在当前主线下会误伤有效候选，默认研究口径继续关闭。
+2. `universe_filter=true` 在 `prefilter=false` 条件下仍是正向交互，默认继续开启。
+3. `Top-30 / Top-40 / 20-35 / 20-40 / 更小缓冲 / 分层等权` 已止损。
+4. `risk_parity` 保留为诊断工具，不回到主线。
+5. `mean_variance` 继续停用。
+6. `asset_turnover`、`net_margin_stability` 未通过 benchmark-first 准入，不进入默认主线。
+7. 股东人数单因子降级为低优先级。
+8. `weekly_kdj_j / weekly_kdj_oversold_depth / weekly_kdj_rebound` 不默认加入 `composite_extended`。
+9. `weekly_kdj_interaction_*` 的 `G5/G6` 轻量 A/B 未超过 `G1`，暂不进入 full backtest 队列。
+10. `fund_flow_*` 已在训练/推理面板真实可用，但 `G2/G4` full backtest 未给出正增量，暂不推进为 P1 主线。
+
+---
+
+## 10. 证据索引
+
+### V3 基准差距
+
+入口：`docs/benchmark_gap_diagnostics_2026-04-20_v3.md`
+
+结论：当前弱势主要不是下跌月份防守失败，而是上涨月份参与不足。策略持仓偏更大市值、更高成交额、低波动、近期相对动量偏弱，更像“稳定票”，不是强势扩散行情里的弹性票。
+
+### Weekly KDJ
+
+入口：
+
+- `docs/alpha_factor_scout_2026-04-24_weekly_kdj.md`
+- `docs/p1_weekly_interaction_ab_2026-04-26.md`
+- `docs/p1_rank_direction_rerun_2026-04-26.md`
+- `docs/p1_rankfix_same_window_full_backtest_2026-04-26.md`
+- `docs/p1_failure_diagnostics_2026-04-26.md`
+
+结论：`weekly_kdj_j` 有负向 Rank IC 证据，但直接线性加入或简单 interaction 没有形成正式回测增量。
+
+### P1 目标与标签
+
+入口：`docs/p1_label_objective_experiment_2026-04-26.md`
+
+结论：
+
+1. `rank + market_relative` 的 G1 light proxy 最好，但 full backtest 严重失败。
+2. `regression + rank_fusion` 提高了 G0 light proxy，但仍需补正式回测。
+3. 训练期 proxy Top-K 与正式月频换手、执行成本、全样本时段之间存在断层。
+
+### 新数据
+
+入口：
+
+- `docs/alpha_factor_scout_2026-04-23_shareholder_smoke.md`
+- `data/results/p1_full_backtest_g2_fundflow.json`
+- `data/results/p1_full_backtest_g4_fundflow.json`
+- `scripts/run_newdata_quality_checks.py`
+
+结论：资金流和股东人数链路保留，但短期不作为 P1 promotion 主线。
+
+---
+
+## 11. 产出规范
+
+每轮新实验至少保留：
+
+1. 配置或命名身份：
+   - `research_topic`
+   - `research_config_id`
+   - `output_stem`
+   - `result_type`
+2. 结果文件：
+   - summary CSV
+   - detail CSV 或 period detail
+   - JSON
+   - 必要时的 manifest
 3. 一页结论文档，必须写清：
    - 只改了什么
-   - 对 `V3` 的绝对指标变化
-   - 对全市场等权基准的相对指标变化
+   - 对默认研究基线的变化
+   - 对 `market_ew_proxy` 的变化
    - 是否改变主计划
+   - 是否允许进入下一层验证
 
-### 7.3 每份结果必须显式写清的口径
+每份正式回测还必须显式写清：
 
-1. `benchmark_symbol`
-2. `benchmark_min_history_days` 或等价说明
-3. `top_k`
-4. `rebalance_rule`
-5. `portfolio_method`
-6. `execution_mode`
-7. `prefilter`
-8. `universe_filter`
-
-如果运行时发生 fallback，例如行业约束或映射缺失导致约束静默关闭，必须在结果中显式记录，不得省略。
-
----
-
-## 8. 当前止损与转向规则
-
-出现以下任一情况，就停止继续在“当前 score 微调 + 组合参数微调”上消耗时间：
-
-1. 做完基准差距归因后，仍无法解释 `2021 / 2025 / 2026` 的主要落后来源。
-2. `B1~B4` 的覆盖宽度 / 持有机制实验全部无法让年度超额中位数转为非负。
-3. 新因子继续出现“IC 改善、绝对收益改善、但相对基准仍无改善”的重复模式。
-4. 结果表明当前主要问题是研究目标与执行目标错位，而不是现有因子的小幅调权。
-
-触发止损后的转向顺序：
-
-1. 先转向新的 alpha 构造与数据扩展。
-2. 再考虑重新定义训练目标与排序目标，使其直接服务于基准超额，而不是只服务于短窗收益预测。
-3. 只有在新的目标函数和数据构造稳定后，才考虑树模型 / 深度模型的重训与接管。
+- `benchmark_symbol`
+- `benchmark_min_history_days` 或等价说明
+- `top_k`
+- `rebalance_rule`
+- `portfolio_method`
+- `execution_mode`
+- `prefilter`
+- `universe_filter`
+- 成本假设
+- cache 路径与 schema/version
+- 若发生 fallback，必须记录 fallback 原因
 
 ---
 
-**一句话版本**：上一轮优化已经把主线从明显负收益修复到 `V3` 的正收益基线，但当前真正要解决的问题已经变成“如何相对全市场等权产生稳定超额”；从现在开始，一切实验都必须以这个目标为核心，而不是继续追求内部相对最优。  
+## 12. 当前不该做的事情
+
+1. 不继续做 `Top-K`、缓冲带、分层等权的小参数网格。
+2. 不把 `weekly_kdj_*` 写回默认 `composite_extended`。
+3. 不继续为股东人数做单因子或线性权重主线。
+4. 不把 `fund_flow_*` 直接拼进 P1 主线重复跑 `G2/G4`。
+5. 不把 `signal_diagnostic` 或 `light_strategy_proxy` 当成正式回测结论。
+6. 不用跨窗口、跨标签口径、跨缓存版本的结果做 promotion 判断。
+7. 不在没有明确失败机制的情况下扩 expression 网格。
+
+---
+
+## 13. 一句话结论
+
+当前最优路线不是再扩线性因子和参数网格，而是：
+
+**先用 P0 已硬化的评估链路补齐新数据质量归档，再用最小正式回测验证 `regression + rank_fusion + G0`；只有解释清楚 P1 为什么 light proxy 好但 full backtest 跑输后，才继续做少量诊断驱动的 interaction alpha。**

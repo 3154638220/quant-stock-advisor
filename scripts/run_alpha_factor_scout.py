@@ -36,6 +36,12 @@ from scripts.run_backtest_eval import (
     transaction_cost_params_from_mapping,
     walk_forward_backtest,
 )
+from scripts.light_strategy_proxy import (
+    build_light_proxy_period_detail,
+    infer_periods_per_year,
+    summarize_light_strategy_proxy,
+)
+from scripts.research_identity import build_light_research_identity
 from scripts.run_factor_admission_validation import (
     DEFAULT_BENCHMARK_KEY_YEARS,
     _json_sanitize,
@@ -111,6 +117,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def classify_factor_family(factor_name: str, *, baseline_factor: str = DEFAULT_BASELINE_FACTOR) -> str:
+    name = str(factor_name).strip()
+    if name == baseline_factor:
+        return "baseline"
+    if name.startswith(("main_inflow_", "super_inflow_", "flow_divergence_", "proxy_main_inflow_", "proxy_up_down_")):
+        return "fund_flow"
+    if name.startswith(("holder_", "shareholder_")):
+        return "shareholder"
+    if name in {
+        "pe_ttm",
+        "pb",
+        "ev_ebitda",
+        "roe_ttm",
+        "net_profit_yoy",
+        "gross_margin_change",
+        "debt_to_assets_change",
+        "ocf_to_net_profit",
+        "ocf_to_asset",
+        "gross_margin_delta",
+        "asset_turnover",
+        "net_margin_stability",
+        "northbound_net_inflow",
+        "margin_buy_ratio",
+    }:
+        return "fundamental"
+    if name in {"llm_sentiment", "llm_sentiment_score"} or name.startswith("llm_"):
+        return "llm"
+    return "price_volume"
+
+
 def infer_candidate_factors(
     factor_df: pd.DataFrame,
     *,
@@ -146,6 +182,17 @@ def infer_candidate_factors(
     return deduped
 
 
+def find_missing_included_factors(
+    factor_df: pd.DataFrame,
+    *,
+    baseline_factor: str = DEFAULT_BASELINE_FACTOR,
+    include: list[str] | None = None,
+) -> list[str]:
+    requested = [baseline_factor] + [str(item).strip() for item in (include or []) if str(item).strip()]
+    ordered = list(dict.fromkeys(requested))
+    return [factor for factor in ordered if factor not in factor_df.columns]
+
+
 def _build_scout_doc(
     summary_df: pd.DataFrame,
     gate_df: pd.DataFrame,
@@ -156,16 +203,28 @@ def _build_scout_doc(
 ) -> str:
     generated_at = pd.Timestamp.utcnow().isoformat()
     top_rows = scout_df.head(12).to_markdown(index=False) if not scout_df.empty else "_无候选结果_"
+    family_counts = (
+        summary_df.groupby("factor_family", dropna=False)["candidate_factor"]
+        .count()
+        .reset_index(name="candidate_count")
+        .sort_values(["candidate_count", "factor_family"], ascending=[False, True])
+    )
+    family_rows = family_counts.to_markdown(index=False) if not family_counts.empty else "_无 family 统计_"
     return f"""# Alpha Scout 因子侦察
 
 - 生成时间：`{generated_at}`
 - 目标：在冻结 `V3` 执行口径的前提下，用 benchmark-first 规则快速扫描现有单因子
 - 基线单因子：`{baseline_factor}`
 - 固定执行：`Top-{int(summary_df['top_k'].iloc[0]) if not summary_df.empty else 20}` / `tplus1_open` / `prefilter=false` / `universe=true`
+- 结果类型：`light_strategy_proxy`（用于单因子方向性和 benchmark-first proxy 判断，不等价于 full backtest）
 
 ## Scout 排名
 
 {top_rows}
+
+## 候选分布
+
+{family_rows}
 
 ## 全量汇总
 
@@ -243,12 +302,24 @@ def main() -> None:
         cache_state = "hit" if factors_cache_hit else "rebuilt"
         print(f"  prepared_factors_cache: {cache_state} -> {prepared_factors_cache}", flush=True)
     scenario_factors = factors
+    missing_included = find_missing_included_factors(
+        scenario_factors,
+        baseline_factor=baseline_factor,
+        include=include,
+    )
     candidate_factors = infer_candidate_factors(
         scenario_factors,
         baseline_factor=baseline_factor,
         include=include,
         exclude=exclude,
     )
+    if missing_included:
+        warnings.warn(
+            "以下指定因子当前不可用，已跳过："
+            + ", ".join(missing_included)
+            + "。这通常意味着对应数据表尚未落库，或 prepared factors 缓存仍基于旧列。",
+            stacklevel=2,
+        )
     if baseline_factor not in candidate_factors:
         raise SystemExit(f"baseline_factor={baseline_factor!r} 不在可用因子列中")
     print(f"  daily_df={daily_df.shape} factors={scenario_factors.shape} candidates={len(candidate_factors)}", flush=True)
@@ -261,6 +332,21 @@ def main() -> None:
     portfolio_cfg = cfg.get("portfolio", {}) or {}
     backtest_cfg = cfg.get("backtest", {}) or {}
     prefilter_cfg = cfg.get("prefilter", {}) or {}
+    rebalance_rule = str(backtest_cfg.get("eval_rebalance_rule", "M"))
+    periods_per_year = infer_periods_per_year(rebalance_rule)
+    research_identity = build_light_research_identity(
+        topic="alpha_factor_scout",
+        output_prefix=output_prefix,
+        baseline_factor=baseline_factor,
+        rebalance_rule=rebalance_rule,
+        top_k=int(args.top_k),
+        benchmark_key_years=benchmark_key_years,
+        selector_parts={
+            "pool": "explicit" if include else "auto",
+            "count": len(candidate_factors),
+            "factors": include[:4] if include else candidate_factors[:4],
+        },
+    )
     costs = transaction_cost_params_from_mapping(cfg.get("transaction_costs", {}))
     execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open")).lower().strip()
     bt_cost = BacktestConfig(cost_params=costs, execution_mode=execution_mode, execution_lag=1)
@@ -284,7 +370,7 @@ def main() -> None:
             factor_df=scenario_factors,
             daily_df=daily_df,
             top_k=int(args.top_k),
-            rebalance_rule=str(backtest_cfg.get("eval_rebalance_rule", "M")),
+            rebalance_rule=rebalance_rule,
             prefilter_cfg=prefilter_cfg,
             max_turnover=float(portfolio_cfg.get("max_turnover", 0.3)),
             industry_map=industry_map,
@@ -338,21 +424,41 @@ def main() -> None:
         )
         rolling_excess = _summarize_oos_excess(res_wc.daily_returns, market_benchmark, rolling)
         slice_excess = _summarize_oos_excess(res_wc.daily_returns, market_benchmark, slices)
+        proxy_period_df = build_light_proxy_period_detail(
+            res_wc.daily_returns,
+            market_benchmark,
+            rebalance_rule=rebalance_rule,
+            scenario=f"single_{factor_name}",
+        )
+        proxy_summary = summarize_light_strategy_proxy(proxy_period_df, periods_per_year=periods_per_year)
 
         summary_rows.append(
             {
                 "scenario": f"single_{factor_name}",
                 "candidate_factor": factor_name,
                 "family": "single_factor",
+                "factor_family": classify_factor_family(factor_name, baseline_factor=baseline_factor),
                 "is_baseline": factor_name == baseline_factor,
+                "result_type": "light_strategy_proxy",
+                "research_topic": research_identity["research_topic"],
+                "research_config_id": research_identity["research_config_id"],
+                "output_stem": research_identity["output_stem"],
+                "rebalance_rule": rebalance_rule,
+                "periods_per_year": float(periods_per_year),
+                "proxy_periods": int(proxy_summary["n_periods"]),
                 "top_k": int(args.top_k),
                 "annualized_return": float(res_wc.panel.annualized_return),
+                "proxy_annualized_return": float(proxy_summary["strategy_annualized_return"]),
+                "proxy_benchmark_annualized_return": float(proxy_summary["benchmark_annualized_return"]),
                 "sharpe_ratio": float(res_wc.panel.sharpe_ratio),
                 "max_drawdown": float(res_wc.panel.max_drawdown),
                 "turnover_mean": float(res_wc.panel.turnover_mean),
                 "rolling_oos_median_ann_return": float(wf_agg.get("median_ann_return", np.nan)),
                 "slice_oos_median_ann_return": float(sp_agg.get("median_ann_return", np.nan)),
-                "annualized_excess_vs_market": float(benchmark_summary.get("annualized_excess_return", np.nan)),
+                "annualized_excess_vs_market": float(proxy_summary["annualized_excess_vs_market"]),
+                "full_backtest_annualized_excess_vs_market": float(
+                    benchmark_summary.get("annualized_excess_return", np.nan)
+                ),
                 "yearly_excess_median_vs_market": float(benchmark_summary.get("yearly_excess_median", np.nan)),
                 "key_year_excess_mean_vs_market": float(benchmark_summary.get("key_year_excess_mean", np.nan)),
                 "key_year_excess_worst_vs_market": float(benchmark_summary.get("key_year_excess_worst", np.nan)),
@@ -365,6 +471,10 @@ def main() -> None:
 
         payload = {
             "generated_at": pd.Timestamp.utcnow().isoformat(),
+            "result_type": "light_strategy_proxy",
+            "research_topic": research_identity["research_topic"],
+            "research_config_id": research_identity["research_config_id"],
+            "output_stem": research_identity["output_stem"],
             "config_source": config_source,
             "factor_name": factor_name,
             "baseline_factor": baseline_factor,
@@ -412,6 +522,15 @@ def main() -> None:
         f1_min_t=float(args.f1_min_t),
         benchmark_key_years=benchmark_key_years,
     ).rename(columns={"admission_status": "scout_status"})
+    if not gate_df.empty:
+        gate_df.insert(0, "result_type", "factor_gate")
+        gate_df.insert(1, "research_topic", research_identity["research_topic"])
+        gate_df.insert(2, "research_config_id", research_identity["research_config_id"])
+        gate_df.insert(3, "output_stem", research_identity["output_stem"])
+    scout_df["result_type"] = "alpha_factor_scout"
+    scout_df["research_topic"] = research_identity["research_topic"]
+    scout_df["research_config_id"] = research_identity["research_config_id"]
+    scout_df["output_stem"] = research_identity["output_stem"]
     scout_df = scout_df.sort_values(
         [
             "is_baseline",
@@ -445,6 +564,8 @@ def main() -> None:
     manifest_path = results_dir / f"{output_prefix}_manifest.json"
     manifest = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
+        "result_type": "research_manifest",
+        **research_identity,
         "baseline_factor": baseline_factor,
         "candidate_factors": candidate_factors,
         "artifacts": [

@@ -16,6 +16,8 @@ database:
   table_daily: a_share_daily
   table_audit: data_fetch_audit
   table_fundamental: a_share_fundamental
+  table_fund_flow: a_share_fund_flow
+  table_shareholder: a_share_shareholder
 
 fundamental:
   # 在 daily_run 中先增量写入基本面，再做 PIT 读取（估值/质量因子依赖）
@@ -145,6 +147,12 @@ signals:
       - recent_return
       - price_position
       - log_market_cap
+      - weekly_kdj_k
+      - weekly_kdj_d
+      - weekly_kdj_j
+      - weekly_kdj_oversold
+      - weekly_kdj_oversold_depth
+      - weekly_kdj_rebound
       - intraday_range
       - upper_shadow_ratio
       - lower_shadow_ratio

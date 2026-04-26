@@ -29,8 +29,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.update_ic_weights import build_weights_by_date
+from scripts.research_identity import build_full_backtest_research_identity, canonical_research_config, slugify_token
+from src.features.fund_flow_factors import attach_fund_flow
 from src.features.fundamental_factors import preprocess_fundamental_cross_section
 from src.features.ic_monitor import ICMonitor
+from src.features.shareholder_factors import attach_shareholder_factors
 from src.backtest.engine import BacktestConfig, build_open_to_open_returns, run_backtest
 from src.backtest.performance_panel import compute_performance_panel
 from src.backtest.transaction_costs import transaction_cost_params_from_mapping
@@ -38,6 +41,7 @@ from src.backtest.walk_forward import (
     compare_full_vs_slices,
     contiguous_time_splits,
     rolling_walk_forward_windows,
+    summarize_oos_excess_returns,
     walk_forward_backtest,
 )
 from src.market.regime import (
@@ -47,6 +51,8 @@ from src.market.regime import (
     regime_config_from_mapping,
 )
 from src.models.experiment import append_backtest_result
+from src.models.artifacts import load_bundle_metadata
+from src.models.rank_score import sort_key_for_dataframe
 from src.portfolio.covariance import mean_cov_returns_from_daily_long
 from src.portfolio.weights import build_portfolio_weights
 
@@ -200,6 +206,101 @@ def normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
     if s <= 0:
         raise ValueError("composite_extended 权重和为 0")
     return {k: v / s for k, v in cleaned.items()}
+
+
+def _weekly_kdj_completed_from_daily(
+    trade_date: pd.Series,
+    close: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    *,
+    n: int = 9,
+    initial_k: float = 50.0,
+    initial_d: float = 50.0,
+) -> pd.DataFrame:
+    """按最近已完成周线对齐回日频，周内保持上一根已完成周线值。"""
+    df = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(trade_date, errors="coerce"),
+            "close": pd.to_numeric(close, errors="coerce"),
+            "high": pd.to_numeric(high, errors="coerce"),
+            "low": pd.to_numeric(low, errors="coerce"),
+        }
+    ).sort_values("trade_date").reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(columns=["weekly_kdj_k", "weekly_kdj_d", "weekly_kdj_j"])
+
+    week_key = df["trade_date"].dt.to_period("W-FRI")
+    weekly = (
+        df.assign(week_key=week_key)
+        .groupby("week_key", sort=True)
+        .agg(
+            weekly_close=("close", "last"),
+            weekly_high=("high", "max"),
+            weekly_low=("low", "min"),
+            week_last_trade_date=("trade_date", "max"),
+        )
+        .reset_index(drop=True)
+    )
+    roll_high = weekly["weekly_high"].rolling(n, min_periods=1).max()
+    roll_low = weekly["weekly_low"].rolling(n, min_periods=1).min()
+    denom = (roll_high - roll_low).replace(0, np.nan)
+    rsv = (weekly["weekly_close"] - roll_low) / denom * 100.0
+    rsv = rsv.fillna(50.0)
+
+    k_vals: list[float] = []
+    d_vals: list[float] = []
+    j_vals: list[float] = []
+    prev_k = float(initial_k)
+    prev_d = float(initial_d)
+    for value in rsv.to_numpy(dtype=np.float64):
+        cur_k = prev_k * 2.0 / 3.0 + value / 3.0
+        cur_d = prev_d * 2.0 / 3.0 + cur_k / 3.0
+        cur_j = 3.0 * cur_k - 2.0 * cur_d
+        k_vals.append(cur_k)
+        d_vals.append(cur_d)
+        j_vals.append(cur_j)
+        prev_k = cur_k
+        prev_d = cur_d
+    weekly["weekly_kdj_k"] = k_vals
+    weekly["weekly_kdj_d"] = d_vals
+    weekly["weekly_kdj_j"] = j_vals
+    weekly["weekly_kdj_oversold"] = (weekly["weekly_kdj_j"] <= -5.0).astype(float)
+    weekly["weekly_kdj_oversold_depth"] = np.maximum(0.0, -5.0 - weekly["weekly_kdj_j"])
+    weekly["weekly_kdj_rebound"] = (
+        (weekly["weekly_kdj_j"].shift(1) <= -5.0)
+        & (weekly["weekly_kdj_j"] > weekly["weekly_kdj_j"].shift(1))
+    ).astype(float)
+    weekly.loc[weekly.index[0], "weekly_kdj_rebound"] = np.nan
+
+    merged = df[["trade_date"]].merge(
+        weekly[
+            [
+                "week_last_trade_date",
+                "weekly_kdj_k",
+                "weekly_kdj_d",
+                "weekly_kdj_j",
+                "weekly_kdj_oversold",
+                "weekly_kdj_oversold_depth",
+                "weekly_kdj_rebound",
+            ]
+        ],
+        left_on="trade_date",
+        right_on="week_last_trade_date",
+        how="left",
+    )
+    weekly_cols = [
+        "weekly_kdj_k",
+        "weekly_kdj_d",
+        "weekly_kdj_j",
+        "weekly_kdj_oversold",
+        "weekly_kdj_oversold_depth",
+        "weekly_kdj_rebound",
+    ]
+    merged[weekly_cols] = merged[weekly_cols].ffill()
+    intraweek_mask = merged["trade_date"] != merged["week_last_trade_date"]
+    merged.loc[intraweek_mask, weekly_cols] = merged.loc[intraweek_mask, weekly_cols].shift(1)
+    return merged[weekly_cols]
 
 
 def _resolve_optional_path(path_like: str) -> Path | None:
@@ -386,6 +487,29 @@ def _zscore_clip(s: pd.Series, clip: float = 3.0) -> pd.Series:
     return ((s - mu) / sd).clip(-clip, clip)
 
 
+def _wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    tr = pd.Series(np.nan, index=close.index, dtype=np.float64)
+    prev_close = close.shift(1)
+    tr.iloc[1:] = np.maximum.reduce(
+        [
+            (high.iloc[1:] - low.iloc[1:]).to_numpy(dtype=np.float64),
+            (high.iloc[1:] - prev_close.iloc[1:]).abs().to_numpy(dtype=np.float64),
+            (low.iloc[1:] - prev_close.iloc[1:]).abs().to_numpy(dtype=np.float64),
+        ]
+    )
+    atr = pd.Series(np.nan, index=close.index, dtype=np.float64)
+    if len(close) <= period:
+        return atr
+    init = tr.iloc[1 : period + 1].mean()
+    atr.iloc[period] = init
+    for i in range(period + 1, len(close)):
+        prev_atr = atr.iloc[i - 1]
+        cur_tr = tr.iloc[i]
+        if np.isfinite(prev_atr) and np.isfinite(cur_tr):
+            atr.iloc[i] = (prev_atr * (period - 1) + cur_tr) / period
+    return atr
+
+
 def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.DataFrame:
     out = []
     for sym, g in daily_df.groupby("symbol", sort=False):
@@ -413,12 +537,15 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
 
         daily_ret = c.pct_change()
         realized_vol = daily_ret.rolling(20, min_periods=10).std() * np.sqrt(252)
+        short_reversal = -(c / c.shift(5) - 1.0)
+        atr = _wilder_atr(h, lo, c, period=14)
         turnover_roll_mean = t.rolling(20, min_periods=10).mean()
         turnover_5d_mean = t.rolling(5, min_periods=3).mean()
         # 使用 pandas rolling().rank(pct=True) 向量化计算百分位排名（pandas 1.2+）
         turnover_rel_pct_252 = turnover_5d_mean.rolling(252, min_periods=40).rank(pct=True)
         vol_ret_corr = v.rolling(20, min_periods=10).corr(daily_ret).fillna(0.0)
         vol_to_turnover = np.log1p(v / t.replace(0, np.nan)).fillna(0.0)
+        volume_skew_log = np.log(v.clip(lower=0) + 1.0).rolling(20, min_periods=10).skew()
         log_market_cap = np.log((c * v / (t / 100.0 + 1e-8)).clip(lower=1.0))
 
         ma20 = c.rolling(20, min_periods=10).mean()
@@ -431,6 +558,7 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
         hi250 = h.rolling(250, min_periods=60).max()
         lo250 = lo.rolling(250, min_periods=60).min()
         price_position = ((c - lo250) / (hi250 - lo250).replace(0, np.nan)).clip(0, 1)
+        weekly_kdj = _weekly_kdj_completed_from_daily(g["trade_date"], c, h, lo)
 
         intraday_range = (h - lo) / c.replace(0, np.nan)
         candle_range = (h - lo).replace(0, np.nan)
@@ -439,7 +567,10 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
         lower_shadow_ratio = (np.minimum(c, o) - lo) / candle_range
         lower_shadow_ratio = lower_shadow_ratio.fillna(0).clip(0, 1)
         close_open_return = (c - o) / o.replace(0, np.nan)
+        overnight_gap = o / c.shift(1).replace(0, np.nan) - 1.0
         tail_strength = close_open_return.rolling(10, min_periods=5).mean()
+        volume_price_trend = (np.log(v.clip(lower=0) + 1.0) * daily_ret).rolling(20, min_periods=10).sum()
+        intraday_range_skew = intraday_range.rolling(20, min_periods=10).skew()
 
         if sym.startswith(("300", "688")):
             lim = 0.20
@@ -449,6 +580,35 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
             lim = 0.10
         limit_move_hits_5d = (pcg.abs() >= (lim - 0.005)).astype(float).rolling(5, min_periods=1).sum()
 
+        amt = g.get("amount", v * c)
+        if "amount" not in g.columns:
+            amt = v * c
+        else:
+            amt = pd.to_numeric(g["amount"], errors="coerce")
+
+        close_position = (c - lo) / (h - lo).replace(0, np.nan)
+        close_position = close_position.fillna(0.5).clip(0, 1)
+
+        buy_pressure = amt * close_position
+        sell_pressure = amt * (1 - close_position)
+        net_buy_pressure = buy_pressure - sell_pressure
+
+        total_pressure = buy_pressure + sell_pressure
+        total_pressure = total_pressure.replace(0, np.nan)
+        net_buy_pressure_pct = (net_buy_pressure / total_pressure * 100).fillna(0)
+
+        net_buy_pressure_pct_5d = net_buy_pressure_pct.rolling(5, min_periods=3).mean()
+        net_buy_pressure_pct_10d = net_buy_pressure_pct.rolling(10, min_periods=5).mean()
+        net_buy_pressure_pct_20d = net_buy_pressure_pct.rolling(20, min_periods=10).mean()
+
+        up_days = (pcg > 0).astype(float)
+        down_days = (pcg < 0).astype(float)
+        up_amt = (amt * up_days).rolling(5, min_periods=3).sum()
+        down_amt = (amt * down_days).rolling(5, min_periods=3).sum()
+        total_amt_5d = amt.rolling(5, min_periods=3).sum()
+        total_amt_5d = total_amt_5d.replace(0, np.nan)
+        up_down_ratio_5d = ((up_amt - down_amt) / total_amt_5d * 100).fillna(0)
+
         out.append(
             pd.DataFrame(
                 {
@@ -457,23 +617,39 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
                     "momentum": momentum.values,
                     "momentum_12_1": momentum_12_1.values,
                     "rsi": rsi.values,
+                    "atr": atr.values,
                     "realized_vol": realized_vol.values,
+                    "short_reversal": short_reversal.values,
                     "turnover_roll_mean": turnover_roll_mean.values,
                     "turnover_rel_pct_252": turnover_rel_pct_252.values,
                     "vol_ret_corr": vol_ret_corr.values,
                     "vol_to_turnover": vol_to_turnover.values,
+                    "volume_skew_log": volume_skew_log.values,
                     "log_market_cap": log_market_cap.values,
                     "bias_short": bias_short.values,
                     "bias_long": bias_long.values,
                     "max_single_day_drop": max_single_day_drop.values,
                     "recent_return": recent_return.values,
                     "price_position": price_position.values,
+                    "weekly_kdj_k": weekly_kdj["weekly_kdj_k"].to_numpy(),
+                    "weekly_kdj_d": weekly_kdj["weekly_kdj_d"].to_numpy(),
+                    "weekly_kdj_j": weekly_kdj["weekly_kdj_j"].to_numpy(),
+                    "weekly_kdj_oversold": weekly_kdj["weekly_kdj_oversold"].to_numpy(),
+                    "weekly_kdj_oversold_depth": weekly_kdj["weekly_kdj_oversold_depth"].to_numpy(),
+                    "weekly_kdj_rebound": weekly_kdj["weekly_kdj_rebound"].to_numpy(),
                     "intraday_range": intraday_range.values,
                     "upper_shadow_ratio": upper_shadow_ratio.values,
                     "lower_shadow_ratio": lower_shadow_ratio.values,
                     "close_open_return": close_open_return.values,
+                    "overnight_gap": overnight_gap.values,
                     "tail_strength": tail_strength.values,
+                    "volume_price_trend": volume_price_trend.values,
+                    "intraday_range_skew": intraday_range_skew.values,
                     "limit_move_hits_5d": limit_move_hits_5d.values,
+                    "proxy_main_inflow_pct_5d": net_buy_pressure_pct_5d.values,
+                    "proxy_main_inflow_pct_10d": net_buy_pressure_pct_10d.values,
+                    "proxy_main_inflow_pct_20d": net_buy_pressure_pct_20d.values,
+                    "proxy_up_down_ratio_5d": up_down_ratio_5d.values,
                 }
             )
         )
@@ -484,6 +660,84 @@ def compute_factors(daily_df: pd.DataFrame, min_hist_days: int = 130) -> pd.Data
 
 def _factor_cache_meta_path(cache_path: Path) -> Path:
     return cache_path.with_name(f"{cache_path.name}.meta.json")
+
+
+PREPARED_FACTORS_SCHEMA_VERSION = 20260424
+PREPARED_FACTORS_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "symbol",
+    "trade_date",
+    "momentum",
+    "momentum_12_1",
+    "rsi",
+    "atr",
+    "realized_vol",
+    "short_reversal",
+    "turnover_roll_mean",
+    "turnover_rel_pct_252",
+    "vol_ret_corr",
+    "vol_to_turnover",
+    "volume_skew_log",
+    "log_market_cap",
+    "bias_short",
+    "bias_long",
+    "max_single_day_drop",
+    "recent_return",
+    "price_position",
+    "weekly_kdj_k",
+    "weekly_kdj_d",
+    "weekly_kdj_j",
+    "weekly_kdj_oversold",
+    "weekly_kdj_oversold_depth",
+    "weekly_kdj_rebound",
+    "intraday_range",
+    "upper_shadow_ratio",
+    "lower_shadow_ratio",
+    "close_open_return",
+    "overnight_gap",
+    "tail_strength",
+    "volume_price_trend",
+    "intraday_range_skew",
+    "limit_move_hits_5d",
+    "proxy_main_inflow_pct_5d",
+    "proxy_main_inflow_pct_10d",
+    "proxy_main_inflow_pct_20d",
+    "proxy_up_down_ratio_5d",
+    "announcement_date",
+    "pe_ttm",
+    "pb",
+    "ev_ebitda",
+    "roe_ttm",
+    "net_profit_yoy",
+    "gross_margin_change",
+    "debt_to_assets_change",
+    "ocf_to_net_profit",
+    "ocf_to_asset",
+    "gross_margin_delta",
+    "asset_turnover",
+    "net_margin_stability",
+    "northbound_net_inflow",
+    "margin_buy_ratio",
+    "main_inflow_z_5d",
+    "super_inflow_z_5d",
+    "flow_divergence_5d",
+    "main_inflow_z_10d",
+    "super_inflow_z_10d",
+    "flow_divergence_10d",
+    "main_inflow_z_20d",
+    "super_inflow_z_20d",
+    "flow_divergence_20d",
+    "main_inflow_streak",
+    "holder_count",
+    "holder_change",
+    "holder_count_log",
+    "holder_count_change_pct",
+    "holder_change_rate",
+    "holder_change_rate_z",
+    "holder_count_log_z",
+    "holder_concentration_proxy",
+    "llm_sentiment_z",
+    "_universe_eligible",
+)
 
 
 def _prepared_factors_cache_expected_meta(
@@ -504,7 +758,9 @@ def _prepared_factors_cache_expected_meta(
         "db_path": str(db_path),
         "results_dir": str(results_dir),
         "universe_filter_cfg": _json_sanitize(universe_filter_cfg),
-        "cache_format_version": 1,
+        "cache_format_version": 2,
+        "prepared_factors_schema_version": PREPARED_FACTORS_SCHEMA_VERSION,
+        "required_columns": list(PREPARED_FACTORS_REQUIRED_COLUMNS),
     }
 
 
@@ -522,6 +778,11 @@ def load_prepared_factors_cache(cache_path: Path, expected_meta: dict[str, Any])
         cached = pd.read_parquet(cache_path)
     except Exception:  # noqa: BLE001
         return None
+    required_columns = {str(col) for col in expected_meta.get("required_columns", []) if str(col).strip()}
+    if required_columns:
+        cached_columns = {str(col) for col in cached.columns}
+        if not required_columns.issubset(cached_columns):
+            return None
     if "trade_date" in cached.columns:
         cached["trade_date"] = pd.to_datetime(cached["trade_date"], errors="coerce")
     if "symbol" in cached.columns:
@@ -536,6 +797,64 @@ def write_prepared_factors_cache(cache_path: Path, factors: pd.DataFrame, meta: 
         json.dumps(_json_sanitize(meta), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _tree_score_auto_flipped_from_metrics(metrics: dict[str, Any]) -> bool:
+    for key in ("val_rank_ic", "train_rank_ic"):
+        val = _safe_float_or_nan(metrics.get(key))
+        if np.isfinite(val):
+            return bool(val < 0)
+    return False
+
+
+def _tree_bundle_report_meta(
+    *,
+    sort_by: str,
+    bundle_dir: str,
+    tree_feature_group: str,
+    requested_features: list[str],
+) -> dict[str, Any]:
+    if str(sort_by).lower().strip() != "xgboost":
+        return {}
+    out: dict[str, Any] = {
+        "bundle_dir": str(bundle_dir or ""),
+        "feature_group": str(tree_feature_group or ""),
+        "requested_features": list(requested_features),
+        "tree_score_auto_flipped": None,
+        "label_spec": {},
+    }
+    if not str(bundle_dir or "").strip():
+        return out
+    try:
+        meta = load_bundle_metadata(bundle_dir)
+    except Exception as exc:  # noqa: BLE001
+        out["bundle_meta_error"] = str(exc)
+        return out
+    params = dict(getattr(meta, "params", {}) or {})
+    metrics = dict(getattr(meta, "metrics", {}) or {})
+    label_spec = dict(params.get("label_spec") or {})
+    out.update(
+        {
+            "model_version": getattr(meta, "model_version", ""),
+            "feature_version": getattr(meta, "feature_version", ""),
+            "created_at": getattr(meta, "created_at", ""),
+            "research_topic": params.get("research_topic", ""),
+            "research_config_id": params.get("research_config_id", ""),
+            "research_group": params.get("research_group", ""),
+            "bundle_label": params.get("bundle_label", ""),
+            "label_spec": label_spec,
+            "metrics": {
+                "train_rank_ic": metrics.get("train_rank_ic"),
+                "val_rank_ic": metrics.get("val_rank_ic"),
+                "train_mse": metrics.get("train_mse"),
+                "val_mse": metrics.get("val_mse"),
+            },
+            "tree_score_auto_flipped": _tree_score_auto_flipped_from_metrics(metrics),
+        }
+    )
+    if not out["feature_group"]:
+        out["feature_group"] = str(params.get("research_group") or "")
+    return _json_sanitize(out)
 
 
 def prepare_factors_for_backtest(
@@ -557,6 +876,8 @@ def prepare_factors_for_backtest(
 
     factors = compute_factors(daily_df, min_hist_days=min_hist_days)
     factors = _attach_pit_fundamentals(factors, db_path)
+    factors = attach_fund_flow(factors, db_path)
+    factors = attach_shareholder_factors(factors, db_path)
     factors = _attach_llm_sentiment(factors, results_dir)
     factors = attach_universe_filter(
         factors,
@@ -765,16 +1086,45 @@ def build_score(
     *,
     weights_by_date: Dict[pd.Timestamp, Dict[str, float]] | None = None,
     universe_eligible_col: str | None = "_universe_eligible",
+    sort_by: str = "composite_extended",
+    tree_bundle_dir: str | None = None,
+    tree_raw_features: Iterable[str] | None = None,
+    tree_rsi_mode: str = "level",
 ) -> pd.DataFrame:
+    mode = str(sort_by).lower().strip()
     fac_cols = [c for c in weights.keys() if c in factors.columns]
     rows = []
     for dt, g in factors.groupby("trade_date"):
-        effective_weights = weights_by_date.get(pd.Timestamp(dt), weights) if weights_by_date else weights
         if universe_eligible_col and universe_eligible_col in g.columns:
             g = g.loc[g[universe_eligible_col].to_numpy(dtype=bool)]
-        g = g.dropna(subset=fac_cols, how="all").copy()
+        if mode == "xgboost":
+            raw = [str(c) for c in (tree_raw_features or [])]
+            if not raw:
+                raise ValueError("sort_by=xgboost 需要 tree_raw_features")
+            g = g.dropna(subset=raw, how="all").copy()
+        else:
+            g = g.dropna(subset=fac_cols, how="all").copy()
         if len(g) < 10:
             continue
+        if mode == "xgboost":
+            ranked = sort_key_for_dataframe(
+                g,
+                sort_by="xgboost",
+                tree_bundle_dir=tree_bundle_dir,
+                tree_raw_features=list(tree_raw_features or []),
+                tree_rsi_mode=tree_rsi_mode,
+            )
+            rows.append(
+                pd.DataFrame(
+                    {
+                        "symbol": ranked["symbol"].values,
+                        "trade_date": dt,
+                        "score": pd.to_numeric(ranked["tree_score"], errors="coerce").to_numpy(dtype=np.float64),
+                    }
+                )
+            )
+            continue
+        effective_weights = weights_by_date.get(pd.Timestamp(dt), weights) if weights_by_date else weights
         active_cols = []
         for fc in fac_cols:
             col = pd.to_numeric(g[fc], errors="coerce")
@@ -1398,6 +1748,40 @@ def parse_args() -> argparse.Namespace:
         help="组合权重方法；为空则读取 config.portfolio.weight_method（兼容 equal）",
     )
     p.add_argument("--top-k", type=int, default=None, help="覆盖 config.signals.top_k")
+    p.add_argument(
+        "--sort-by",
+        default="",
+        choices=("", "composite_extended", "xgboost"),
+        help="覆盖 config.signals.sort_by；当前回测入口支持 composite_extended 或 xgboost",
+    )
+    p.add_argument(
+        "--tree-bundle-dir",
+        default="",
+        help="sort_by=xgboost 时覆盖 config.signals.tree_model.bundle_dir",
+    )
+    p.add_argument(
+        "--tree-features",
+        default="",
+        help="sort_by=xgboost 时覆盖 config.signals.tree_model.features（逗号分隔）",
+    )
+    p.add_argument(
+        "--tree-rsi-mode",
+        default="",
+        help="sort_by=xgboost 时覆盖 config.signals.tree_model.rsi_mode",
+    )
+    p.add_argument(
+        "--tree-feature-group",
+        default="",
+        help="sort_by=xgboost 时记录树模型特征分组（如 G0/G1），仅用于结果追踪",
+    )
+    p.add_argument("--research-topic", default="", help="覆盖结果文件 research_topic")
+    p.add_argument("--research-config-id", default="", help="覆盖结果文件 research_config_id")
+    p.add_argument("--output-stem", default="", help="覆盖结果文件 output_stem")
+    p.add_argument(
+        "--canonical-config",
+        default="",
+        help="记录 canonical research config 快照（如 v3_market_ew_full_backtest）",
+    )
     p.add_argument("--max-turnover", type=float, default=None, help="覆盖 config.portfolio.max_turnover")
     p.add_argument(
         "--entry-top-k",
@@ -1542,12 +1926,27 @@ def main() -> None:
     portfolio_cfg = cfg.get("portfolio", {})
     regime_cfg_raw = cfg.get("regime", {}) or {}
     risk_cfg = cfg.get("risk", {}) or {}
+    tree_sig = signals.get("tree_model", {}) or {}
     ce_weights = normalize_weights(signals.get("composite_extended", {}))
     p1_cfg = signals.get("p1_factor_filter", {}) or {}
     ic_cfg = signals.get("ic_weighting", {}) or {}
     top_k = int(signals.get("top_k", 10))
     if args.top_k is not None:
         top_k = int(args.top_k)
+    sort_by = str(args.sort_by or signals.get("sort_by", "composite_extended")).lower().strip()
+    if sort_by not in ("composite_extended", "xgboost"):
+        raise SystemExit(f"run_backtest_eval 当前仅支持 sort_by=composite_extended|xgboost，收到 {sort_by!r}")
+    tree_bundle_dir = str(args.tree_bundle_dir or tree_sig.get("bundle_dir", "")).strip()
+    tree_raw_features = [
+        str(x).strip()
+        for x in (
+            args.tree_features.split(",")
+            if args.tree_features.strip()
+            else (tree_sig.get("features", []) or [])
+        )
+        if str(x).strip()
+    ]
+    tree_rsi_mode = str(args.tree_rsi_mode or tree_sig.get("rsi_mode", "level")).strip().lower() or "level"
     rebalance_rule = str(backtest_cfg.get("eval_rebalance_rule", "M"))
     if str(args.rebalance_rule).strip():
         rebalance_rule = str(args.rebalance_rule).strip()
@@ -1578,6 +1977,9 @@ def main() -> None:
     cov_ewma_halflife = float(portfolio_cfg.get("cov_ewma_halflife", 20.0))
     risk_aversion = float(portfolio_cfg.get("risk_aversion", 1.0))
     regime_enabled = bool(regime_cfg_raw.get("enabled", True)) and not bool(args.no_regime)
+    if sort_by != "composite_extended" and regime_enabled:
+        print(f"[提示] sort_by={sort_by} 当前不接 regime 动态调权，本次已自动关闭。")
+        regime_enabled = False
     benchmark_symbol = str(risk_cfg.get("benchmark_symbol", "510300"))
     industry_cap_default = int(portfolio_cfg.get("industry_cap_count", 5))
     industry_cap_raw = industry_cap_default if args.industry_cap_count is None else int(args.industry_cap_count)
@@ -1643,7 +2045,7 @@ def main() -> None:
         f" | execution_lag={execution_lag}"
     )
     print(
-        f"排序键约定: composite_extended | regime={'on' if regime_enabled else 'off'}"
+        f"排序键约定: {sort_by} | regime={'on' if regime_enabled else 'off'}"
         f" | 行业上限(只数)={industry_cap_count if industry_cap_count > 0 else 'off'}"
         f" | 组合方法={portfolio_method}"
         f" | cov_lookback_days={cov_lookback_days}"
@@ -1680,6 +2082,39 @@ def main() -> None:
         db_path=db_path,
         results_dir=str(results_dir),
         universe_filter_cfg=uf,
+    )
+    tree_feature_group = str(args.tree_feature_group or "").strip()
+    identity_selector_parts: dict[str, Any] = {}
+    if sort_by == "xgboost":
+        identity_selector_parts["tree_group"] = tree_feature_group or "unknown"
+    research_identity = build_full_backtest_research_identity(
+        topic=args.research_topic or "full_backtest",
+        output_prefix=args.output_stem or "full_backtest",
+        sort_by=sort_by,
+        rebalance_rule=rebalance_rule,
+        top_k=top_k,
+        max_turnover=max_turnover,
+        portfolio_method=portfolio_method,
+        execution_mode=str(backtest_cfg.get("execution_mode", "close_to_close")),
+        prefilter_enabled=bool(prefilter_cfg.get("enabled", False)),
+        universe_filter_enabled=bool(uf.get("enabled", False)),
+        benchmark_symbol=MARKET_EW_PROXY,
+        start_date=start_date,
+        end_date=end_date,
+        selector_parts=identity_selector_parts,
+    )
+    if str(args.research_config_id).strip():
+        research_identity["research_config_id"] = slugify_token(args.research_config_id)
+    if str(args.output_stem).strip() and str(args.research_config_id).strip():
+        research_identity["output_stem"] = slugify_token(args.output_stem)
+    canonical_config_snapshot: dict[str, Any] = {}
+    if str(args.canonical_config).strip():
+        canonical_config_snapshot = canonical_research_config(args.canonical_config)
+    tree_report_meta = _tree_bundle_report_meta(
+        sort_by=sort_by,
+        bundle_dir=tree_bundle_dir,
+        tree_feature_group=tree_feature_group,
+        requested_features=tree_raw_features,
     )
     factors, factors_cache_hit = prepare_factors_for_backtest(
         daily_df,
@@ -1738,10 +2173,19 @@ def main() -> None:
         if dt in ic_overrides:
             merged.update(ic_overrides[dt])
         merged_overrides[pd.Timestamp(dt)] = merged
+    if sort_by == "xgboost":
+        if not tree_bundle_dir:
+            raise SystemExit("sort_by=xgboost 需要 --tree-bundle-dir 或 config.signals.tree_model.bundle_dir")
+        if not tree_raw_features:
+            raise SystemExit("sort_by=xgboost 需要 --tree-features 或 config.signals.tree_model.features")
     score_df = build_score(
         factors,
         ce_weights,
         weights_by_date=merged_overrides if merged_overrides else (regime_overrides if regime_enabled else None),
+        sort_by=sort_by,
+        tree_bundle_dir=tree_bundle_dir or None,
+        tree_raw_features=tree_raw_features,
+        tree_rsi_mode=tree_rsi_mode,
     )
     print(f"  得分行数: {len(score_df):,}")
 
@@ -1771,8 +2215,8 @@ def main() -> None:
     weights = weights[weights.index >= pd.Timestamp(start_date)]
     print(f"  调仓日: {len(weights)} | 标的列: {weights.shape[1]}")
     weights_base: pd.DataFrame | None = None
-    if regime_enabled:
-        score_base = build_score(factors, ce_weights, weights_by_date=None)
+    if regime_enabled and sort_by == "composite_extended":
+        score_base = build_score(factors, ce_weights, weights_by_date=None, sort_by=sort_by)
         weights_base = build_topk_weights(
             score_df=score_base,
             factor_df=factors,
@@ -1914,6 +2358,11 @@ def main() -> None:
     )
     _, sp_detail, sp_agg = walk_forward_backtest(asset_returns, weights, slices, config=bt_cost, use_test_only=True)
     overfit_cmp = compare_full_vs_slices(res_wc.panel, sp_agg) if sp_agg else {}
+    market_benchmark = benchmark_series.get("market_ew", pd.Series(dtype=np.float64))
+    rolling_excess = summarize_oos_excess_returns(res_wc.daily_returns, market_benchmark, rolling)
+    slice_excess = summarize_oos_excess_returns(res_wc.daily_returns, market_benchmark, slices)
+    wf_agg["median_ann_excess_vs_market"] = float(rolling_excess.get("median_ann_excess_return", np.nan))
+    sp_agg["median_ann_excess_vs_market"] = float(slice_excess.get("median_ann_excess_return", np.nan))
 
     print("\n" + "-" * 70)
     print("全样本绩效")
@@ -2105,8 +2554,15 @@ def main() -> None:
             "portfolio_diag_equal_like_ratio": float(portfolio_diag_summary.get("equal_like_ratio", np.nan)),
         }
         exp_params: Dict[str, Any] = {
+            "result_type": research_identity["result_type"],
+            "research_topic": research_identity["research_topic"],
+            "research_config_id": research_identity["research_config_id"],
+            "output_stem": research_identity["output_stem"],
+            "canonical_config": str(args.canonical_config or ""),
+            "canonical_config_snapshot": canonical_config_snapshot,
             "start": start_date,
             "end": end_date,
+            "sort_by": sort_by,
             "top_k": top_k,
             "rebalance_rule": rebalance_rule,
             "max_turnover": max_turnover,
@@ -2131,6 +2587,8 @@ def main() -> None:
             "ic_clip_abs_weight": ic_clip_abs_weight,
             "prepared_factors_cache": str(prepared_factors_cache) if prepared_factors_cache is not None else "",
             "refresh_prepared_factors_cache": bool(args.refresh_prepared_factors_cache),
+            "prepared_factors_cache_hit": bool(factors_cache_hit),
+            "prepared_factors_cache_meta": prepared_factors_cache_meta,
             "wf_train_window": wf_train_window,
             "wf_test_window": wf_test_window,
             "wf_step_window": wf_step_window,
@@ -2138,6 +2596,11 @@ def main() -> None:
             "wf_slice_min_train_days": wf_slice_min_train_days,
             "wf_slice_expanding_window": wf_slice_expanding,
             "prefilter": prefilter_cfg,
+            "tree_bundle_dir": tree_bundle_dir,
+            "tree_features": tree_raw_features,
+            "tree_feature_group": tree_feature_group,
+            "tree_report_meta": tree_report_meta,
+            "tree_rsi_mode": tree_rsi_mode,
             "p1_factor_filter_enabled": p1_filter_enabled,
             "p1_factor_ic_report": p1_ic_report_path,
             "p1_zero_if_abs_t1_below": p1_zero_abs_t1,
@@ -2170,10 +2633,17 @@ def main() -> None:
             )
         report = {
             "generated_at": date.today().isoformat(),
+            "result_type": research_identity["result_type"],
+            "research_topic": research_identity["research_topic"],
+            "research_config_id": research_identity["research_config_id"],
+            "output_stem": research_identity["output_stem"],
             "config_source": config_source,
+            "canonical_config": str(args.canonical_config or ""),
+            "canonical_config_snapshot": canonical_config_snapshot,
             "parameters": {
                 "start": start_date,
                 "end": end_date,
+                "sort_by": sort_by,
                 "lookback_days": args.lookback_days,
                 "min_hist_days": args.min_hist_days,
                 "top_k": top_k,
@@ -2206,6 +2676,12 @@ def main() -> None:
                 "ic_clip_abs_weight": ic_clip_abs_weight,
                 "prepared_factors_cache": str(prepared_factors_cache) if prepared_factors_cache is not None else "",
                 "refresh_prepared_factors_cache": bool(args.refresh_prepared_factors_cache),
+                "prepared_factors_cache_hit": bool(factors_cache_hit),
+                "prepared_factors_cache_meta": prepared_factors_cache_meta,
+                "tree_bundle_dir": tree_bundle_dir,
+                "tree_features": tree_raw_features,
+                "tree_feature_group": tree_feature_group,
+                "tree_rsi_mode": tree_rsi_mode,
                 "composite_extended_weights": ce_weights,
                 "prefilter": prefilter_cfg,
                 "p1_factor_filter_enabled": p1_filter_enabled,
@@ -2226,6 +2702,14 @@ def main() -> None:
                 "n_weight_symbols": int(weights.shape[1]),
                 "industry_cap_status": industry_cap_status,
                 "portfolio_diagnostics_summary": _json_sanitize(portfolio_diag_summary),
+                "prepared_factors_cache": {
+                    "path": str(prepared_factors_cache) if prepared_factors_cache is not None else "",
+                    "hit": bool(factors_cache_hit),
+                    "meta": prepared_factors_cache_meta,
+                    "schema_version": prepared_factors_cache_meta.get("prepared_factors_schema_version"),
+                    "cache_format_version": prepared_factors_cache_meta.get("cache_format_version"),
+                },
+                "tree_model": tree_report_meta,
             },
             "full_sample": {
                 "no_cost": res_nc.panel.to_dict(),
@@ -2242,12 +2726,14 @@ def main() -> None:
                 if not wf_detail.empty
                 else [],
                 "agg": _json_sanitize(dict(wf_agg)),
+                "excess_vs_market": _json_sanitize(rolling_excess),
             },
             "walk_forward_slices": {
                 "detail": _json_sanitize(sp_detail.to_dict(orient="records"))
                 if not sp_detail.empty
                 else [],
                 "agg": _json_sanitize(dict(sp_agg)),
+                "excess_vs_market": _json_sanitize(slice_excess),
                 "full_vs_slices": _json_sanitize(overfit_cmp),
             },
             "regime": {

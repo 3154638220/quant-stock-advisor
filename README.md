@@ -303,6 +303,35 @@ pytest
 
 ---
 
+## 研究流程
+
+当前仓库建议把研究链路固定为下面这个顺序，避免把轻量诊断、scout 和正式回测混在一起解释：
+
+1. `fetch / derive`
+   先更新 DuckDB 与派生数据，必要时刷新 `prepared_factors` cache。
+2. `light diagnostic`
+   先用 `scripts/run_signal_diagnostic.py` 看信号方向、频率感知年化、波动、回撤和基准相对表现。
+   这一层现在统一标记为 `result_type=signal_diagnostic`，是独立的 canonical 轻量诊断产物，不等价于正式 full backtest。
+   该脚本现在也会像 scout/admission 一样输出统一的 `research_topic / research_config_id / output_stem`，默认产物名为 `{output_stem}_summary.csv`、`{output_stem}_period_detail.csv` 和 `docs/{output_stem}.md`。
+3. `scout`
+   用 `scripts/run_alpha_factor_scout.py`、`scripts/run_alpha_directional_scout.py`、`scripts/run_alpha_expression_scout.py` 做 benchmark-first 候选侦察。
+   这类结果继续统一标记为 `result_type=light_strategy_proxy`，用于候选筛查，不直接替代 admission/full backtest。
+4. `admission`
+   候选只有在 `IC gate + combo gate + benchmark-first gate` 都过线后，才进入正式准入判断。
+   对应脚本是 `scripts/run_factor_admission_validation.py`。
+5. `full backtest`
+   最终用 `scripts/run_backtest_eval.py` 做正式回测、walk-forward 和切片验证。
+6. `optional publish`
+   只有研究结论稳定后，才考虑回写默认配置或接入日更推荐链路。
+
+这个顺序的核心纪律是：
+
+- 不把 `signal_diagnostic` 或 `light_strategy_proxy` 数值直接当成正式策略收益。
+- 不跳过 scout/admission 直接把新因子写进默认主线。
+- `prepared_factors` cache 命中前提必须与当前 schema/version 一致，否则应重建。
+
+---
+
 ## 路线图（未默认落地）
 
 以下在 **[项目算法建模详解.md](docs/项目算法建模详解.md)** 中亦标注为规划或可选扩展：**GNN**（板块/产业链图）、**深度强化学习**（如 FinRL）、新闻驱动关注度因子接入量化流水线等（当前 LLM 关注度扫描独立输出，暂未接入因子打分体系）。当前仓库主线仍是日线量价 + 统计/树/序列模型 + 凸优化组合 + 向量回测。

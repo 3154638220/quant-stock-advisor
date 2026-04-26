@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import re
 
 import numpy as np
 import pandas as pd
@@ -17,29 +18,61 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.run_backtest_eval import (
-    BacktestConfig,
-    _attach_pit_fundamentals,
-    _rebalance_dates,
-    attach_universe_filter,
-    build_market_ew_benchmark,
-    build_asset_returns,
-    build_open_to_open_returns,
-    build_regime_weight_overrides,
-    build_score,
-    build_topk_weights,
-    compare_full_vs_slices,
-    compute_factors,
-    contiguous_time_splits,
-    load_config,
-    load_daily_from_duckdb,
-    normalize_weights,
-    resolve_industry_cap_and_map,
-    rolling_walk_forward_windows,
-    run_backtest,
-    transaction_cost_params_from_mapping,
-    walk_forward_backtest,
-)
+def _missing_runtime_dependency(name: str, exc: ModuleNotFoundError):
+    def _raiser(*args: Any, **kwargs: Any) -> Any:
+        raise ModuleNotFoundError(
+            f"{name} 依赖缺失：{exc.name}。当前仅可使用无需回测运行时的汇总/表格函数。"
+        ) from exc
+
+    return _raiser
+
+
+try:
+    from scripts.run_backtest_eval import (
+        BacktestConfig,
+        _attach_pit_fundamentals,
+        _rebalance_dates,
+        attach_universe_filter,
+        build_market_ew_benchmark,
+        build_asset_returns,
+        build_open_to_open_returns,
+        build_regime_weight_overrides,
+        build_score,
+        build_topk_weights,
+        compare_full_vs_slices,
+        compute_factors,
+        contiguous_time_splits,
+        load_config,
+        load_daily_from_duckdb,
+        normalize_weights,
+        resolve_industry_cap_and_map,
+        rolling_walk_forward_windows,
+        run_backtest,
+        transaction_cost_params_from_mapping,
+        walk_forward_backtest,
+    )
+except ModuleNotFoundError as exc:
+    BacktestConfig = Any  # type: ignore[assignment]
+    _attach_pit_fundamentals = _missing_runtime_dependency("_attach_pit_fundamentals", exc)
+    _rebalance_dates = _missing_runtime_dependency("_rebalance_dates", exc)
+    attach_universe_filter = _missing_runtime_dependency("attach_universe_filter", exc)
+    build_market_ew_benchmark = _missing_runtime_dependency("build_market_ew_benchmark", exc)
+    build_asset_returns = _missing_runtime_dependency("build_asset_returns", exc)
+    build_open_to_open_returns = _missing_runtime_dependency("build_open_to_open_returns", exc)
+    build_regime_weight_overrides = _missing_runtime_dependency("build_regime_weight_overrides", exc)
+    build_score = _missing_runtime_dependency("build_score", exc)
+    build_topk_weights = _missing_runtime_dependency("build_topk_weights", exc)
+    compare_full_vs_slices = _missing_runtime_dependency("compare_full_vs_slices", exc)
+    compute_factors = _missing_runtime_dependency("compute_factors", exc)
+    contiguous_time_splits = _missing_runtime_dependency("contiguous_time_splits", exc)
+    load_config = _missing_runtime_dependency("load_config", exc)
+    load_daily_from_duckdb = _missing_runtime_dependency("load_daily_from_duckdb", exc)
+    normalize_weights = _missing_runtime_dependency("normalize_weights", exc)
+    resolve_industry_cap_and_map = _missing_runtime_dependency("resolve_industry_cap_and_map", exc)
+    rolling_walk_forward_windows = _missing_runtime_dependency("rolling_walk_forward_windows", exc)
+    run_backtest = _missing_runtime_dependency("run_backtest", exc)
+    transaction_cost_params_from_mapping = _missing_runtime_dependency("transaction_cost_params_from_mapping", exc)
+    walk_forward_backtest = _missing_runtime_dependency("walk_forward_backtest", exc)
 from src.features.factor_eval import rank_ic
 
 
@@ -106,6 +139,35 @@ SCENARIOS: tuple[Scenario, ...] = (
 )
 
 DEFAULT_BENCHMARK_KEY_YEARS: tuple[int, ...] = (2021, 2025, 2026)
+
+
+def _slugify_token(value: Any) -> str:
+    text = str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or "na"
+
+
+def build_admission_research_config_id(
+    *,
+    selected_families: list[str],
+    benchmark_key_years: list[int],
+    f1_min_ic: float,
+    f1_min_t: float,
+) -> str:
+    family_token = "-".join(_slugify_token(item) for item in selected_families) if selected_families else "all"
+    years_token = "-".join(str(int(item)) for item in benchmark_key_years) if benchmark_key_years else "none"
+    ic_bp = int(round(float(f1_min_ic) * 10_000))
+    t_bp = int(round(float(f1_min_t) * 100))
+    return f"families_{family_token}_yrs_{years_token}_ic{ic_bp}_t{t_bp}"
+
+
+def build_admission_output_stem(
+    *,
+    output_prefix: str,
+    research_config_id: str,
+) -> str:
+    return f"{_slugify_token(output_prefix)}_{research_config_id}"
 
 
 def select_scenarios(families: list[str] | None = None) -> list[Scenario]:
@@ -328,6 +390,11 @@ def build_admission_table(
 ) -> pd.DataFrame:
     benchmark_key_years = list(benchmark_key_years or DEFAULT_BENCHMARK_KEY_YEARS)
     baseline = summary_df.loc[summary_df["scenario"] == baseline_label].iloc[0]
+    benchmark_excess_col = (
+        "full_backtest_annualized_excess_vs_market"
+        if "full_backtest_annualized_excess_vs_market" in summary_df.columns
+        else "annualized_excess_vs_market"
+    )
     gate_close = gate_df[gate_df["horizon_key"] == "close_21d"][["factor", "ic_mean", "ic_t_value"]].copy()
     gate_close = gate_close.rename(columns={"ic_mean": "close21_ic_mean", "ic_t_value": "close21_ic_t"})
     gate_open = gate_df[gate_df["horizon_key"] == "tplus1_open_1d"][["factor", "ic_mean", "ic_t_value"]].copy()
@@ -339,6 +406,7 @@ def build_admission_table(
     )
 
     out = summary_df.merge(gate, left_on="candidate_factor", right_on="factor", how="left")
+    out["benchmark_excess_metric"] = str(benchmark_excess_col)
     out["delta_ann_vs_baseline"] = pd.to_numeric(out["annualized_return"], errors="coerce") - float(baseline["annualized_return"])
     out["delta_sharpe_vs_baseline"] = pd.to_numeric(out["sharpe_ratio"], errors="coerce") - float(baseline["sharpe_ratio"])
     out["delta_rolling_vs_baseline"] = (
@@ -350,8 +418,8 @@ def build_admission_table(
         - float(baseline["slice_oos_median_ann_return"])
     )
     out["delta_ann_excess_vs_baseline"] = (
-        pd.to_numeric(out["annualized_excess_vs_market"], errors="coerce")
-        - float(baseline["annualized_excess_vs_market"])
+        pd.to_numeric(out[benchmark_excess_col], errors="coerce")
+        - float(pd.to_numeric(baseline[benchmark_excess_col], errors="coerce"))
     )
     out["delta_yearly_excess_median_vs_baseline"] = (
         pd.to_numeric(out["yearly_excess_median_vs_market"], errors="coerce")
@@ -375,7 +443,7 @@ def build_admission_table(
         & (pd.to_numeric(out["delta_slice_vs_baseline"], errors="coerce") > 0.0)
     )
     out["pass_benchmark_gate"] = (
-        (pd.to_numeric(out["annualized_excess_vs_market"], errors="coerce") >= 0.0)
+        (pd.to_numeric(out[benchmark_excess_col], errors="coerce") >= 0.0)
         & (pd.to_numeric(out["rolling_oos_median_ann_excess_vs_market"], errors="coerce") >= 0.0)
         & (pd.to_numeric(out["slice_oos_median_ann_excess_vs_market"], errors="coerce") >= 0.0)
         & (pd.to_numeric(out["delta_yearly_excess_median_vs_baseline"], errors="coerce") > 0.0)
@@ -387,6 +455,13 @@ def build_admission_table(
         np.where(out["pass_f1_gate"] & out["pass_combo_gate"] & out["pass_benchmark_gate"], "pass", "fail"),
     )
     out["benchmark_key_years"] = ",".join(str(int(y)) for y in benchmark_key_years)
+    if "research_topic" in summary_df.columns:
+        out["research_topic"] = summary_df["research_topic"]
+    if "research_config_id" in summary_df.columns:
+        out["research_config_id"] = summary_df["research_config_id"]
+    if "output_stem" in summary_df.columns:
+        out["output_stem"] = summary_df["output_stem"]
+    out["result_type"] = "factor_admission"
     return out
 
 
@@ -400,12 +475,19 @@ def _build_doc(
 ) -> str:
     generated_at = pd.Timestamp.utcnow().isoformat()
     candidate_text = "、".join(f"`{factor}`" for factor in candidate_factors)
+    benchmark_excess_metric = (
+        summary_df.get("benchmark_excess_metric", pd.Series(["annualized_excess_vs_market"]))
+        .dropna()
+        .astype(str)
+        .iloc[0]
+    )
     return f"""# F1 候选因子准入验证
 
 - 生成时间：`{generated_at}`
 - 基线：`S2 = vol_to_turnover`，并沿用当前默认研究口径 `prefilter=false + universe=true`
 - 候选：{candidate_text}
 - 比较矩阵：基线、候选单因子、候选 `10% / 20%` 叠加版
+- benchmark gate 年化超额口径：`{benchmark_excess_metric}`
 
 ## 组合汇总
 
@@ -421,7 +503,7 @@ def _build_doc(
 
 说明：`pass` 现在必须同时通过 `IC gate + combo gate + benchmark-first gate`。其中 benchmark-first gate 至少要求：
 
-- `annualized_excess_vs_market >= 0`
+- `{benchmark_excess_metric} >= 0`
 - `rolling / slice OOS` 的超额年化中位数均不为负
 - 年度超额中位数相对基线改善
 - 关键落后年份的平均超额相对基线改善
@@ -478,6 +560,17 @@ def main() -> None:
     benchmark_key_years = [
         int(item.strip()) for item in str(args.benchmark_key_years).split(",") if str(item).strip()
     ] or list(DEFAULT_BENCHMARK_KEY_YEARS)
+    research_topic = "factor_admission_validation"
+    research_config_id = build_admission_research_config_id(
+        selected_families=selected_families,
+        benchmark_key_years=benchmark_key_years,
+        f1_min_ic=float(args.f1_min_ic),
+        f1_min_t=float(args.f1_min_t),
+    )
+    output_stem = build_admission_output_stem(
+        output_prefix=output_prefix,
+        research_config_id=research_config_id,
+    )
     gate_factor_df = attach_universe_filter(
         factors,
         daily_df,
@@ -486,6 +579,11 @@ def main() -> None:
         require_roe_ttm_positive=True,
     )
     gate_df = compute_factor_gate_table(gate_factor_df, daily_df, candidate_factors=candidate_factors)
+    if not gate_df.empty:
+        gate_df.insert(0, "result_type", "factor_gate")
+        gate_df.insert(1, "research_topic", research_topic)
+        gate_df.insert(2, "research_config_id", research_config_id)
+        gate_df.insert(3, "output_stem", output_stem)
     benchmark_min_days = max(60, int(0.35 * max(daily_df["trade_date"].nunique(), 1)))
     market_benchmark = build_market_ew_benchmark(daily_df, args.start, end_date, min_days=benchmark_min_days).sort_index()
 
@@ -606,9 +704,15 @@ def main() -> None:
         summary_rows.append(
             {
                 "scenario": scenario.label,
+                "scenario_key": scenario.key,
                 "candidate_factor": scenario.candidate_factor,
                 "family": scenario.family,
                 "is_baseline": scenario.is_baseline,
+                "result_type": "factor_admission_summary",
+                "research_topic": research_topic,
+                "research_config_id": research_config_id,
+                "output_stem": output_stem,
+                "config_source": config_source,
                 "annualized_return": float(res_wc.panel.annualized_return),
                 "sharpe_ratio": float(res_wc.panel.sharpe_ratio),
                 "max_drawdown": float(res_wc.panel.max_drawdown),
@@ -628,6 +732,12 @@ def main() -> None:
 
         payload = {
             "generated_at": pd.Timestamp.utcnow().isoformat(),
+            "result_type": "factor_admission_scenario",
+            "research_topic": research_topic,
+            "research_config_id": research_config_id,
+            "output_stem": output_stem,
+            "scenario_key": scenario.key,
+            "scenario_label": scenario.label,
             "config_source": config_source,
             "parameters": {
                 "start": args.start,
@@ -699,6 +809,10 @@ def main() -> None:
     manifest_path = results_dir / f"{output_prefix}_manifest.json"
     manifest = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
+        "research_topic": research_topic,
+        "research_config_id": research_config_id,
+        "output_stem": output_stem,
+        "result_type": "factor_admission_manifest",
         "selected_families": selected_families,
         "scenarios": [s.__dict__ for s in selected_scenarios],
         "artifacts": [

@@ -25,8 +25,11 @@ def test_compute_factors_includes_p1_columns():
     fac = compute_factors(daily, min_hist_days=260)
     assert "momentum_12_1" in fac.columns
     assert "turnover_rel_pct_252" in fac.columns
+    assert "weekly_kdj_j" in fac.columns
+    assert "weekly_kdj_oversold_depth" in fac.columns
     assert fac["momentum_12_1"].notna().sum() > 0
     assert fac["turnover_rel_pct_252"].notna().sum() > 0
+    assert fac["weekly_kdj_j"].notna().sum() > 0
 
 
 def test_apply_p1_factor_policy_remove_zero_flip():
@@ -102,4 +105,3 @@ def test_apply_p1_factor_policy_removes_missing_ic_factors():
     assert act["ocf_to_net_profit"] == "keep"
     assert set(out) == {"ocf_to_net_profit"}
     assert abs(out["ocf_to_net_profit"] - 1.0) < 1e-9
-

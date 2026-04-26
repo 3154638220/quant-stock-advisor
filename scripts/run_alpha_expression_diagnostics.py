@@ -12,6 +12,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from scripts.light_strategy_proxy import (
+    annualize_period_return as _annualize_period_return,
+    build_light_proxy_period_detail,
+    infer_periods_per_year,
+    summarize_light_strategy_proxy,
+)
+from scripts.research_identity import build_light_research_identity
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -68,39 +76,13 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _annualize_period_return(ret: float, n_periods: int, periods_per_year: float) -> float:
-    if not np.isfinite(ret) or n_periods <= 0 or ret <= -1.0:
-        return float("nan")
-    return float((1.0 + ret) ** (periods_per_year / float(n_periods)) - 1.0)
-
-
-def _build_monthly_detail(strategy_daily: pd.Series, benchmark_daily: pd.Series, scenario: str) -> pd.DataFrame:
-    common = pd.DatetimeIndex(strategy_daily.index).intersection(pd.DatetimeIndex(benchmark_daily.index)).sort_values()
-    strat = pd.to_numeric(strategy_daily.reindex(common), errors="coerce").fillna(0.0)
-    bench = pd.to_numeric(benchmark_daily.reindex(common), errors="coerce").fillna(0.0)
-    month_key = common.to_period("M")
-
-    monthly = pd.DataFrame(
-        {
-            "strategy_return": strat.groupby(month_key).apply(lambda s: float((1.0 + s).prod() - 1.0)),
-            "benchmark_return": bench.groupby(month_key).apply(lambda s: float((1.0 + s).prod() - 1.0)),
-        }
-    ).reset_index(names="month")
-    monthly["scenario"] = scenario
-    monthly["excess_return"] = monthly["strategy_return"] - monthly["benchmark_return"]
-    monthly["benchmark_up"] = monthly["benchmark_return"] > 0.0
-    monthly["strategy_up"] = monthly["strategy_return"] > 0.0
-    monthly["beat_benchmark"] = monthly["excess_return"] > 0.0
-    return monthly
-
-
-def _summarize_month_capture(monthly_df: pd.DataFrame) -> dict[str, Any]:
-    if monthly_df.empty:
+def _summarize_month_capture(period_df: pd.DataFrame) -> dict[str, Any]:
+    if period_df.empty:
         return {}
-    up = monthly_df[monthly_df["benchmark_up"]].copy()
-    down = monthly_df[~monthly_df["benchmark_up"]].copy()
+    up = period_df[period_df["benchmark_up"]].copy()
+    down = period_df[~period_df["benchmark_up"]].copy()
     return {
-        "months_total": int(len(monthly_df)),
+        "months_total": int(len(period_df)),
         "months_up": int(len(up)),
         "months_down": int(len(down)),
         "up_month_beat_rate": float(up["beat_benchmark"].mean()) if not up.empty else np.nan,
@@ -108,6 +90,7 @@ def _summarize_month_capture(monthly_df: pd.DataFrame) -> dict[str, Any]:
         "down_month_beat_rate": float(down["beat_benchmark"].mean()) if not down.empty else np.nan,
         "down_month_median_excess": float(pd.to_numeric(down["excess_return"], errors="coerce").median()) if not down.empty else np.nan,
     }
+
 
 
 def classify_defensive_overlay(summary_df: pd.DataFrame) -> pd.DataFrame:
@@ -194,6 +177,7 @@ def _build_doc(
 - 生成时间：`{generated_at}`
 - 目标：解释为何 expression-level IC 为负，但部分 expression 方案仍能改善组合结果
 - 诊断场景：`{", ".join(scenario_names)}`
+- 结果类型：`light_strategy_proxy`（用于方向性和组合层 proxy 判断，不等价于 full backtest）
 
 ## 场景汇总
 
@@ -305,6 +289,23 @@ def main() -> None:
     portfolio_cfg = cfg.get("portfolio", {}) or {}
     backtest_cfg = cfg.get("backtest", {}) or {}
     prefilter_cfg = cfg.get("prefilter", {}) or {}
+    rebalance_rule = str(backtest_cfg.get("eval_rebalance_rule", "M"))
+    periods_per_year = infer_periods_per_year(rebalance_rule)
+    benchmark_key_years = [2021, 2025, 2026]
+    research_identity = build_light_research_identity(
+        topic="alpha_expression_diagnostics",
+        output_prefix=output_prefix,
+        baseline_factor=baseline_factor,
+        rebalance_rule=rebalance_rule,
+        top_k=int(args.top_k),
+        benchmark_key_years=benchmark_key_years,
+        selector_parts={
+            "candidates": [factor_name],
+            "weights": [0.15, 0.20],
+            "thresholds": [0.5],
+            "scenarios": len(scenario_defs),
+        },
+    )
     costs = transaction_cost_params_from_mapping(cfg.get("transaction_costs", {}))
     execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open")).lower().strip()
     bt_cost = BacktestConfig(cost_params=costs, execution_mode=execution_mode, execution_lag=1)
@@ -333,7 +334,7 @@ def main() -> None:
             factor_df=scenario_factors,
             daily_df=daily_df,
             top_k=int(args.top_k),
-            rebalance_rule=str(backtest_cfg.get("eval_rebalance_rule", "M")),
+            rebalance_rule=rebalance_rule,
             prefilter_cfg=prefilter_cfg,
             max_turnover=float(portfolio_cfg.get("max_turnover", 0.3)),
             industry_map=industry_map,
@@ -353,9 +354,19 @@ def main() -> None:
         scenario_asset_returns = scenario_asset_returns[scenario_asset_returns.index >= first_reb]
         res = run_backtest(scenario_asset_returns, weights, config=bt_cost)
 
-        monthly = _build_monthly_detail(res.daily_returns, market_benchmark, scenario["scenario"])
+        monthly = build_light_proxy_period_detail(
+            res.daily_returns,
+            market_benchmark,
+            rebalance_rule="M",
+            scenario=scenario["scenario"],
+        ).rename(columns={"period": "month"})
+        monthly["result_type"] = "monthly_excess_detail"
+        monthly["research_topic"] = research_identity["research_topic"]
+        monthly["research_config_id"] = research_identity["research_config_id"]
+        monthly["output_stem"] = research_identity["output_stem"]
         monthly_rows.append(monthly)
         capture = _summarize_month_capture(monthly)
+        proxy_summary = summarize_light_strategy_proxy(monthly, periods_per_year=periods_per_year)
 
         key_years = pd.DataFrame({"year": monthly["month"].astype(str).str[:4].astype(int), "excess": monthly["excess_return"]})
         key_years = key_years[key_years["year"].isin([2021, 2025, 2026])]
@@ -366,11 +377,20 @@ def main() -> None:
                 "candidate_factor": scenario["candidate_factor"],
                 "family": scenario["family"],
                 "expression_type": scenario["expression_type"],
+                "result_type": "light_strategy_proxy",
+                "research_topic": research_identity["research_topic"],
+                "research_config_id": research_identity["research_config_id"],
+                "output_stem": research_identity["output_stem"],
+                "rebalance_rule": rebalance_rule,
+                "periods_per_year": float(periods_per_year),
+                "proxy_periods": int(proxy_summary["n_periods"]),
                 "annualized_return": float(res.panel.annualized_return),
                 "sharpe_ratio": float(res.panel.sharpe_ratio),
                 "max_drawdown": float(res.panel.max_drawdown),
                 "turnover_mean": float(res.panel.turnover_mean),
-                "annualized_excess_vs_market": _annualize_period_return(float((1.0 + (res.daily_returns - market_benchmark.reindex(res.daily_returns.index).fillna(0.0))).prod() - 1.0), len(res.daily_returns), 252.0),
+                "proxy_annualized_return": float(proxy_summary["strategy_annualized_return"]),
+                "proxy_benchmark_annualized_return": float(proxy_summary["benchmark_annualized_return"]),
+                "annualized_excess_vs_market": float(proxy_summary["annualized_excess_vs_market"]),
                 "up_month_beat_rate": capture.get("up_month_beat_rate"),
                 "up_month_median_excess": capture.get("up_month_median_excess"),
                 "down_month_beat_rate": capture.get("down_month_beat_rate"),
@@ -391,6 +411,11 @@ def main() -> None:
         baseline_factor=baseline_factor,
         expression_specs=expression_specs,
     )
+    if not gate_df.empty:
+        gate_df.insert(0, "result_type", "factor_gate")
+        gate_df.insert(1, "research_topic", research_identity["research_topic"])
+        gate_df.insert(2, "research_config_id", research_identity["research_config_id"])
+        gate_df.insert(3, "output_stem", research_identity["output_stem"])
 
     summary_path = results_dir / f"{output_prefix}_summary.csv"
     gate_path = results_dir / f"{output_prefix}_factor_gate.csv"
@@ -405,6 +430,8 @@ def main() -> None:
     manifest_path = results_dir / f"{output_prefix}_manifest.json"
     manifest = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
+        "result_type": "research_manifest",
+        **research_identity,
         "artifacts": [
             str(summary_path.relative_to(PROJECT_ROOT)),
             str(gate_path.relative_to(PROJECT_ROOT)),
