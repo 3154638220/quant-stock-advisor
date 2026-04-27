@@ -24,6 +24,7 @@ from src.models.xtree.p1_workflow import (
     build_daily_proxy_first_leaderboard,
     build_group_comparison_table,
     build_p1_monthly_investable_label,
+    build_p1_daily_proxy_first_report,
     build_p1_training_label,
     build_p1_tree_output_stem,
     build_p1_tree_research_config_id,
@@ -132,14 +133,17 @@ def parse_args() -> argparse.Namespace:
         "--label-mode",
         choices=(
             "rank_fusion",
+            "top_bucket_rank_fusion",
             "raw_fusion",
             "market_relative",
             "benchmark_relative",
+            "up_capture_market_relative",
             "monthly_investable",
             "monthly_investable_market_relative",
+            "monthly_investable_up_capture_market_relative",
         ),
         default="rank_fusion",
-        help="训练标签口径：截面 rank 融合、原始收益融合、市场相对、benchmark 相对或月频可投资收益",
+        help="训练标签口径：截面 rank 融合、Top/Bottom bucket rank、原始收益融合、市场相对、上涨参与相对、benchmark 相对或月频可投资收益",
     )
     p.add_argument("--proxy-horizon", type=int, default=None, help="light proxy 使用的 forward_ret_h 列")
     p.add_argument(
@@ -314,6 +318,7 @@ def main() -> int:
         float(args.daily_proxy_full_backtest_threshold),
     )
     cfg = load_config(args.config)
+    config_source = str(args.config or "config.yaml")
     paths = cfg.get("paths", {}) or {}
     feat = cfg.get("features", {}) or {}
     gpu_cfg = cfg.get("gpu", {}) or {}
@@ -451,7 +456,7 @@ def main() -> int:
 
     label_mode = str(args.label_mode)
     execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open"))
-    if label_mode in {"monthly_investable", "monthly_investable_market_relative"}:
+    if label_mode.startswith("monthly_investable"):
         panel, target_column, label_meta = build_p1_monthly_investable_label(
             panel,
             daily_df,
@@ -536,6 +541,7 @@ def main() -> int:
         rebalance_rule=args.rebalance_rule,
         top_k=int(args.top_k),
         label_horizons=label_horizons,
+        label_weights=label_weights,
         proxy_horizon=int(proxy_horizon),
         val_frac=float(args.val_frac),
         label_mode=label_mode,
@@ -692,11 +698,17 @@ def main() -> int:
                 "primary_result_type": "daily_bt_like_proxy",
                 "primary_decision_metric": "daily_bt_like_proxy_annualized_excess_vs_market",
                 "legacy_proxy_decision_role": "diagnostic_only",
+                "p1_experiment_mode": "daily_proxy_first",
+                "config_source": config_source,
+                "benchmark_symbol": "market_ew_proxy",
                 "research_topic": "p1_tree_groups",
                 "research_config_id": research_config_id,
                 "output_stem": output_stem,
                 "bundle_label": bundle_label,
                 "bundle_dir": str(res.bundle_dir),
+                "training_window_start": str(pd.to_datetime(panel["trade_date"]).min().date()),
+                "training_window_end": str(pd.to_datetime(panel["trade_date"]).max().date()),
+                "validation_cutoff": str(pd.Timestamp(cutoff).date()),
                 "feature_count": int(len(available_features)),
                 "features": ",".join(available_features),
                 "missing_features": ",".join(missing_features),
@@ -775,9 +787,24 @@ def main() -> int:
         bundle_manifest_rows.append(
             {
                 "group": group_name,
+                "result_type": "xgboost_tree_bundle",
+                "p1_experiment_mode": "daily_proxy_first",
+                "config_source": config_source,
+                "research_topic": "p1_tree_groups",
+                "output_stem": output_stem,
                 "bundle_label": bundle_label,
                 "bundle_dir": str(res.bundle_dir),
                 "research_config_id": research_config_id,
+                "label_mode": label_mode,
+                "label_scope": str(label_meta.get("label_scope") or label_mode),
+                "label_horizons": ",".join(str(x) for x in label_horizons),
+                "label_weights": ",".join(f"{float(x):.8g}" for x in label_weights),
+                "xgboost_objective": str(args.xgboost_objective),
+                "rebalance_rule": args.rebalance_rule,
+                "top_k": int(args.top_k),
+                "execution_mode": execution_mode,
+                "daily_proxy_admission_threshold": daily_proxy_admission_threshold,
+                "daily_proxy_full_backtest_threshold": daily_proxy_full_backtest_threshold,
                 "feature_count": int(len(available_features)),
                 "features": ",".join(available_features),
                 "missing_features": ",".join(missing_features),
@@ -879,6 +906,7 @@ def main() -> int:
     daily_leaderboard_path = Path(results_dir) / f"{output_stem}_daily_proxy_leaderboard.csv"
     bundle_manifest_path = Path(results_dir) / f"{output_stem}_bundle_manifest.csv"
     direction_diag_path = Path(results_dir) / f"{output_stem}_direction_diagnostic.csv"
+    report_path = Path(results_dir) / f"{output_stem}_report.md"
     json_path = Path(results_dir) / f"{output_stem}.json"
     summary_df.to_csv(summary_path, index=False)
     detail_all.to_csv(detail_path, index=False)
@@ -901,6 +929,7 @@ def main() -> int:
         "daily_proxy_leaderboard_csv": str(daily_leaderboard_path),
         "bundle_manifest_csv": str(bundle_manifest_path),
         "direction_diagnostic_csv": str(direction_diag_path),
+        "report_md": str(report_path),
         "bundle_manifest": bundle_manifest_df.to_dict(orient="records"),
         "label_diagnostics": label_diagnostics,
         "label_meta": label_meta,
@@ -912,6 +941,8 @@ def main() -> int:
         "config": {
             "p1_experiment_mode": "daily_proxy_first",
             "legacy_proxy_decision_role": "diagnostic_only",
+            "config_source": config_source,
+            "benchmark_symbol": "market_ew_proxy",
             "label_horizons": label_horizons,
             "label_weights": label_weights,
             "proxy_horizon": proxy_horizon,
@@ -925,6 +956,14 @@ def main() -> int:
             "val_frac": float(args.val_frac),
         },
     }
+    report_text = build_p1_daily_proxy_first_report(
+        summary_df=summary_df,
+        daily_leaderboard_df=daily_leaderboard_df,
+        state_summary_df=state_summary_df,
+        boundary_df=boundary_all,
+        payload=payload,
+    )
+    report_path.write_text(report_text, encoding="utf-8")
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0

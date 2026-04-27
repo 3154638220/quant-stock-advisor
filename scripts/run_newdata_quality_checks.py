@@ -20,7 +20,7 @@ from src.data_fetcher.data_quality import (
     run_shareholder_quality_checks,
 )
 from scripts.research_identity import slugify_token
-from src.settings import load_config
+from src.settings import load_config, resolve_config_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -163,6 +163,7 @@ def _build_doc(
     research_topic: str,
     research_config_id: str,
     output_stem: str,
+    config_source: str,
     families: list[str],
 ) -> str:
     generated_at = pd.Timestamp.utcnow().isoformat()
@@ -176,6 +177,7 @@ def _build_doc(
 - 研究主题：`{research_topic}`
 - 研究配置：`{research_config_id}`
 - 输出 stem：`{output_stem}`
+- 配置来源：`{config_source}`
 - 数据家族：`{", ".join(families) if families else "none"}`
 
 ## Summary
@@ -207,6 +209,7 @@ def _build_doc(
 
 def main() -> int:
     args = parse_args()
+    config_source = str(resolve_config_path(args.config)) if args.config is not None else "default_config_lookup"
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
     db_path = str((paths.get("duckdb_path") or "data/market.duckdb")).strip()
@@ -244,6 +247,7 @@ def main() -> int:
         "research_topic": research_topic,
         "research_config_id": research_config_id,
         "output_stem": output_stem,
+        "config_source": config_source,
         "db_path": db_path,
         "families": families,
     }
@@ -261,6 +265,7 @@ def main() -> int:
                     "research_topic": research_topic,
                     "research_config_id": research_config_id,
                     "output_stem": output_stem,
+                    "config_source": config_source,
                     "family": "fund_flow",
                     "ok": flow_report.ok,
                     "table_exists": flow_report.table_exists,
@@ -296,6 +301,7 @@ def main() -> int:
                     "research_topic": research_topic,
                     "research_config_id": research_config_id,
                     "output_stem": output_stem,
+                    "config_source": config_source,
                     "family": "shareholder",
                     "ok": shareholder_report.ok,
                     "table_exists": shareholder_report.table_exists,
@@ -305,6 +311,9 @@ def main() -> int:
                     "duplicate_pk_rows": shareholder_report.duplicate_pk_rows,
                     "notice_date_coverage_ratio": shareholder_report.notice_date_coverage_ratio,
                     "fallback_lag_usage_ratio": shareholder_report.fallback_lag_usage_ratio,
+                    "negative_notice_lag_rows": shareholder_report.negative_notice_lag_rows,
+                    "median_notice_lag_days": shareholder_report.median_notice_lag_days,
+                    "p90_notice_lag_days": shareholder_report.p90_notice_lag_days,
                     "median_symbols_per_end_date": shareholder_report.median_symbols_per_end_date,
                     "effective_factor_dates_ge_min_width": shareholder_report.effective_factor_dates_ge_min_width,
                     "notes": " | ".join(shareholder_report.notes),
@@ -324,6 +333,7 @@ def main() -> int:
             research_topic=research_topic,
             research_config_id=research_config_id,
             output_stem=output_stem,
+            config_source=config_source,
             families=families,
         ),
         encoding="utf-8",
@@ -334,6 +344,7 @@ def main() -> int:
         "research_topic": research_topic,
         "research_config_id": research_config_id,
         "output_stem": output_stem,
+        "config_source": config_source,
         "families": families,
         "artifacts": [
             str(summary_path.relative_to(ROOT)),

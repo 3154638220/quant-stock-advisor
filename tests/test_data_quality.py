@@ -300,7 +300,37 @@ def test_run_shareholder_quality_checks_reports_notice_and_width() -> None:
     assert r.fallback_lag_usage_ratio == 0.25
     assert r.negative_notice_lag_rows == 1
     assert r.median_symbols_per_end_date == 3.0
-    assert r.effective_factor_dates_ge_min_width == 1
+    assert r.effective_factor_dates_ge_min_width == 2
+
+
+def test_run_shareholder_quality_checks_falls_back_for_notice_before_end_date() -> None:
+    con = duckdb.connect(":memory:")
+    con.execute(
+        """
+        CREATE TABLE a_share_shareholder (
+          symbol VARCHAR,
+          end_date DATE,
+          notice_date DATE,
+          holder_count BIGINT,
+          holder_change BIGINT
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO a_share_shareholder VALUES
+        ('000001', '2024-03-31', '2024-03-30', 1000, 50),
+        ('000002', '2024-03-31', '2024-04-30', 1200, -20)
+        """
+    )
+
+    r = run_shareholder_quality_checks(con, fallback_lag_days=30, min_effective_width=2)
+
+    assert r.ok
+    assert r.negative_notice_lag_rows == 1
+    assert r.notice_date_coverage_ratio == 1.0
+    assert r.fallback_lag_usage_ratio == 0.0
+    assert any("保守处理" in note for note in r.notes)
 
 
 def test_newdata_quality_research_identity_is_stable() -> None:

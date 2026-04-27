@@ -62,7 +62,9 @@ def attach_shareholder_factors(
         return _attach_empty_shareholder_columns(out)
 
     raw["availability_date"] = raw["notice_date"]
-    fallback_mask = raw["availability_date"].isna()
+    # A notice date before the reporting period end is not PIT-safe; use the
+    # conservative lag fallback instead of trusting the source field.
+    fallback_mask = raw["availability_date"].isna() | (raw["availability_date"] < raw["end_date"])
     raw.loc[fallback_mask, "availability_date"] = raw.loc[fallback_mask, "end_date"] + pd.to_timedelta(
         int(availability_lag_days),
         unit="D",

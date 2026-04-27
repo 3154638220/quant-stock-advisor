@@ -19,7 +19,26 @@ P1 不再围绕旧 light proxy 做解释和对齐。旧 proxy 已经证明自己
 4. H1 的两个最小月频可投资标签已落地并做完 `G0` smoke，但都被 daily proxy 截停：
    - `monthly_investable + regression + G0`：旧 light proxy 年化超额 `+10.60%`，full-like proxy `+4.53%`，daily backtest-like proxy `-31.18%`。
    - `monthly_investable_market_relative + regression + G0`：旧 light proxy 年化超额 `+20.02%`，full-like proxy `+18.12%`，daily backtest-like proxy `-43.42%`。
-5. P1 runner 已固化 daily-proxy-first 输出：
+5. P1-A 第一轮新增的上涨参与最小机制标签 `up_capture_market_relative + regression + G0` 已完成 smoke，也被 daily proxy 截停：
+   - 旧 light proxy 年化超额 `+19.67%`，full-like proxy `+19.67%`，daily backtest-like proxy `-39.21%`。
+   - strong up 状态中位超额 `-3.56%`、跑赢率 `0.00%`，没有修复上涨参与。
+   - 结论文档：`docs/p1_up_capture_market_relative_g0_smoke_2026-04-27.md`。
+6. P1-A 第二轮新增的月频可投资上涨参与标签 `monthly_investable_up_capture_market_relative + regression + G0` 已完成 smoke，也被 daily proxy 截停：
+   - 旧 light proxy 年化超额 `+18.72%`，full-like proxy `+18.72%`，daily backtest-like proxy `-47.48%`。
+   - strong up 状态中位超额 `-5.18%`、跑赢率 `0.00%`，没有修复上涨参与。
+   - Top-K 边界转负：`topk_minus_next=-1.74%`，`switch_in_minus_out=-0.33%`。
+   - 结论文档：`docs/p1_monthly_investable_up_capture_g0_smoke_2026-04-27.md`。
+7. P1-A 第三轮从边界/换手问题出发的长 horizon 加权标签 `rank_fusion(5d/10d/20d=0.1/0.2/0.7) + regression + G0` 已完成 smoke，也被 daily proxy 截停：
+   - 旧 light proxy 年化超额 `+16.83%`，full-like proxy `+16.83%`，daily backtest-like proxy `-29.52%`。
+   - strong up 状态中位超额 `-3.78%`、跑赢率 `16.67%`，上涨参与仍未修复。
+   - Top-K 边界仍为负：`topk_minus_next=-1.02%`，`switch_in_minus_out=-0.95%`，平均 half-L1 换手 `77.92%`。
+   - 结论文档：`docs/p1_rank_fusion_long_horizon_g0_smoke_2026-04-27.md`。
+8. P1-A 第四轮从 Top-K 边界噪声出发的稀疏 top/bottom 标签 `top_bucket_rank_fusion + regression + G0` 已完成 smoke，也被 daily proxy 截停：
+   - 旧 light proxy 年化超额 `+15.76%`，full-like proxy `+15.76%`，daily backtest-like proxy `-28.09%`。
+   - strong up 状态中位超额 `-2.44%`、跑赢率 `16.67%`，上涨参与仍未修复。
+   - Top-K 平均收益差仅小幅转正：`topk_minus_next=+0.29%`；但换入减换出仍为负：`switch_in_minus_out=-0.94%`，平均 half-L1 换手 `78.33%`。
+   - 结论文档：`docs/p1_top_bucket_rank_fusion_g0_smoke_2026-04-27.md`。
+9. P1 runner 已固化 daily-proxy-first 输出：
    - summary 主 `result_type=daily_bt_like_proxy`
    - 旧 proxy 明确标记为 `legacy_proxy_decision_role=diagnostic_only`
    - 新增 `*_daily_proxy_leaderboard.csv`
@@ -27,7 +46,9 @@ P1 不再围绕旧 light proxy 做解释和对齐。旧 proxy 已经证明自己
    - 新增 `pass_p1_daily_proxy_full_backtest_gate`
    - 保留 `*_topk_boundary.csv`
    - 保留 `*_daily_proxy_monthly_state.csv` 与 `*_daily_proxy_state_summary.csv`
-6. 相关 P1 单测已覆盖新增标签、Top-K 边界、状态切片、daily-proxy-first 三档 gate 和 leaderboard，`pytest tests/test_p1_tree_groups.py` 当前为 `39 passed`。
+10. P1 结果身份已补充非默认 `label_weights` 的 `research_config_id` 编码（`lw_...`），避免长 horizon 加权候选与默认等权候选共用身份。
+11. 相关 P1 单测已覆盖新增标签、Top-K 边界、状态切片、daily-proxy-first 三档 gate、leaderboard 和非默认标签权重身份，`pytest tests/test_p1_tree_groups.py` 当前为 `47 passed`。
+12. P2 shareholder PIT 断点已做保守修复：`notice_date < end_date` 的源字段异常不再直接作为可用日，而是退回 `end_date + fallback_lag_days`；当前质量复跑中 `shareholder ok=True`，但只恢复极低优先级研究预算，不改变既有单因子/G3 偏弱结论。
 
 下一步的唯一 P1 主线：
 
@@ -124,7 +145,11 @@ P1 runner 当前默认使用三档 daily proxy gate：
 | --- | --- | --- |
 | `rank_fusion + regression + G0` | 旧失败基线，统一 leaderboard 口径 | 只作对照 |
 | `monthly_investable + regression + G0` | H1 当前失败样本 | 已 daily reject，不扩组 |
-| 新的最小 daily-proxy-first 机制候选 | 从上涨参与、边界或换手问题中选一个 | 只跑 `G0` |
+| `up_capture_market_relative + regression + G0` | 上涨参与不足的最小标签机制候选 | 已 daily reject，不扩组 |
+| `monthly_investable_up_capture_market_relative + regression + G0` | 月频可投资对齐叠加上涨参与标签 | 已 daily reject，不扩组 |
+| `rank_fusion long-horizon weighted + regression + G0` | 从边界反向和高换手出发，把标签权重偏向 20d | 已 daily reject，不扩组 |
+| `top_bucket_rank_fusion + regression + G0` | 从 Top-K 边界噪声出发，只保留顶部/底部 20% rank 监督 | 已 daily reject，不扩组 |
+| 新的最小 daily-proxy-first 机制候选 | 避免继续做“只改标签形状”的近邻变体；优先解释日频持有路径、换入时点、退出损失或风格暴露 | 只跑 `G0` |
 
 候选不能靠旧 proxy 入围。旧 proxy 可以输出，但只作为 `legacy_*` 字段解释用。
 
@@ -209,7 +234,7 @@ promotion 必须同时满足：
 | 家族 | 状态 | 关键问题 | 下一步 |
 | --- | --- | --- | --- |
 | `fund_flow` | 暂停新增研究预算 | 资金流最新 `2026-04-24`，日线最新 `2026-04-13`；未匹配 `73,892` 行，其中 `43,734` 行晚于日线最新日期 | 先补齐日线到 `2026-04-24`，再复跑质量报告 |
-| `shareholder` | 暂停新增研究预算 | `notice_date` 覆盖率为 `1.0`，但存在 `notice_date < end_date` | 追溯源表和 PIT 逻辑，修复前不做模型网格 |
+| `shareholder` | 保留极低优先级研究预算 | `notice_date` 覆盖率为 `1.0`；1 条 `notice_date < end_date` 已按 `end_date + fallback_lag_days` 保守处理，质量复跑 `ok=True` | 不进 P1 主线；只在 PIT/覆盖带来新机制证据时重启 |
 
 复核命令：
 
@@ -272,7 +297,7 @@ python scripts/run_newdata_quality_checks.py \
 | --- | --- | --- | --- |
 | P0 评估硬化 | 第一轮完成 | daily proxy 已能识别历史失败样本，新增状态切片、Top-K 边界和 leaderboard | 固化报告模板和字段 |
 | P1 树模型 | daily-proxy-first 主线 | H1 两个 G0 候选 daily reject；旧 proxy 决策权已废弃 | 只在 G0 上做少量机制候选 |
-| P2 新数据 | 维护 | fund flow 和 shareholder 质量 gate 未过 | 补日线、修 PIT，再复跑质量报告 |
+| P2 新数据 | 维护 | fund flow 质量 gate 未过；shareholder PIT gate 已保守修复但 alpha 证据仍弱 | fund flow 先补日线；shareholder 只保留低优先级观察 |
 | P3 Interaction Alpha | 诊断驱动 | 不再扩 weekly KDJ 或同质反转网格 | 等 daily proxy leaderboard 给机制后，每轮最多 3 个假设 |
 | P4 生产边界 | 第一轮目录整理完成 | 历史研究配置已收纳到 `configs/backtests/`，旧快照名保持兼容 | 继续固化 bundle registry、报告字段和 promotion 写回规则 |
 
@@ -285,7 +310,7 @@ python scripts/run_newdata_quality_checks.py \
 | `G0` | baseline technical | 当前唯一允许继续做 daily-proxy-first 标签/目标验证的对象 | 每轮最多 3 个候选 |
 | `G1` | `G0 + weekly_kdj_*` | light proxy 好，但正式回测没有兑现 | 只有 G0 daily proxy 达到 full backtest candidate 后再测 |
 | `G2` | `G0 + fund_flow_*` | full backtest 劣化，且 fund flow 质量未过 | 暂停 |
-| `G3` | `G0 + shareholder_*` | 无增量，且 PIT 质量未过 | 暂停 |
+| `G3` | `G0 + shareholder_*` | PIT 质量已保守修复，但既有单因子/G3 无增量 | 暂停，除非出现新的 PIT/覆盖机制证据 |
 | `G4` | `G0 + weekly_kdj_* + fund_flow_*` | 未超过 `G1`，数据质量也不足 | 暂停 |
 | `G5` | `G0 + weekly_kdj_* + weekly_kdj_interaction_*` | light proxy 未超过 `G1` | 仅保留为机制诊断 |
 | `G6` | `G0 + weekly_kdj_interaction_*` | light proxy 未超过 `G1` | 仅保留为机制诊断 |
@@ -344,6 +369,10 @@ P1 禁区：
 - `docs/p1_marketrel_state_diagnostics_2026-04-27.md`
 - `docs/p1_monthly_investable_label_smoke_2026-04-27.md`
 - `docs/p1_daily_proxy_first_2026-04-27.md`
+- `docs/p1_up_capture_market_relative_g0_smoke_2026-04-27.md`
+- `docs/p1_monthly_investable_up_capture_g0_smoke_2026-04-27.md`
+- `docs/p1_rank_fusion_long_horizon_g0_smoke_2026-04-27.md`
+- `docs/p1_top_bucket_rank_fusion_g0_smoke_2026-04-27.md`
 
 关键结论：
 
@@ -351,7 +380,11 @@ P1 禁区：
 2. `regression + rank_fusion + G0` light proxy 为正，但正式回测仍显著负超额。
 3. daily full-backtest-like proxy 在 5 个历史失败样本上全部为负，和正式 full backtest 方向一致。
 4. `monthly_investable` 和 `monthly_investable_market_relative` 的 `G0` smoke 均未通过 daily proxy gate。
-5. 旧 proxy 已降级为 legacy diagnostic，不再承担决策权。
+5. `up_capture_market_relative + regression + G0` 也未通过 daily proxy gate，且 strong up 状态仍明显为负。
+6. `monthly_investable_up_capture_market_relative + regression + G0` 未通过 daily proxy gate，strong up 和 Top-K 边界均未修复。
+7. `rank_fusion long-horizon weighted + regression + G0` 未通过 daily proxy gate，说明简单偏向 20d 的慢标签没有修复边界反向和高换手问题。
+8. `top_bucket_rank_fusion + regression + G0` 未通过 daily proxy gate，说明只把监督信号稀疏到 top/bottom bucket 仍没有修复 daily proxy、strong up 和换入换出问题。
+9. 旧 proxy 已降级为 legacy diagnostic，不再承担决策权。
 
 ### 7.3 Weekly KDJ
 
@@ -382,8 +415,9 @@ P1 禁区：
 关键结论：
 
 1. fund flow 和 shareholder 链路保留。
-2. 本轮质量 gate 均未通过，短期暂停新增研究预算。
-3. 新数据不能作为 P1 promotion 主线，先修时间对齐和 PIT 异常。
+2. fund flow 质量 gate 仍未通过，短期暂停新增研究预算。
+3. shareholder 的 `notice_date < end_date` 已按 `end_date + fallback_lag_days` 保守处理，质量复跑 `ok=True`；但既有单因子和 G3 结论仍弱，只恢复极低优先级观察预算。
+4. 新数据不能作为 P1 promotion 主线；fund flow 先修时间对齐，shareholder 等新的机制证据再重启。
 
 ---
 

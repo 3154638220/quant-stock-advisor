@@ -19,6 +19,7 @@ from src.models.xtree.p1_workflow import (
     build_investable_period_return_panel,
     build_market_state_table_from_daily,
     build_p1_monthly_investable_label,
+    build_p1_daily_proxy_first_report,
     build_p1_training_label,
     build_p1_tree_output_stem,
     build_p1_tree_research_config_id,
@@ -405,6 +406,54 @@ def test_build_p1_training_label_supports_market_relative_mode():
     assert out.groupby("trade_date")["forward_ret_fused"].mean().abs().max() == pytest.approx(0.0)
 
 
+def test_build_p1_training_label_supports_top_bucket_rank_fusion_mode():
+    panel = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-31"] * 5),
+            "symbol": ["000001", "000002", "000003", "000004", "000005"],
+            "forward_ret_5d": [-0.04, -0.02, 0.0, 0.02, 0.04],
+        }
+    )
+
+    out, target, meta = build_p1_training_label(
+        panel,
+        label_columns=["forward_ret_5d"],
+        label_weights=[1.0],
+        label_mode="top_bucket_rank_fusion",
+    )
+
+    assert target == "forward_ret_fused"
+    assert meta["label_scope"] == "cross_section_top_bottom_bucket"
+    assert meta["label_top_bucket_quantile"] == pytest.approx(0.2)
+    assert out.sort_values("symbol")["forward_ret_fused"].tolist() == pytest.approx([-1.0, 0.0, 0.0, 0.0, 1.0])
+
+
+def test_build_p1_training_label_supports_up_capture_market_relative_mode():
+    panel = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-31"] * 3 + ["2024-02-29"] * 3),
+            "symbol": ["000001", "000002", "000003"] * 2,
+            "forward_ret_5d": [0.01, 0.03, 0.05, -0.05, -0.03, -0.01],
+        }
+    )
+
+    out, target, meta = build_p1_training_label(
+        panel,
+        label_columns=["forward_ret_5d"],
+        label_weights=[1.0],
+        label_mode="up_capture_market_relative",
+    )
+
+    jan = out[out["trade_date"] == pd.Timestamp("2024-01-31")]
+    feb = out[out["trade_date"] == pd.Timestamp("2024-02-29")]
+    assert target == "forward_ret_fused"
+    assert meta["label_scope"] == "up_capture_market_relative"
+    assert meta["label_market_proxy"] == "same_date_cross_section_equal_weight"
+    assert meta["label_up_capture_multiplier"] == pytest.approx(2.0)
+    assert jan["forward_ret_fused"].tolist() == pytest.approx([-0.04, 0.0, 0.04])
+    assert feb["forward_ret_fused"].tolist() == pytest.approx([-0.02, 0.0, 0.02])
+
+
 def test_build_p1_training_label_rank_fusion_preserves_direction():
     panel = pd.DataFrame(
         {
@@ -488,6 +537,48 @@ def test_monthly_investable_market_relative_label_demeans_rebalance_cross_sectio
     )
     assert meta["label_market_proxy"] == "same_rebalance_date_cross_section_equal_weight"
     assert out.groupby("trade_date")["forward_ret_investable"].mean().abs().max() == pytest.approx(0.0)
+
+
+def test_monthly_investable_up_capture_market_relative_label_weights_up_periods():
+    dates = pd.bdate_range("2024-01-25", "2024-03-29")
+    daily_rows = []
+    panel_rows = []
+    # Jan signal to Feb signal has positive market return; Feb signal to Mar signal is negative.
+    prices = {"000001": 10.0, "000002": 10.0}
+    for d in dates:
+        if pd.Timestamp("2024-01-31") < d <= pd.Timestamp("2024-02-29"):
+            prices["000001"] *= 1.01
+        elif pd.Timestamp("2024-02-29") < d <= pd.Timestamp("2024-03-29"):
+            prices["000001"] *= 0.98
+        for sym, price in prices.items():
+            daily_rows.append(
+                {
+                    "trade_date": d,
+                    "symbol": sym,
+                    "open": price,
+                    "close": price,
+                }
+            )
+            panel_rows.append({"trade_date": d, "symbol": sym})
+
+    out, _, meta = build_p1_monthly_investable_label(
+        pd.DataFrame(panel_rows),
+        pd.DataFrame(daily_rows),
+        rebalance_rule="M",
+        label_mode="monthly_investable_up_capture_market_relative",
+    )
+
+    assert meta["label_scope"] == "monthly_investable_up_capture_market_relative"
+    assert meta["label_market_proxy"] == "same_rebalance_date_cross_section_equal_weight"
+    assert meta["label_up_capture_multiplier"] == pytest.approx(2.0)
+    jan = out[out["trade_date"] == pd.Timestamp("2024-01-31")].sort_values("symbol")
+    feb = out[out["trade_date"] == pd.Timestamp("2024-02-29")].sort_values("symbol")
+    jan_spread = jan["forward_ret_investable"].iloc[0] - jan["forward_ret_investable"].iloc[1]
+    feb_spread = feb["forward_ret_investable"].iloc[0] - feb["forward_ret_investable"].iloc[1]
+    assert jan_spread > 0
+    assert feb_spread < 0
+    assert abs(jan["forward_ret_investable"].sum()) == pytest.approx(0.0)
+    assert abs(feb["forward_ret_investable"].sum()) == pytest.approx(0.0)
 
 
 def test_build_investable_period_return_panel_requires_next_rebalance():
@@ -701,6 +792,89 @@ def test_build_daily_proxy_first_leaderboard_sorts_candidates_first():
     assert leaderboard.loc[2, "daily_proxy_first_status"] == "reject"
 
 
+def test_build_p1_daily_proxy_first_report_includes_required_sections():
+    summary = pd.DataFrame(
+        [
+            {
+                "group": "G0",
+                "daily_proxy_first_status": "reject",
+                "daily_bt_like_proxy_annualized_excess_vs_market": -0.28,
+                "daily_proxy_safety_margin_to_full_backtest": -0.31,
+                "topk_boundary_topk_minus_next_mean_return": 0.002,
+                "topk_boundary_switch_in_minus_out_mean_return": -0.009,
+                "topk_boundary_avg_turnover_half_l1": 0.78,
+            }
+        ]
+    )
+    leaderboard = build_daily_proxy_first_leaderboard(summary)
+    state = pd.DataFrame(
+        [
+            {
+                "group": "G0",
+                "state_axis": "return_state",
+                "state": "strong_up",
+                "n_months": 6,
+                "median_excess_return": -0.024,
+                "beat_rate": 0.17,
+                "strategy_mean_return": 0.01,
+                "benchmark_mean_return": 0.034,
+            }
+        ]
+    )
+    boundary = pd.DataFrame(
+        [
+            {
+                "group": "G0",
+                "period": "2026-01",
+                "topk_mean_return": 0.01,
+                "next_bucket_mean_return": 0.008,
+                "topk_minus_next_bucket_return": 0.002,
+                "switched_in_minus_out_return": -0.009,
+                "topk_turnover_half_l1": 0.78,
+            }
+        ]
+    )
+    payload = {
+        "generated_at_utc": "2026-04-27T00:00:00+00:00",
+        "research_topic": "p1_tree_groups",
+        "research_config_id": "rb_m_top20_lh_5-10-20_px_5_val20_lbl_rank_fusion_obj_regression",
+        "output_stem": "p1_report_smoke",
+        "summary_csv": "data/results/p1_report_smoke_summary.csv",
+        "daily_proxy_leaderboard_csv": "data/results/p1_report_smoke_daily_proxy_leaderboard.csv",
+        "daily_proxy_state_summary_csv": "data/results/p1_report_smoke_daily_proxy_state_summary.csv",
+        "topk_boundary_csv": "data/results/p1_report_smoke_topk_boundary.csv",
+        "bundle_manifest_csv": "data/results/p1_report_smoke_bundle_manifest.csv",
+        "label_meta": {"label_mode": "rank_fusion", "label_scope": "cross_section_relative"},
+        "xgboost_objective": "regression",
+        "config": {
+            "p1_experiment_mode": "daily_proxy_first",
+            "legacy_proxy_decision_role": "diagnostic_only",
+            "config_source": "config.yaml.backtest",
+            "top_k": 20,
+            "rebalance_rule": "M",
+            "execution_mode": "tplus1_open",
+            "daily_proxy_admission_threshold": 0.0,
+            "daily_proxy_full_backtest_threshold": 0.03,
+        },
+    }
+
+    report = build_p1_daily_proxy_first_report(
+        summary_df=summary,
+        daily_leaderboard_df=leaderboard,
+        state_summary_df=state,
+        boundary_df=boundary,
+        payload=payload,
+    )
+
+    assert "# P1 Daily Proxy First Report" in report
+    assert "config_source" in report
+    assert "daily_proxy_first" in report
+    assert "daily_proxy_leaderboard_csv" in report
+    assert "strong_up_median_excess" in report
+    assert "switch_in_minus_out" in report
+    assert "Top-K 边界样本" in report
+
+
 def test_build_group_comparison_table_flags_failed_promotion_gate():
     out = build_group_comparison_table(
         [
@@ -885,6 +1059,60 @@ def test_p1_tree_parse_args_accepts_monthly_investable_label(monkeypatch):
     assert args.label_mode == "monthly_investable"
 
 
+def test_p1_tree_parse_args_accepts_top_bucket_rank_fusion_label(monkeypatch):
+    import sys
+
+    from scripts.run_p1_tree_groups import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_p1_tree_groups.py",
+            "--label-mode",
+            "top_bucket_rank_fusion",
+        ],
+    )
+    args = parse_args()
+    assert args.label_mode == "top_bucket_rank_fusion"
+
+
+def test_p1_tree_parse_args_accepts_monthly_up_capture_label(monkeypatch):
+    import sys
+
+    from scripts.run_p1_tree_groups import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_p1_tree_groups.py",
+            "--label-mode",
+            "monthly_investable_up_capture_market_relative",
+        ],
+    )
+    args = parse_args()
+    assert args.label_mode == "monthly_investable_up_capture_market_relative"
+
+
+def test_p1_tree_parse_args_accepts_up_capture_market_relative_label(monkeypatch):
+    import sys
+
+    from scripts.run_p1_tree_groups import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_p1_tree_groups.py",
+            "--label-mode",
+            "up_capture_market_relative",
+        ],
+    )
+    args = parse_args()
+    assert args.label_mode == "up_capture_market_relative"
+
+
 def test_build_p1_tree_research_config_id_is_stable_and_readable():
     config_id = build_p1_tree_research_config_id(
         rebalance_rule="2W",
@@ -907,6 +1135,20 @@ def test_build_p1_tree_research_config_id_can_include_label_and_objective():
         xgboost_objective="regression",
     )
     assert config_id == "rb_m_top20_lh_5-10-20_px_5_val20_lbl_market_relative_obj_regression"
+
+
+def test_build_p1_tree_research_config_id_includes_non_default_label_weights():
+    config_id = build_p1_tree_research_config_id(
+        rebalance_rule="M",
+        top_k=20,
+        label_horizons=[5, 10, 20],
+        label_weights=[0.1, 0.2, 0.7],
+        proxy_horizon=5,
+        val_frac=0.2,
+        label_mode="rank_fusion",
+        xgboost_objective="regression",
+    )
+    assert config_id == "rb_m_top20_lh_5-10-20_px_5_val20_lw_10-20-70_lbl_rank_fusion_obj_regression"
 
 
 def test_build_p1_tree_output_stem_includes_tag_config_and_timestamp():

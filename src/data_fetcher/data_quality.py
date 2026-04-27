@@ -503,10 +503,11 @@ def run_shareholder_quality_checks(
     negative_notice_lag_rows = int((lag_days < 0).fillna(False).sum())
     per_end_date = dedup.groupby("end_date", dropna=True)["symbol"].nunique()
 
-    availability_date = raw["notice_date"]
-    fallback_mask = availability_date.isna()
+    availability_date = raw["notice_date"].copy()
+    invalid_notice_mask = availability_date.notna() & (availability_date < raw["end_date"])
+    fallback_mask = availability_date.isna() | invalid_notice_mask
     availability_date = availability_date.where(
-        availability_date.notna(),
+        ~fallback_mask,
         raw["end_date"] + pd.to_timedelta(int(fallback_lag_days), unit="D"),
     )
     effective_dates = availability_date.value_counts(dropna=True)
@@ -521,8 +522,7 @@ def run_shareholder_quality_checks(
         ok = False
         notes.append("notice_date 覆盖率过低，PIT 可解释性不足。")
     if negative_notice_lag_rows > 0:
-        ok = False
-        notes.append("存在 notice_date 早于 end_date 的记录。")
+        notes.append("存在 notice_date 早于 end_date 的记录，PIT 可用日已按 end_date + fallback lag 保守处理。")
     if float(per_end_date.median()) < float(min_effective_width) if not per_end_date.empty else True:
         ok = False
         notes.append("股东人数截面覆盖宽度不足。")

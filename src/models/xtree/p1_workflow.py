@@ -120,13 +120,15 @@ def build_p1_tree_research_config_id(
     rebalance_rule: str,
     top_k: int,
     label_horizons: Iterable[int],
+    label_weights: Iterable[float] | None = None,
     proxy_horizon: int,
     val_frac: float,
     label_mode: str = "",
     xgboost_objective: str = "",
 ) -> str:
     """把核心研究参数压成稳定 config id，便于结果/工件追踪。"""
-    horizons = "-".join(str(int(x)) for x in label_horizons)
+    horizon_values = [int(x) for x in label_horizons]
+    horizons = "-".join(str(x) for x in horizon_values)
     rebalance = _slugify_token(rebalance_rule or "d")
     val_pct = int(round(float(val_frac) * 100))
     parts = [
@@ -136,6 +138,15 @@ def build_p1_tree_research_config_id(
         f"px_{int(proxy_horizon)}",
         f"val{val_pct}",
     ]
+    if label_weights is not None:
+        weights = [float(x) for x in label_weights]
+        default_equal = (
+            len(weights) == len(horizon_values)
+            and len(weights) > 0
+            and all(np.isclose(w, 1.0 / len(weights), rtol=0.0, atol=1e-12) for w in weights)
+        )
+        if weights and not default_equal:
+            parts.append("lw_" + "-".join(f"{int(round(w * 100)):02d}" for w in weights))
     if label_mode:
         parts.append(f"lbl_{_slugify_token(label_mode)}")
     if xgboost_objective:
@@ -155,8 +166,12 @@ def build_p1_training_label(
     """
     构造 P1 树模型训练标签。
 
-    ``rank_fusion`` 复用既有截面 rank 融合；``raw_fusion`` 直接融合原始收益；
+    ``rank_fusion`` 复用既有截面 rank 融合；``top_bucket_rank_fusion`` 只保留
+    截面顶部/底部 20% 的 rank 信号，用于最小化测试 Top-K 边界噪声；
+    ``raw_fusion`` 直接融合原始收益；
     ``market_relative`` / ``benchmark_relative`` 先按日扣掉截面等权收益，再融合。
+    ``up_capture_market_relative`` 继续使用同日截面等权相对收益，但在市场前向收益为正的
+    截面上放大标签幅度，用于最小化测试上涨参与不足机制。
     当前 full backtest 以 ``market_ew_proxy`` 为 benchmark，因此 benchmark-relative
     在训练面板内采用同日截面等权前瞻收益作为可复现代理。
     """
@@ -178,8 +193,18 @@ def build_p1_training_label(
     w = w / np.sum(np.abs(w))
 
     mode = _slugify_token(label_mode or "rank_fusion")
-    if mode not in {"rank_fusion", "raw_fusion", "market_relative", "benchmark_relative"}:
-        raise ValueError("label_mode 须为 rank_fusion/raw_fusion/market_relative/benchmark_relative")
+    if mode not in {
+        "rank_fusion",
+        "top_bucket_rank_fusion",
+        "raw_fusion",
+        "market_relative",
+        "benchmark_relative",
+        "up_capture_market_relative",
+    }:
+        raise ValueError(
+            "label_mode 须为 rank_fusion/top_bucket_rank_fusion/raw_fusion/market_relative/"
+            "benchmark_relative/up_capture_market_relative"
+        )
 
     out = panel.copy()
     out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize()
@@ -188,10 +213,19 @@ def build_p1_training_label(
     component_cols: list[str] = []
     for col, wi in zip(label_cols, w):
         vals = pd.to_numeric(out[col], errors="coerce")
-        if mode == "rank_fusion":
-            comp = vals.groupby(out[date_col], sort=False).rank(method="average", pct=True) - 0.5
-        elif mode in {"market_relative", "benchmark_relative"}:
-            comp = vals - vals.groupby(out[date_col], sort=False).transform("mean")
+        if mode in {"rank_fusion", "top_bucket_rank_fusion"}:
+            rank_pct = vals.groupby(out[date_col], sort=False).rank(method="average", pct=True)
+            if mode == "top_bucket_rank_fusion":
+                upper = ((rank_pct - 0.8) / 0.2).clip(lower=0.0, upper=1.0)
+                lower = ((0.4 - rank_pct) / 0.2).clip(lower=0.0, upper=1.0)
+                comp = upper - lower
+            else:
+                comp = rank_pct - 0.5
+        elif mode in {"market_relative", "benchmark_relative", "up_capture_market_relative"}:
+            market_ret = vals.groupby(out[date_col], sort=False).transform("mean")
+            comp = vals - market_ret
+            if mode == "up_capture_market_relative":
+                comp = comp * np.where(market_ret.to_numpy(dtype=np.float64) > 0.0, 2.0, 1.0)
         else:
             comp = vals
         comp_np = comp.to_numpy(dtype=np.float64)
@@ -202,10 +236,22 @@ def build_p1_training_label(
     out[out_col] = np.where(valid, score, np.nan)
     meta = {
         "label_mode": mode,
-        "label_scope": "cross_section_relative" if mode == "rank_fusion" else mode,
+        "label_scope": (
+            "cross_section_top_bottom_bucket"
+            if mode == "top_bucket_rank_fusion"
+            else "cross_section_relative"
+            if mode == "rank_fusion"
+            else mode
+        ),
         "label_component_columns": ",".join(component_cols),
         "label_weights_normalized": ",".join(f"{x:.8g}" for x in w),
-        "label_market_proxy": "same_date_cross_section_equal_weight" if mode in {"market_relative", "benchmark_relative"} else "",
+        "label_top_bucket_quantile": 0.2 if mode == "top_bucket_rank_fusion" else "",
+        "label_market_proxy": (
+            "same_date_cross_section_equal_weight"
+            if mode in {"market_relative", "benchmark_relative", "up_capture_market_relative"}
+            else ""
+        ),
+        "label_up_capture_multiplier": 2.0 if mode == "up_capture_market_relative" else 1.0,
     }
     return out[np.isfinite(out[out_col])].copy(), out_col, meta
 
@@ -319,8 +365,15 @@ def build_p1_monthly_investable_label(
 ) -> tuple[pd.DataFrame, str, dict[str, Any]]:
     """构造与月频正式执行一致的 P1 标签。"""
     mode = _slugify_token(label_mode or "monthly_investable")
-    if mode not in {"monthly_investable", "monthly_investable_market_relative"}:
-        raise ValueError("monthly label_mode 须为 monthly_investable/monthly_investable_market_relative")
+    if mode not in {
+        "monthly_investable",
+        "monthly_investable_market_relative",
+        "monthly_investable_up_capture_market_relative",
+    }:
+        raise ValueError(
+            "monthly label_mode 须为 monthly_investable/monthly_investable_market_relative/"
+            "monthly_investable_up_capture_market_relative"
+        )
     out = build_investable_period_return_panel(
         panel,
         daily_df,
@@ -343,8 +396,12 @@ def build_p1_monthly_investable_label(
 
     out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize()
     vals = pd.to_numeric(out[out_col], errors="coerce")
-    if mode == "monthly_investable_market_relative":
-        out[out_col] = vals - vals.groupby(out[date_col], sort=False).transform("mean")
+    if mode in {"monthly_investable_market_relative", "monthly_investable_up_capture_market_relative"}:
+        market_ret = vals.groupby(out[date_col], sort=False).transform("mean")
+        rel = vals - market_ret
+        if mode == "monthly_investable_up_capture_market_relative":
+            rel = rel * np.where(market_ret.to_numpy(dtype=np.float64) > 0.0, 2.0, 1.0)
+        out[out_col] = rel
         market_proxy = "same_rebalance_date_cross_section_equal_weight"
     else:
         out[out_col] = vals
@@ -359,6 +416,7 @@ def build_p1_monthly_investable_label(
         "label_rebalance_rule": str(rebalance_rule),
         "label_execution_mode": str(execution_mode),
         "label_alignment": "rebalance_period_tplus1_open_to_next_rebalance",
+        "label_up_capture_multiplier": 2.0 if mode == "monthly_investable_up_capture_market_relative" else 1.0,
     }
     return out, out_col, meta
 
@@ -1751,3 +1809,239 @@ def build_daily_proxy_first_leaderboard(summary_df: pd.DataFrame) -> pd.DataFram
         out["_daily_sort"] = np.nan
     out = out.sort_values(["_status_order", "_daily_sort", "group"], ascending=[True, False, True], kind="mergesort")
     return out.drop(columns=["_status_order", "_daily_sort"]).reset_index(drop=True)
+
+
+def _format_report_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if bool(value) else "false"
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(val):
+        return ""
+    return f"{val:.4g}"
+
+
+def _format_report_pct(value: Any) -> str:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(val):
+        return ""
+    return f"{val:.2%}"
+
+
+def _markdown_escape(value: Any) -> str:
+    text = _format_report_value(value)
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _markdown_table(df: pd.DataFrame, *, columns: list[str], max_rows: int = 12) -> str:
+    cols = [c for c in columns if c in df.columns]
+    if df.empty or not cols:
+        return "_无可用数据_"
+    view = df.loc[:, cols].head(max_rows).copy()
+    header = "| " + " | ".join(cols) + " |"
+    sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+    rows = [
+        "| " + " | ".join(_markdown_escape(row[col]) for col in cols) + " |"
+        for _, row in view.iterrows()
+    ]
+    return "\n".join([header, sep, *rows])
+
+
+def build_p1_daily_proxy_first_report(
+    *,
+    summary_df: pd.DataFrame,
+    daily_leaderboard_df: pd.DataFrame,
+    state_summary_df: pd.DataFrame,
+    boundary_df: pd.DataFrame,
+    payload: dict[str, Any],
+) -> str:
+    """生成 P1 daily-proxy-first 固定一页报告。"""
+    cfg = payload.get("config", {}) or {}
+    output_stem = str(payload.get("output_stem", ""))
+    research_config_id = str(payload.get("research_config_id", ""))
+    generated_at = str(payload.get("generated_at_utc", ""))
+    label_meta = payload.get("label_meta", {}) or {}
+
+    if daily_leaderboard_df.empty:
+        headline = "无 daily proxy leaderboard，不能判读。"
+    else:
+        status_counts = daily_leaderboard_df.get("daily_proxy_first_status", pd.Series(dtype=object)).value_counts()
+        candidate_count = int(status_counts.get("full_backtest_candidate", 0))
+        gray_count = int(status_counts.get("gray_zone", 0))
+        reject_count = int(status_counts.get("reject", 0))
+        best = daily_leaderboard_df.iloc[0]
+        headline = (
+            f"本轮 full_backtest_candidate={candidate_count}，gray_zone={gray_count}，reject={reject_count}。"
+            f"当前第一名 {best.get('group', '')} 的 daily proxy 超额为 "
+            f"{_format_report_pct(best.get('daily_bt_like_proxy_annualized_excess_vs_market'))}，"
+            f"状态为 {best.get('daily_proxy_first_status', '')}。"
+        )
+
+    mechanism_rows: list[dict[str, Any]] = []
+    if not summary_df.empty:
+        for _, row in summary_df.iterrows():
+            daily_excess = row.get("daily_bt_like_proxy_annualized_excess_vs_market")
+            strong_up = np.nan
+            strong_down = np.nan
+            if not state_summary_df.empty and "group" in state_summary_df.columns:
+                state_rows = state_summary_df[
+                    (state_summary_df["group"] == row.get("group"))
+                    & (state_summary_df.get("state_axis") == "return_state")
+                ]
+                up = state_rows[state_rows.get("state") == "strong_up"]
+                down = state_rows[state_rows.get("state") == "strong_down"]
+                if not up.empty:
+                    strong_up = up["median_excess_return"].iloc[0]
+                if not down.empty:
+                    strong_down = down["median_excess_return"].iloc[0]
+            mechanism_rows.append(
+                {
+                    "group": row.get("group", ""),
+                    "daily_status": row.get("daily_proxy_first_status", ""),
+                    "daily_excess": _format_report_pct(daily_excess),
+                    "strong_up_median_excess": _format_report_pct(strong_up),
+                    "strong_down_median_excess": _format_report_pct(strong_down),
+                    "topk_minus_next": _format_report_pct(row.get("topk_boundary_topk_minus_next_mean_return")),
+                    "switch_in_minus_out": _format_report_pct(row.get("topk_boundary_switch_in_minus_out_mean_return")),
+                    "avg_turnover": _format_report_pct(row.get("topk_boundary_avg_turnover_half_l1")),
+                }
+            )
+    mechanism_df = pd.DataFrame(mechanism_rows)
+
+    if mechanism_df.empty:
+        mechanism_takeaway = "机制诊断缺失，下一步先补齐状态切片和 Top-K 边界输出。"
+    else:
+        bad_switch = mechanism_df["switch_in_minus_out"].astype(str).str.startswith("-").any()
+        bad_up = mechanism_df["strong_up_median_excess"].astype(str).str.startswith("-").any()
+        if bad_switch and bad_up:
+            mechanism_takeaway = "主要风险仍集中在 strong up 捕获不足和换入质量偏弱，暂不适合扩到 G1/G2/G3/G4。"
+        elif bad_switch:
+            mechanism_takeaway = "Top-K 边界的换入收益仍弱于换出，下一轮应优先解释换入时点或退出损失。"
+        elif bad_up:
+            mechanism_takeaway = "strong up 状态仍未修复，下一轮应优先解释上涨月持有路径。"
+        else:
+            mechanism_takeaway = "状态切片和边界没有明显反向，若 daily proxy 达到阈值才考虑正式 full backtest。"
+
+    leaderboard_md = _markdown_table(
+        daily_leaderboard_df,
+        columns=[
+            "group",
+            "daily_proxy_first_status",
+            "daily_bt_like_proxy_annualized_excess_vs_market",
+            "daily_proxy_safety_margin_to_full_backtest",
+            "topk_boundary_topk_minus_next_mean_return",
+            "topk_boundary_switch_in_minus_out_mean_return",
+            "daily_bt_like_proxy_avg_turnover_half_l1",
+            "full_backtest_skipped_reason",
+        ],
+    )
+    mechanism_md = _markdown_table(
+        mechanism_df,
+        columns=[
+            "group",
+            "daily_status",
+            "daily_excess",
+            "strong_up_median_excess",
+            "strong_down_median_excess",
+            "topk_minus_next",
+            "switch_in_minus_out",
+            "avg_turnover",
+        ],
+    )
+    state_md = _markdown_table(
+        state_summary_df,
+        columns=[
+            "group",
+            "state_axis",
+            "state",
+            "n_months",
+            "median_excess_return",
+            "beat_rate",
+            "strategy_mean_return",
+            "benchmark_mean_return",
+        ],
+        max_rows=18,
+    )
+    boundary_md = _markdown_table(
+        boundary_df,
+        columns=[
+            "group",
+            "period",
+            "topk_mean_return",
+            "next_bucket_mean_return",
+            "topk_minus_next_bucket_return",
+            "switched_in_minus_out_return",
+            "topk_turnover_half_l1",
+        ],
+        max_rows=18,
+    )
+
+    paths = [
+        ("summary_csv", payload.get("summary_csv", "")),
+        ("daily_proxy_leaderboard_csv", payload.get("daily_proxy_leaderboard_csv", "")),
+        ("daily_proxy_state_summary_csv", payload.get("daily_proxy_state_summary_csv", "")),
+        ("topk_boundary_csv", payload.get("topk_boundary_csv", "")),
+        ("bundle_manifest_csv", payload.get("bundle_manifest_csv", "")),
+    ]
+    path_lines = "\n".join(f"- `{name}`: `{path}`" for name, path in paths)
+
+    return f"""# P1 Daily Proxy First Report
+
+生成时间：`{generated_at}`
+研究身份：`{research_config_id}`
+输出 stem：`{output_stem}`
+
+## 结论
+
+{headline}
+
+{mechanism_takeaway}
+
+## 身份和口径
+
+| 字段 | 值 |
+| --- | --- |
+| research_topic | `{payload.get("research_topic", "")}` |
+| research_config_id | `{research_config_id}` |
+| output_stem | `{output_stem}` |
+| result_type | `daily_bt_like_proxy` |
+| config_source | `{cfg.get("config_source", "")}` |
+| p1_experiment_mode | `{cfg.get("p1_experiment_mode", "")}` |
+| legacy_proxy_decision_role | `{cfg.get("legacy_proxy_decision_role", "")}` |
+| label_mode | `{label_meta.get("label_mode", "")}` |
+| label_scope | `{label_meta.get("label_scope", "")}` |
+| xgboost_objective | `{payload.get("xgboost_objective", "")}` |
+| benchmark_symbol | `market_ew_proxy` |
+| top_k | `{cfg.get("top_k", "")}` |
+| rebalance_rule | `{cfg.get("rebalance_rule", "")}` |
+| execution_mode | `{cfg.get("execution_mode", "")}` |
+| daily_proxy_admission_threshold | `{_format_report_pct(cfg.get("daily_proxy_admission_threshold"))}` |
+| daily_proxy_full_backtest_threshold | `{_format_report_pct(cfg.get("daily_proxy_full_backtest_threshold"))}` |
+
+## Daily Proxy Leaderboard
+
+{leaderboard_md}
+
+## 机制诊断
+
+{mechanism_md}
+
+## 状态切片
+
+{state_md}
+
+## Top-K 边界样本
+
+{boundary_md}
+
+## 文件
+
+{path_lines}
+"""
