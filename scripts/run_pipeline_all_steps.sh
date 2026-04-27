@@ -37,12 +37,12 @@ if [[ -f "$FETCH_LOG" ]] && grep -q "基本面更新完成" "$FETCH_LOG" 2>/dev/
   tail -3 "$FETCH_LOG" || true
 fi
 
-echo "=== Step1: Top-K 网格 (M, max_turnover=0.3) ==="
+echo "=== Step1: Top-K 网格 (M, max_turnover=1.0) ==="
 python scripts/run_backtest_eval.py --config config.yaml.backtest \
   --rebalance-rule M \
   --grid-search \
   --grid-topk-values 10,20,30,40,50 \
-  --grid-max-turnover-values 0.3 \
+  --grid-max-turnover-values 1.0 \
   --grid-rebalance-rules M \
   --grid-search-out data/results/topk_grid_M_pipeline.csv \
   --json-report data/results/topk_grid_M_pipeline_main.json

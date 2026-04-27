@@ -45,8 +45,8 @@ portfolio:
   # 回测可切换：equal_weight / risk_parity / min_variance / mean_variance
   # P0-D：252 日协方差窗口；若风险平价仍不优于等权，默认改回 equal_weight
   weight_method: equal_weight
-  # P2-C：目标将月度半 L1 换手压降至约 30%
-  max_turnover: 0.3
+  # 月末调仓默认不限制半 L1 换手；1.0 表示允许全买全卖
+  max_turnover: 1.0
   # P2-B：行业持仓只数上限（仅 industry_map 可用时启用，缺失则静默降级）
   industry_cap_count: 5
   cov_lookback_days: 252

@@ -5,7 +5,7 @@ A 股量化回测评估脚本（改进版）
 改进点（对应 docs/backtest_report.md）：
 1) 因子方向纠偏：从 config.yaml 读取 composite_extended 权重，支持反转方向。
 2) 预过滤：限制近 5 日涨跌停次数、极端换手、绝对高位。
-3) 低换手约束：通过持仓重叠率约束等权 Top-K 的半 L1 换手。
+3) 可选换手约束：通过持仓重叠率约束等权 Top-K 的半 L1 换手；默认允许全买全卖。
 4) 回测执行：统一 close_to_close 口径，输出无成本/含成本对比。
 5) 样本外验证：滚动窗口 + 时间切片 Walk-Forward。
 6) 默认排序键约定：生产与评估默认使用 composite_extended。
@@ -120,7 +120,7 @@ DEFAULT_CONFIG: dict = {
         "price_position_high_pct": 0.90,
     },
     "portfolio": {
-        "max_turnover": 0.3,
+        "max_turnover": 1.0,
         "industry_cap_count": 5,
     },
     "backtest": {
@@ -1843,7 +1843,7 @@ def parse_args() -> argparse.Namespace:
         help="网格搜索结果输出 CSV",
     )
     p.add_argument("--grid-topk-values", default="10,20,30,40", help="网格 top_k 列表")
-    p.add_argument("--grid-max-turnover-values", default="0.3,0.4,0.5", help="网格 max_turnover 列表")
+    p.add_argument("--grid-max-turnover-values", default="1.0", help="网格 max_turnover 列表")
     p.add_argument("--grid-rebalance-rules", default="M,2M,3M", help="网格调仓规则列表")
     p.add_argument("--wf-train-window", type=int, default=252, help="滚动 WF 训练窗交易日")
     p.add_argument("--wf-test-window", type=int, default=63, help="滚动 WF 测试窗交易日")

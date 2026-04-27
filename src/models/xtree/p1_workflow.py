@@ -1,4 +1,4 @@
-"""P1 树模型研究编排：特征分组、面板增强与轻量代理汇总。"""
+"""P1 树模型研究编排：特征分组、面板增强与 daily-proxy-first 汇总。"""
 
 from __future__ import annotations
 
@@ -208,6 +208,159 @@ def build_p1_training_label(
         "label_market_proxy": "same_date_cross_section_equal_weight" if mode in {"market_relative", "benchmark_relative"} else "",
     }
     return out[np.isfinite(out[out_col])].copy(), out_col, meta
+
+
+def _daily_asset_return_matrix(
+    daily_df: pd.DataFrame,
+    *,
+    execution_mode: str = "tplus1_open",
+    symbol_col: str = "symbol",
+    date_col: str = "trade_date",
+) -> pd.DataFrame:
+    """构造与正式执行模式一致的单资产日收益矩阵。"""
+    if daily_df.empty:
+        return pd.DataFrame()
+    daily = daily_df.copy()
+    daily[symbol_col] = daily[symbol_col].astype(str).str.zfill(6)
+    daily[date_col] = pd.to_datetime(daily[date_col], errors="coerce").dt.normalize()
+    exe = str(execution_mode).lower().strip()
+    if exe == "tplus1_open":
+        out = build_open_to_open_returns(
+            daily,
+            date_col=date_col,
+            sym_col=symbol_col,
+            zero_if_limit_up_open=False,
+        )
+    elif exe == "close_to_close":
+        d = daily[
+            [symbol_col, date_col, "close"]
+        ].copy()
+        d["close"] = pd.to_numeric(d["close"], errors="coerce")
+        d = d.dropna(subset=[date_col, "close"]).sort_values([symbol_col, date_col])
+        d["_ret"] = d.groupby(symbol_col, sort=False)["close"].pct_change()
+        out = d.pivot(index=date_col, columns=symbol_col, values="_ret").sort_index()
+    else:
+        raise ValueError(f"monthly_investable 标签当前仅支持 tplus1_open/close_to_close，收到: {execution_mode}")
+    out.index = pd.to_datetime(out.index, errors="coerce").normalize()
+    return out.sort_index().astype(np.float64)
+
+
+def build_investable_period_return_panel(
+    panel: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    *,
+    rebalance_rule: str,
+    execution_mode: str = "tplus1_open",
+    out_col: str = "forward_ret_investable",
+    date_col: str = "trade_date",
+    symbol_col: str = "symbol",
+) -> pd.DataFrame:
+    """
+    为每个调仓日构造真实可投资持有期收益。
+
+    信号日为每个 rebalance period 的最后一个交易日；收益从下一交易日开盘买入后开始，
+    一直持有到下一次调仓信号生效前的最后一个 open-to-open 区间。这个窗口与
+    ``run_backtest(..., execution_mode='tplus1_open')`` 对月频权重的使用方式一致。
+    """
+    required = {date_col, symbol_col}
+    missing = sorted(required - set(panel.columns))
+    if missing:
+        raise ValueError(f"panel 缺少列: {missing}")
+    if out_col in panel.columns:
+        panel = panel.drop(columns=[out_col])
+
+    df = panel.copy()
+    df[symbol_col] = df[symbol_col].astype(str).str.zfill(6)
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+    df = df.dropna(subset=[date_col]).copy()
+    if df.empty:
+        return pd.DataFrame(columns=[*panel.columns, out_col])
+
+    chosen = select_rebalance_dates(df[date_col].unique(), rebalance_rule=rebalance_rule)
+    if len(chosen) < 2:
+        return pd.DataFrame(columns=[*df.columns, out_col])
+    asset_returns = _daily_asset_return_matrix(
+        daily_df,
+        execution_mode=execution_mode,
+        symbol_col=symbol_col,
+        date_col=date_col,
+    )
+    if asset_returns.empty:
+        return pd.DataFrame(columns=[*df.columns, out_col])
+
+    rows: list[pd.DataFrame] = []
+    signal_dates = pd.to_datetime(chosen["trade_date"], errors="coerce").dt.normalize().tolist()
+    for signal_date, next_signal_date in zip(signal_dates[:-1], signal_dates[1:]):
+        if pd.isna(signal_date) or pd.isna(next_signal_date) or next_signal_date <= signal_date:
+            continue
+        window = asset_returns[(asset_returns.index > signal_date) & (asset_returns.index <= next_signal_date)]
+        if window.empty:
+            continue
+        period_ret = (1.0 + window.fillna(0.0)).prod(axis=0) - 1.0
+        period_df = period_ret.rename(out_col).reset_index().rename(columns={"index": symbol_col})
+        period_df[symbol_col] = period_df[symbol_col].astype(str).str.zfill(6)
+        day = df[df[date_col] == signal_date].merge(period_df, on=symbol_col, how="inner")
+        day = day[np.isfinite(pd.to_numeric(day[out_col], errors="coerce"))].copy()
+        if not day.empty:
+            rows.append(day)
+
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=[*df.columns, out_col])
+
+
+def build_p1_monthly_investable_label(
+    panel: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    *,
+    rebalance_rule: str,
+    execution_mode: str = "tplus1_open",
+    label_mode: str = "monthly_investable",
+    date_col: str = "trade_date",
+    out_col: str = "forward_ret_investable",
+) -> tuple[pd.DataFrame, str, dict[str, Any]]:
+    """构造与月频正式执行一致的 P1 标签。"""
+    mode = _slugify_token(label_mode or "monthly_investable")
+    if mode not in {"monthly_investable", "monthly_investable_market_relative"}:
+        raise ValueError("monthly label_mode 须为 monthly_investable/monthly_investable_market_relative")
+    out = build_investable_period_return_panel(
+        panel,
+        daily_df,
+        rebalance_rule=rebalance_rule,
+        execution_mode=execution_mode,
+        out_col=out_col,
+        date_col=date_col,
+    )
+    if out.empty:
+        meta = {
+            "label_mode": mode,
+            "label_scope": mode,
+            "label_component_columns": out_col,
+            "label_weights_normalized": "1",
+            "label_market_proxy": "",
+            "label_rebalance_rule": str(rebalance_rule),
+            "label_execution_mode": str(execution_mode),
+        }
+        return out, out_col, meta
+
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize()
+    vals = pd.to_numeric(out[out_col], errors="coerce")
+    if mode == "monthly_investable_market_relative":
+        out[out_col] = vals - vals.groupby(out[date_col], sort=False).transform("mean")
+        market_proxy = "same_rebalance_date_cross_section_equal_weight"
+    else:
+        out[out_col] = vals
+        market_proxy = ""
+    out = out[np.isfinite(pd.to_numeric(out[out_col], errors="coerce"))].copy()
+    meta = {
+        "label_mode": mode,
+        "label_scope": mode,
+        "label_component_columns": out_col,
+        "label_weights_normalized": "1",
+        "label_market_proxy": market_proxy,
+        "label_rebalance_rule": str(rebalance_rule),
+        "label_execution_mode": str(execution_mode),
+        "label_alignment": "rebalance_period_tplus1_open_to_next_rebalance",
+    }
+    return out, out_col, meta
 
 
 def build_p1_tree_output_stem(
@@ -868,6 +1021,299 @@ def summarize_tree_daily_backtest_like_proxy(
     return summary
 
 
+def build_tree_topk_boundary_diagnostic(
+    scored_panel: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    *,
+    score_col: str,
+    rebalance_rule: str,
+    top_k: int,
+    execution_mode: str = "tplus1_open",
+    scenario: str,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """
+    诊断 Top-K 边界机会损失和持仓切换质量。
+
+    对每个真实调仓日按树模型分数排序，比较 Top-K 与下一档 Top-K 的可投资持有期收益，
+    并记录换入、换出、上期 Top-K 掉入 21-40 桶等边界稳定性指标。
+    """
+    if top_k < 1:
+        raise ValueError("top_k 须 >= 1")
+    required = {"symbol", "trade_date", score_col}
+    missing = sorted(required - set(scored_panel.columns))
+    if missing:
+        raise ValueError(f"scored_panel 缺少列: {missing}")
+
+    base = scored_panel[["symbol", "trade_date", score_col]].copy()
+    base["symbol"] = base["symbol"].astype(str).str.zfill(6)
+    base["trade_date"] = pd.to_datetime(base["trade_date"], errors="coerce").dt.normalize()
+    base[score_col] = pd.to_numeric(base[score_col], errors="coerce")
+    base = base.dropna(subset=["trade_date", score_col]).copy()
+    ret_panel = build_investable_period_return_panel(
+        base,
+        daily_df,
+        rebalance_rule=rebalance_rule,
+        execution_mode=execution_mode,
+        out_col="investable_period_return",
+    )
+    out_cols = [
+        "scenario",
+        "period",
+        "trade_date",
+        "topk_mean_return",
+        "next_bucket_mean_return",
+        "topk_minus_next_bucket_return",
+        "topk_median_return",
+        "next_bucket_median_return",
+        "topk_positive_share",
+        "next_bucket_positive_share",
+        "selected_count",
+        "next_bucket_count",
+        "topk_turnover_half_l1",
+        "retained_from_prev_count",
+        "switched_in_mean_return",
+        "switched_out_mean_return",
+        "switched_in_minus_out_return",
+        "prev_topk_now_next_bucket_mean_return",
+    ]
+    if ret_panel.empty:
+        return pd.DataFrame(columns=out_cols), {}
+
+    chosen = select_rebalance_dates(ret_panel["trade_date"].unique(), rebalance_rule=rebalance_rule)
+    period_map = {
+        pd.Timestamp(r.trade_date).normalize(): str(r.period)
+        for r in chosen.itertuples(index=False)
+    }
+    rows: list[dict[str, Any]] = []
+    prev_topk: set[str] = set()
+
+    def _mean_for(day_df: pd.DataFrame, symbols: set[str]) -> float:
+        if not symbols:
+            return float("nan")
+        vals = pd.to_numeric(
+            day_df.loc[day_df["symbol"].astype(str).isin(symbols), "investable_period_return"],
+            errors="coerce",
+        )
+        return float(vals.mean()) if vals.notna().any() else float("nan")
+
+    for trade_date, day in ret_panel.groupby("trade_date", sort=True):
+        day = day.sort_values(score_col, ascending=False).drop_duplicates(subset=["symbol"], keep="first").copy()
+        if day.empty:
+            continue
+        top = day.head(top_k).copy()
+        nxt = day.iloc[top_k : top_k * 2].copy()
+        top_syms = set(top["symbol"].astype(str))
+        next_syms = set(nxt["symbol"].astype(str))
+        switched_in = top_syms - prev_topk
+        switched_out = prev_topk - top_syms
+        prev_now_next = prev_topk & next_syms
+        top_ret = pd.to_numeric(top["investable_period_return"], errors="coerce")
+        next_ret = pd.to_numeric(nxt["investable_period_return"], errors="coerce")
+        switched_in_ret = _mean_for(day, switched_in)
+        switched_out_ret = _mean_for(day, switched_out)
+        rows.append(
+            {
+                "scenario": scenario,
+                "period": period_map.get(pd.Timestamp(trade_date).normalize(), str(pd.Timestamp(trade_date).date())),
+                "trade_date": pd.Timestamp(trade_date),
+                "topk_mean_return": float(top_ret.mean()) if top_ret.notna().any() else float("nan"),
+                "next_bucket_mean_return": float(next_ret.mean()) if next_ret.notna().any() else float("nan"),
+                "topk_minus_next_bucket_return": (
+                    float(top_ret.mean() - next_ret.mean()) if top_ret.notna().any() and next_ret.notna().any()
+                    else float("nan")
+                ),
+                "topk_median_return": float(top_ret.median()) if top_ret.notna().any() else float("nan"),
+                "next_bucket_median_return": float(next_ret.median()) if next_ret.notna().any() else float("nan"),
+                "topk_positive_share": float((top_ret > 0.0).mean()) if len(top_ret) else float("nan"),
+                "next_bucket_positive_share": float((next_ret > 0.0).mean()) if len(next_ret) else float("nan"),
+                "selected_count": int(len(top_syms)),
+                "next_bucket_count": int(len(next_syms)),
+                "topk_turnover_half_l1": _equal_weight_turnover(prev_topk, top_syms, top_k=top_k),
+                "retained_from_prev_count": int(len(prev_topk & top_syms)),
+                "switched_in_mean_return": switched_in_ret,
+                "switched_out_mean_return": switched_out_ret,
+                "switched_in_minus_out_return": (
+                    switched_in_ret - switched_out_ret
+                    if np.isfinite(switched_in_ret) and np.isfinite(switched_out_ret)
+                    else float("nan")
+                ),
+                "prev_topk_now_next_bucket_mean_return": _mean_for(day, prev_now_next),
+            }
+        )
+        prev_topk = top_syms
+
+    detail = pd.DataFrame(rows, columns=out_cols)
+    if detail.empty:
+        return detail, {}
+    summary = {
+        "topk_boundary_topk_mean_return": float(pd.to_numeric(detail["topk_mean_return"], errors="coerce").mean()),
+        "topk_boundary_next_bucket_mean_return": float(
+            pd.to_numeric(detail["next_bucket_mean_return"], errors="coerce").mean()
+        ),
+        "topk_boundary_topk_minus_next_mean_return": float(
+            pd.to_numeric(detail["topk_minus_next_bucket_return"], errors="coerce").mean()
+        ),
+        "topk_boundary_switch_in_minus_out_mean_return": float(
+            pd.to_numeric(detail["switched_in_minus_out_return"], errors="coerce").mean()
+        ),
+        "topk_boundary_prev_topk_now_next_bucket_mean_return": float(
+            pd.to_numeric(detail["prev_topk_now_next_bucket_mean_return"], errors="coerce").mean()
+        ),
+        "topk_boundary_avg_turnover_half_l1": float(
+            pd.to_numeric(detail["topk_turnover_half_l1"], errors="coerce").mean()
+        ),
+        "topk_boundary_periods": int(len(detail)),
+    }
+    return detail, summary
+
+
+def _tercile_state(values: pd.Series, *, low_label: str, mid_label: str, high_label: str) -> pd.Series:
+    vals = pd.to_numeric(values, errors="coerce")
+    out = pd.Series(mid_label, index=values.index, dtype=object)
+    finite = vals.dropna()
+    if len(finite) < 3:
+        out.loc[vals.notna()] = mid_label
+        return out
+    lo = float(finite.quantile(1.0 / 3.0))
+    hi = float(finite.quantile(2.0 / 3.0))
+    out.loc[vals <= lo] = low_label
+    out.loc[vals >= hi] = high_label
+    return out
+
+
+def build_market_state_table_from_daily(
+    daily_df: pd.DataFrame,
+    *,
+    execution_mode: str = "tplus1_open",
+) -> pd.DataFrame:
+    """按月构造强上涨、强下跌、波动和广度状态。"""
+    asset_returns = _daily_asset_return_matrix(daily_df, execution_mode=execution_mode)
+    if asset_returns.empty:
+        return pd.DataFrame()
+    market = asset_returns.mean(axis=1, skipna=True)
+    breadth = (asset_returns > 0.0).mean(axis=1)
+    daily = pd.DataFrame(
+        {
+            "market_return": market,
+            "breadth_positive_share": breadth,
+        }
+    ).dropna(subset=["market_return"])
+    if daily.empty:
+        return pd.DataFrame()
+    monthly = daily.resample("ME").agg(
+        benchmark_return=("market_return", lambda s: float((1.0 + s).prod() - 1.0)),
+        benchmark_daily_vol=("market_return", lambda s: float(pd.to_numeric(s, errors="coerce").std() * np.sqrt(252.0))),
+        breadth_positive_share=("breadth_positive_share", "mean"),
+        n_trade_days=("market_return", "count"),
+    )
+    monthly = monthly.reset_index()
+    monthly = monthly.rename(columns={monthly.columns[0]: "month_end"})
+    monthly["year"] = monthly["month_end"].dt.year
+    monthly["month"] = monthly["month_end"].dt.month
+    monthly["return_state"] = _tercile_state(
+        monthly["benchmark_return"],
+        low_label="strong_down",
+        mid_label="neutral_return",
+        high_label="strong_up",
+    )
+    monthly["vol_state"] = _tercile_state(
+        monthly["benchmark_daily_vol"],
+        low_label="low_vol",
+        mid_label="mid_vol",
+        high_label="high_vol",
+    )
+    monthly["breadth_state"] = _tercile_state(
+        monthly["breadth_positive_share"],
+        low_label="narrow_breadth",
+        mid_label="mid_breadth",
+        high_label="wide_breadth",
+    )
+    return monthly
+
+
+def summarize_tree_daily_proxy_state_slices(
+    detail_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    *,
+    execution_mode: str = "tplus1_open",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """把 daily backtest-like proxy 汇总到市场状态切片。"""
+    if detail_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    required = {"trade_date", "strategy_return", "benchmark_return", "group", "proxy_variant"}
+    missing = sorted(required - set(detail_df.columns))
+    if missing:
+        raise ValueError(f"detail_df 缺少列: {missing}")
+    d = detail_df[detail_df["proxy_variant"] == "daily_backtest_like"].copy()
+    if d.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    d["trade_date"] = pd.to_datetime(d["trade_date"], errors="coerce").dt.normalize()
+    d["month_end"] = d["trade_date"].dt.to_period("M").dt.to_timestamp("M")
+    d["strategy_return"] = pd.to_numeric(d["strategy_return"], errors="coerce")
+    d["benchmark_return"] = pd.to_numeric(d["benchmark_return"], errors="coerce")
+    monthly_rows: list[dict[str, Any]] = []
+    for (group, month_end), sub in d.groupby(["group", "month_end"], sort=True):
+        strat = pd.to_numeric(sub["strategy_return"], errors="coerce").dropna()
+        bench = pd.to_numeric(sub["benchmark_return"], errors="coerce").dropna()
+        if strat.empty or bench.empty:
+            continue
+        strategy_return = float((1.0 + strat).prod() - 1.0)
+        benchmark_return = float((1.0 + bench).prod() - 1.0)
+        monthly_rows.append(
+            {
+                "group": group,
+                "month_end": pd.Timestamp(month_end),
+                "year": int(pd.Timestamp(month_end).year),
+                "month": int(pd.Timestamp(month_end).month),
+                "strategy_return": strategy_return,
+                "benchmark_return": benchmark_return,
+                "excess_return": strategy_return - benchmark_return,
+                "beat_benchmark": strategy_return > benchmark_return,
+                "n_trade_days": int(len(sub)),
+            }
+        )
+    monthly = pd.DataFrame(monthly_rows)
+    if monthly.empty:
+        return monthly, pd.DataFrame()
+    state = build_market_state_table_from_daily(daily_df, execution_mode=execution_mode)
+    if not state.empty:
+        monthly = monthly.merge(
+            state[
+                [
+                    "month_end",
+                    "return_state",
+                    "vol_state",
+                    "breadth_state",
+                    "benchmark_daily_vol",
+                    "breadth_positive_share",
+                ]
+            ],
+            on="month_end",
+            how="left",
+        )
+
+    rows: list[dict[str, Any]] = []
+    for state_axis in ("return_state", "vol_state", "breadth_state"):
+        if state_axis not in monthly.columns:
+            continue
+        for (group, state_value), part in monthly.groupby(["group", state_axis], sort=True):
+            vals = pd.to_numeric(part["excess_return"], errors="coerce")
+            rows.append(
+                {
+                    "group": group,
+                    "state_axis": state_axis,
+                    "state": state_value,
+                    "n_months": int(len(part)),
+                    "mean_excess_return": float(vals.mean()) if vals.notna().any() else float("nan"),
+                    "median_excess_return": float(vals.median()) if vals.notna().any() else float("nan"),
+                    "beat_rate": float(pd.to_numeric(part["beat_benchmark"], errors="coerce").mean()),
+                    "strategy_mean_return": float(pd.to_numeric(part["strategy_return"], errors="coerce").mean()),
+                    "benchmark_mean_return": float(pd.to_numeric(part["benchmark_return"], errors="coerce").mean()),
+                }
+            )
+    return monthly, pd.DataFrame(rows)
+
+
 def summarize_tree_group_result(
     detail_df: pd.DataFrame,
     *,
@@ -963,6 +1409,74 @@ def summarize_p1_full_backtest_payload(
 def _non_degrade(series: pd.Series) -> pd.Series:
     vals = pd.to_numeric(series, errors="coerce")
     return vals.notna() & (vals >= 0.0)
+
+
+def classify_daily_proxy_first_decision(
+    daily_proxy_excess: Any,
+    *,
+    admission_threshold: float = 0.0,
+    full_backtest_threshold: float | None = None,
+) -> dict[str, Any]:
+    """
+    P1 daily-proxy-first 的统一判读。
+
+    ``admission_threshold`` 是硬停止线；低于它时不补正式回测。``full_backtest_threshold``
+    是给正式回测留出的安全边际；介于两者之间的候选进入灰区，只归档诊断。
+    """
+    full_threshold = float(admission_threshold if full_backtest_threshold is None else full_backtest_threshold)
+    admission = float(admission_threshold)
+    full_threshold = max(full_threshold, admission)
+    try:
+        val = float(daily_proxy_excess)
+    except (TypeError, ValueError):
+        val = float("nan")
+
+    if not np.isfinite(val):
+        return {
+            "daily_proxy_first_status": "no_daily_proxy",
+            "daily_proxy_first_reason": "daily proxy 缺失或非有限值",
+            "pass_p1_daily_proxy_admission_gate": False,
+            "pass_p1_daily_proxy_full_backtest_gate": False,
+            "daily_proxy_safety_margin_to_admission": float("nan"),
+            "daily_proxy_safety_margin_to_full_backtest": float("nan"),
+        }
+    admission_margin = val - admission
+    full_margin = val - full_threshold
+    if val < admission:
+        return {
+            "daily_proxy_first_status": "reject",
+            "daily_proxy_first_reason": (
+                f"daily proxy {val:.6g} < admission threshold {admission:.6g}; "
+                "停止，不补正式 full backtest"
+            ),
+            "pass_p1_daily_proxy_admission_gate": False,
+            "pass_p1_daily_proxy_full_backtest_gate": False,
+            "daily_proxy_safety_margin_to_admission": float(admission_margin),
+            "daily_proxy_safety_margin_to_full_backtest": float(full_margin),
+        }
+    if val < full_threshold:
+        return {
+            "daily_proxy_first_status": "gray_zone",
+            "daily_proxy_first_reason": (
+                f"daily proxy {val:.6g} >= admission threshold {admission:.6g}, "
+                f"但 < full backtest threshold {full_threshold:.6g}; 只归档诊断"
+            ),
+            "pass_p1_daily_proxy_admission_gate": True,
+            "pass_p1_daily_proxy_full_backtest_gate": False,
+            "daily_proxy_safety_margin_to_admission": float(admission_margin),
+            "daily_proxy_safety_margin_to_full_backtest": float(full_margin),
+        }
+    return {
+        "daily_proxy_first_status": "full_backtest_candidate",
+        "daily_proxy_first_reason": (
+            f"daily proxy {val:.6g} >= full backtest threshold {full_threshold:.6g}; "
+            "允许补正式 full backtest"
+        ),
+        "pass_p1_daily_proxy_admission_gate": True,
+        "pass_p1_daily_proxy_full_backtest_gate": True,
+        "daily_proxy_safety_margin_to_admission": float(admission_margin),
+        "daily_proxy_safety_margin_to_full_backtest": float(full_margin),
+    }
 
 
 def summarize_tree_score_direction(metrics: dict[str, Any]) -> dict[str, float | bool]:
@@ -1111,6 +1625,8 @@ def build_group_comparison_table(
         "slice_oos_median_ann_excess_vs_market": "delta_vs_baseline_slice_oos_excess",
         "yearly_excess_median_vs_market": "delta_vs_baseline_yearly_excess_median",
         "key_year_excess_mean_vs_market": "delta_vs_baseline_key_year_excess_mean",
+        "topk_boundary_topk_minus_next_mean_return": "delta_vs_baseline_topk_boundary_spread",
+        "topk_boundary_switch_in_minus_out_mean_return": "delta_vs_baseline_switch_in_minus_out",
     }
     for col, delta_col in delta_pairs.items():
         if col not in out.columns:
@@ -1124,7 +1640,33 @@ def build_group_comparison_table(
             threshold = pd.to_numeric(out["daily_proxy_admission_threshold"], errors="coerce").fillna(0.0)
         else:
             threshold = pd.Series(0.0, index=out.index)
-        out["pass_p1_daily_proxy_admission_gate"] = daily_proxy.notna() & (daily_proxy >= threshold)
+        if "daily_proxy_full_backtest_threshold" in out.columns:
+            full_threshold = pd.to_numeric(
+                out["daily_proxy_full_backtest_threshold"],
+                errors="coerce",
+            ).fillna(threshold)
+        else:
+            full_threshold = threshold
+        decisions = [
+            classify_daily_proxy_first_decision(
+                val,
+                admission_threshold=float(adm),
+                full_backtest_threshold=float(full),
+            )
+            for val, adm, full in zip(daily_proxy, threshold, full_threshold)
+        ]
+        for key in (
+            "daily_proxy_first_status",
+            "daily_proxy_first_reason",
+            "pass_p1_daily_proxy_admission_gate",
+            "pass_p1_daily_proxy_full_backtest_gate",
+            "daily_proxy_safety_margin_to_admission",
+            "daily_proxy_safety_margin_to_full_backtest",
+        ):
+            out[key] = [d[key] for d in decisions]
+        out["primary_result_type"] = "daily_bt_like_proxy"
+        out["primary_decision_metric"] = "daily_bt_like_proxy_annualized_excess_vs_market"
+        out["legacy_proxy_decision_role"] = "diagnostic_only"
 
     if "delta_vs_baseline_full_backtest_excess" in out.columns:
         out["pass_p1_val_rank_ic_gate"] = _non_degrade(out["delta_vs_baseline_val_rank_ic"])
@@ -1147,11 +1689,65 @@ def build_group_comparison_table(
         else:
             out["pass_p1_slice_oos_gate"] = False
         gate_cols = [
+            "pass_p1_full_backtest_gate",
             "pass_p1_val_rank_ic_gate",
             "pass_p1_rolling_oos_gate",
             "pass_p1_slice_oos_gate",
             "pass_p1_key_year_gate",
         ]
+        if "pass_p1_daily_proxy_admission_gate" in out.columns:
+            gate_cols.append("pass_p1_daily_proxy_admission_gate")
         out["pass_p1_promotion_gate"] = out[gate_cols].all(axis=1)
         out.loc[out["group"] == baseline_group, "pass_p1_promotion_gate"] = True
     return out
+
+
+def build_daily_proxy_first_leaderboard(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """生成只按 daily proxy 决策的 P1 leaderboard。"""
+    if summary_df.empty:
+        return pd.DataFrame()
+    preferred = [
+        "group",
+        "daily_proxy_first_status",
+        "daily_bt_like_proxy_annualized_excess_vs_market",
+        "daily_proxy_admission_threshold",
+        "daily_proxy_full_backtest_threshold",
+        "daily_proxy_safety_margin_to_full_backtest",
+        "daily_bt_like_proxy_strategy_annualized_return",
+        "daily_bt_like_proxy_benchmark_annualized_return",
+        "daily_bt_like_proxy_strategy_sharpe_ratio",
+        "daily_bt_like_proxy_strategy_max_drawdown",
+        "daily_bt_like_proxy_period_beat_rate",
+        "daily_bt_like_proxy_n_periods",
+        "daily_bt_like_proxy_n_rebalances",
+        "daily_bt_like_proxy_avg_turnover_half_l1",
+        "topk_boundary_topk_minus_next_mean_return",
+        "topk_boundary_switch_in_minus_out_mean_return",
+        "topk_boundary_avg_turnover_half_l1",
+        "val_rank_ic",
+        "effective_val_rank_ic",
+        "tree_score_auto_flipped",
+        "label_mode",
+        "xgboost_objective",
+        "research_config_id",
+        "output_stem",
+        "bundle_dir",
+        "full_backtest_annualized_excess_vs_market",
+        "full_backtest_skipped_reason",
+        "daily_proxy_first_reason",
+    ]
+    cols = [c for c in preferred if c in summary_df.columns]
+    out = summary_df[cols].copy()
+    status_order = {
+        "full_backtest_candidate": 0,
+        "gray_zone": 1,
+        "reject": 2,
+        "no_daily_proxy": 3,
+    }
+    out["_status_order"] = out.get("daily_proxy_first_status", pd.Series("", index=out.index)).map(status_order).fillna(9)
+    if "daily_bt_like_proxy_annualized_excess_vs_market" in out.columns:
+        out["_daily_sort"] = pd.to_numeric(out["daily_bt_like_proxy_annualized_excess_vs_market"], errors="coerce")
+    else:
+        out["_daily_sort"] = np.nan
+    out = out.sort_values(["_status_order", "_daily_sort", "group"], ascending=[True, False, True], kind="mergesort")
+    return out.drop(columns=["_status_order", "_daily_sort"]).reset_index(drop=True)

@@ -275,7 +275,7 @@ def main() -> None:
             top_k=int(args.top_k),
             rebalance_rule=rebalance_rule,
             prefilter_cfg=prefilter_cfg,
-            max_turnover=float(portfolio_cfg.get("max_turnover", 0.3)),
+            max_turnover=float(portfolio_cfg.get("max_turnover", 1.0)),
             industry_map=industry_map,
             industry_cap_count=industry_cap_count,
             portfolio_method=str(portfolio_cfg.get("weight_method", "equal_weight")),

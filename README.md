@@ -322,17 +322,22 @@ pytest
 3. `scout`
    用 `scripts/run_alpha_factor_scout.py`、`scripts/run_alpha_directional_scout.py`、`scripts/run_alpha_expression_scout.py` 做 benchmark-first 候选侦察。
    这类结果继续统一标记为 `result_type=light_strategy_proxy`，用于候选筛查，不直接替代 admission/full backtest。
-4. `admission`
+4. `P1 daily-proxy-first`
+   P1 树模型不再用旧 light proxy 触发正式回测。`scripts/run_p1_tree_groups.py` 默认输出 `result_type=daily_bt_like_proxy`、`*_daily_proxy_leaderboard.csv`、状态切片和 Top-K 边界诊断；旧 `light_strategy_proxy` / `full_like_proxy` 仅保留为 `legacy_proxy_decision_role=diagnostic_only`。
+   默认 gate 是 `<0%` 直接 reject，`0%~+3%` 归档为 gray zone，`>=+3%` 才允许补正式 full backtest。
+5. `admission`
    候选只有在 `IC gate + combo gate + benchmark-first gate` 都过线后，才进入正式准入判断。
    对应脚本是 `scripts/run_factor_admission_validation.py`。
-5. `full backtest`
+6. `full backtest`
    最终用 `scripts/run_backtest_eval.py` 做正式回测、walk-forward 和切片验证。
-6. `optional publish`
+7. `optional publish`
    只有研究结论稳定后，才考虑回写默认配置或接入日更推荐链路。
 
 这个顺序的核心纪律是：
 
 - 不把 `signal_diagnostic` 或 `light_strategy_proxy` 数值直接当成正式策略收益。
+- P1 旧 proxy 只做 legacy diagnostic，不参与 admission、full backtest 触发或 promotion。
+- P1 daily proxy 只负责准入和正式回测触发，不替代正式 full backtest。
 - 不跳过 scout/admission 直接把新因子写进默认主线。
 - `prepared_factors` cache 命中前提必须与当前 schema/version 一致，否则应重建。
 

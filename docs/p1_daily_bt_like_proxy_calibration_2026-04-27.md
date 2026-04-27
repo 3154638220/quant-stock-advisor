@@ -24,7 +24,21 @@
 2. `daily_bt_like_minus_full_backtest` 平均为 `+0.60%`，最大绝对偏差为 `2.44%`。
 3. `daily_bt_like_proxy_excess` 为正的样本数：`0/5`。
 
-因此，daily proxy 可以作为 P1 下一轮准入 gate：若该层已经为负，就不应再补正式 full backtest；若该层接近或超过 0，再进入年度/市场状态诊断和正式回测。
+因此，daily proxy 可以作为 P1 下一轮准入 gate：若该层已经为负，就不应再补正式 full backtest；若该层为正但低于安全边际，只归档诊断；若达到安全边际，再进入年度/市场状态诊断和正式回测。
+
+## Daily-Proxy-First 使用规则
+
+本轮之后，P1 不再使用旧 `light_strategy_proxy` 或 `full_like_proxy` 触发正式回测。两者仅保留为 legacy diagnostic，用于解释历史错判，不参与 admission、promotion 或 full backtest 触发。
+
+新的默认三档 gate：
+
+| daily proxy 年化超额 | 状态 | 处理 |
+| ---: | --- | --- |
+| `< 0%` | `reject` | 停止，不补正式 full backtest |
+| `0% ~ +3%` | `gray_zone` | 只归档诊断，默认不补正式 full backtest |
+| `>= +3%` | `full_backtest_candidate` | 允许补正式 full backtest |
+
+`+3%` 是基于当前最大绝对偏差约 `2.44pct` 设置的安全边际，不是 promotion 线。正式 promotion 仍必须通过 full backtest、年度切片、rolling OOS、slice OOS、状态切片和 Top-K 边界检查。
 
 ## 产物
 

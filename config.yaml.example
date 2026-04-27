@@ -184,8 +184,9 @@ portfolio:
   max_single_weight: 0.05
   max_industry_weight: null
   industry_col: null
-  # P2-C：建议先在回测将半 L1 换手上限压到 0.3 验证稳定性
-  max_turnover: 0.3
+  # 月末调仓默认不限制半 L1 换手；1.0 表示允许全买全卖。
+  # 如需复现低换手实验，可手动改为 0.3。
+  max_turnover: 1.0
   # P2-B：行业持仓只数上限（需配合 data/cache/industry_map.csv）
   industry_cap_count: 5
   cov_lookback_days: 60

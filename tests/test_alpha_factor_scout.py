@@ -270,5 +270,6 @@ def test_full_backtest_research_identity_and_canonical_snapshot_are_stable():
     snap = canonical_research_config("p1_tree_full_backtest")
     assert snap["result_type"] == "full_backtest"
     assert snap["score"] == "xgboost"
+    assert snap["max_turnover"] == 1.0
     snap["score"] = "changed"
     assert canonical_research_config("p1_tree_full_backtest")["score"] == "xgboost"

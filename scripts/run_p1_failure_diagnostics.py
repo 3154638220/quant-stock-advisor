@@ -217,7 +217,7 @@ def _params_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "min_hist_days": int(params.get("min_hist_days", 130)),
         "rebalance_rule": str(params.get("rebalance_rule", "M")),
         "top_k": int(params.get("top_k", 20)),
-        "max_turnover": float(params.get("max_turnover", 0.3)),
+        "max_turnover": float(params.get("max_turnover", 1.0)),
         "portfolio_method": str(params.get("portfolio_method", "equal_weight")),
         "prepared_factors_cache": str(params.get("prepared_factors_cache") or ""),
         "benchmark_min_history_days": int(params.get("benchmark_min_history_days", 130)),

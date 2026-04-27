@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--proxy-horizon", type=int, default=5)
     p.add_argument("--rebalance-rule", default="M")
     p.add_argument("--top-k", type=int, default=20)
-    p.add_argument("--proxy-max-turnover", type=float, default=0.3)
+    p.add_argument("--proxy-max-turnover", type=float, default=1.0)
     p.add_argument("--fallback-prepared-cache", default="data/cache/prepared_factors_p1_tree_2021_20260420.parquet")
     p.add_argument("--output-prefix", default="p1_proxy_calibration_history_2026-04-27")
     p.add_argument("--results-dir", default="data/results")

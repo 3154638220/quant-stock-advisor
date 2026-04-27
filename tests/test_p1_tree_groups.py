@@ -10,25 +10,32 @@ from src.models.xtree.p1_workflow import (
     DEFAULT_P1_BENCHMARK_KEY_YEARS,
     FUND_FLOW_TREE_FEATURES,
     SHAREHOLDER_TREE_FEATURES,
-    WEEKLY_KDJ_TREE_FEATURES,
     WEEKLY_KDJ_INTERACTION_TREE_FEATURES,
+    WEEKLY_KDJ_TREE_FEATURES,
     attach_weekly_kdj_interaction_features,
     baseline_tree_feature_names,
+    build_daily_proxy_first_leaderboard,
+    build_group_comparison_table,
+    build_investable_period_return_panel,
+    build_market_state_table_from_daily,
+    build_p1_monthly_investable_label,
     build_p1_training_label,
     build_p1_tree_output_stem,
     build_p1_tree_research_config_id,
-    build_group_comparison_table,
     build_tree_daily_backtest_like_proxy_detail,
     build_tree_direction_diagnostic_table,
     build_tree_light_proxy_detail,
     build_tree_score_weight_matrix,
+    build_tree_topk_boundary_diagnostic,
     build_tree_turnover_aware_proxy_detail,
+    classify_daily_proxy_first_decision,
     p1_tree_feature_groups,
     resolve_available_feature_names,
-    summarize_p1_label_diagnostics,
-    summarize_tree_daily_backtest_like_proxy,
     select_rebalance_dates,
     summarize_p1_full_backtest_payload,
+    summarize_p1_label_diagnostics,
+    summarize_tree_daily_backtest_like_proxy,
+    summarize_tree_daily_proxy_state_slices,
     summarize_tree_group_result,
     summarize_tree_score_direction,
 )
@@ -242,6 +249,82 @@ def test_daily_backtest_like_proxy_uses_daily_open_returns_and_market_benchmark(
     assert summary["n_periods"] >= 1
 
 
+def test_topk_boundary_diagnostic_compares_topk_and_next_bucket():
+    dates = pd.bdate_range("2024-01-25", "2024-03-05")
+    daily_rows = []
+    score_rows = []
+    for i, d in enumerate(dates):
+        for sym, step, score in [
+            ("000001", 0.01, 0.9),
+            ("000002", 0.0, 0.5),
+            ("000003", -0.005, 0.1),
+        ]:
+            px = 10.0 * ((1.0 + step) ** i)
+            daily_rows.append({"trade_date": d, "symbol": sym, "open": px, "close": px})
+            score_rows.append({"trade_date": d, "symbol": sym, "tree_score": score})
+
+    detail, summary = build_tree_topk_boundary_diagnostic(
+        pd.DataFrame(score_rows),
+        pd.DataFrame(daily_rows),
+        score_col="tree_score",
+        rebalance_rule="M",
+        top_k=1,
+        scenario="G0",
+    )
+
+    assert not detail.empty
+    assert detail.loc[0, "topk_mean_return"] > detail.loc[0, "next_bucket_mean_return"]
+    assert summary["topk_boundary_topk_minus_next_mean_return"] > 0.0
+    assert summary["topk_boundary_periods"] == len(detail)
+
+
+def test_daily_proxy_state_slices_include_strong_up_and_high_vol_states():
+    dates = pd.bdate_range("2024-01-02", "2024-04-30")
+    daily_rows = []
+    for i, d in enumerate(dates):
+        for sym, mult in [("000001", 1.0), ("000002", 0.8), ("000003", 1.2)]:
+            month_step = {1: 0.002, 2: -0.002, 3: 0.006, 4: 0.0}[d.month] * mult
+            px = 10.0 * ((1.0 + month_step) ** i)
+            daily_rows.append({"trade_date": d, "symbol": sym, "open": px, "close": px})
+    detail_rows = []
+    for d in dates:
+        detail_rows.append(
+            {
+                "period": d.strftime("%Y-%m-%d"),
+                "trade_date": d,
+                "strategy_return": 0.002 if d.month in {1, 3} else -0.001,
+                "benchmark_return": 0.001 if d.month in {1, 3} else -0.0015,
+                "excess_return": 0.001,
+                "group": "G0",
+                "proxy_variant": "daily_backtest_like",
+            }
+        )
+    monthly, summary = summarize_tree_daily_proxy_state_slices(
+        pd.DataFrame(detail_rows),
+        pd.DataFrame(daily_rows),
+    )
+
+    assert not monthly.empty
+    assert {"return_state", "vol_state", "breadth_state"} <= set(monthly.columns)
+    assert not summary.empty
+    assert "strong_up" in set(summary["state"])
+    assert "high_vol" in set(summary["state"])
+
+
+def test_market_state_table_from_daily_labels_monthly_states():
+    dates = pd.bdate_range("2024-01-02", "2024-04-30")
+    daily_rows = []
+    for i, d in enumerate(dates):
+        step = {1: 0.001, 2: -0.002, 3: 0.004, 4: 0.0}[d.month]
+        for sym in ["000001", "000002"]:
+            px = 10.0 * ((1.0 + step) ** i)
+            daily_rows.append({"trade_date": d, "symbol": sym, "open": px, "close": px})
+    out = build_market_state_table_from_daily(pd.DataFrame(daily_rows))
+    assert not out.empty
+    assert "strong_up" in set(out["return_state"])
+    assert "strong_down" in set(out["return_state"])
+
+
 def test_summarize_tree_group_result_uses_frequency_aware_annualization():
     detail = pd.DataFrame(
         {
@@ -338,6 +421,88 @@ def test_build_p1_training_label_rank_fusion_preserves_direction():
     assert target == "forward_ret_fused"
     assert meta["label_scope"] == "cross_section_relative"
     assert out["forward_ret_fused"].tolist() == pytest.approx([-1.0 / 6.0, 1.0 / 6.0, 0.5])
+
+
+def test_build_monthly_investable_label_uses_rebalance_period_open_returns():
+    dates = pd.bdate_range("2024-01-25", "2024-03-05")
+    rows = []
+    panel_rows = []
+    for i, d in enumerate(dates):
+        for sym, base, daily_step in [("000001", 10.0, 0.01), ("000002", 20.0, 0.0)]:
+            rows.append(
+                {
+                    "trade_date": d,
+                    "symbol": sym,
+                    "open": base * ((1.0 + daily_step) ** i),
+                    "close": base * ((1.0 + daily_step) ** i),
+                }
+            )
+            panel_rows.append(
+                {
+                    "trade_date": d,
+                    "symbol": sym,
+                    "forward_ret_5d": 0.0,
+                }
+            )
+    daily = pd.DataFrame(rows)
+    panel = pd.DataFrame(panel_rows)
+
+    out, target, meta = build_p1_monthly_investable_label(
+        panel,
+        daily,
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_mode="monthly_investable",
+    )
+
+    assert target == "forward_ret_investable"
+    assert meta["label_rebalance_rule"] == "M"
+    assert out["trade_date"].dt.strftime("%Y-%m-%d").unique().tolist() == ["2024-01-31", "2024-02-29"]
+    jan_a = out[(out["trade_date"] == pd.Timestamp("2024-01-31")) & (out["symbol"] == "000001")].iloc[0]
+    n_open_intervals = int(((dates > pd.Timestamp("2024-01-31")) & (dates <= pd.Timestamp("2024-02-29"))).sum())
+    assert jan_a["forward_ret_investable"] == pytest.approx((1.01 ** n_open_intervals) - 1.0)
+    jan_b = out[(out["trade_date"] == pd.Timestamp("2024-01-31")) & (out["symbol"] == "000002")].iloc[0]
+    assert jan_b["forward_ret_investable"] == pytest.approx(0.0)
+
+
+def test_monthly_investable_market_relative_label_demeans_rebalance_cross_section():
+    dates = pd.bdate_range("2024-01-25", "2024-03-05")
+    daily_rows = []
+    panel_rows = []
+    for i, d in enumerate(dates):
+        for sym, step in [("000001", 0.01), ("000002", 0.0)]:
+            daily_rows.append(
+                {
+                    "trade_date": d,
+                    "symbol": sym,
+                    "open": 10.0 * ((1.0 + step) ** i),
+                    "close": 10.0 * ((1.0 + step) ** i),
+                }
+            )
+            panel_rows.append({"trade_date": d, "symbol": sym})
+    out, _, meta = build_p1_monthly_investable_label(
+        pd.DataFrame(panel_rows),
+        pd.DataFrame(daily_rows),
+        rebalance_rule="M",
+        label_mode="monthly_investable_market_relative",
+    )
+    assert meta["label_market_proxy"] == "same_rebalance_date_cross_section_equal_weight"
+    assert out.groupby("trade_date")["forward_ret_investable"].mean().abs().max() == pytest.approx(0.0)
+
+
+def test_build_investable_period_return_panel_requires_next_rebalance():
+    dates = pd.bdate_range("2024-01-25", "2024-02-05")
+    daily = pd.DataFrame(
+        {
+            "trade_date": list(dates) * 2,
+            "symbol": ["000001"] * len(dates) + ["000002"] * len(dates),
+            "open": [10.0 + i for i in range(len(dates))] + [20.0] * len(dates),
+            "close": [10.0 + i for i in range(len(dates))] + [20.0] * len(dates),
+        }
+    )
+    panel = daily[["trade_date", "symbol"]].copy()
+    out = build_investable_period_return_panel(panel, daily, rebalance_rule="M")
+    assert out["trade_date"].dt.strftime("%Y-%m-%d").unique().tolist() == ["2024-01-31"]
 
 
 def test_build_tree_direction_diagnostic_table_flags_raw_negative_ic():
@@ -437,6 +602,8 @@ def test_build_group_comparison_table_adds_daily_proxy_admission_gate():
     assert row["delta_vs_baseline_daily_bt_like_proxy_excess"] == pytest.approx(0.012)
     assert bool(row["pass_p1_daily_proxy_admission_gate"]) is True
     assert bool(out.loc[out["group"] == "G0", "pass_p1_daily_proxy_admission_gate"].iloc[0]) is False
+    assert row["primary_result_type"] == "daily_bt_like_proxy"
+    assert row["legacy_proxy_decision_role"] == "diagnostic_only"
 
 
 def test_build_group_comparison_table_respects_daily_proxy_threshold_column():
@@ -461,6 +628,77 @@ def test_build_group_comparison_table_respects_daily_proxy_threshold_column():
 
     assert bool(out.loc[out["group"] == "G0", "pass_p1_daily_proxy_admission_gate"].iloc[0]) is True
     assert bool(out.loc[out["group"] == "G1", "pass_p1_daily_proxy_admission_gate"].iloc[0]) is False
+
+
+def test_classify_daily_proxy_first_decision_uses_three_stage_gate():
+    reject = classify_daily_proxy_first_decision(-0.001, admission_threshold=0.0, full_backtest_threshold=0.03)
+    assert reject["daily_proxy_first_status"] == "reject"
+    assert reject["pass_p1_daily_proxy_admission_gate"] is False
+    gray = classify_daily_proxy_first_decision(0.01, admission_threshold=0.0, full_backtest_threshold=0.03)
+    assert gray["daily_proxy_first_status"] == "gray_zone"
+    assert gray["pass_p1_daily_proxy_admission_gate"] is True
+    assert gray["pass_p1_daily_proxy_full_backtest_gate"] is False
+    candidate = classify_daily_proxy_first_decision(0.031, admission_threshold=0.0, full_backtest_threshold=0.03)
+    assert candidate["daily_proxy_first_status"] == "full_backtest_candidate"
+    assert candidate["pass_p1_daily_proxy_full_backtest_gate"] is True
+    missing = classify_daily_proxy_first_decision(float("nan"))
+    assert missing["daily_proxy_first_status"] == "no_daily_proxy"
+
+
+def test_build_group_comparison_table_marks_daily_proxy_gray_zone():
+    out = build_group_comparison_table(
+        [
+            {
+                "group": "G0",
+                "val_rank_ic": 0.03,
+                "annualized_excess_vs_market": 0.10,
+                "daily_bt_like_proxy_annualized_excess_vs_market": 0.01,
+                "daily_proxy_admission_threshold": 0.0,
+                "daily_proxy_full_backtest_threshold": 0.03,
+            }
+        ]
+    )
+    row = out.iloc[0]
+    assert row["daily_proxy_first_status"] == "gray_zone"
+    assert bool(row["pass_p1_daily_proxy_admission_gate"]) is True
+    assert bool(row["pass_p1_daily_proxy_full_backtest_gate"]) is False
+    assert row["daily_proxy_safety_margin_to_full_backtest"] == pytest.approx(-0.02)
+
+
+def test_build_daily_proxy_first_leaderboard_sorts_candidates_first():
+    summary = build_group_comparison_table(
+        [
+            {
+                "group": "G0",
+                "val_rank_ic": 0.03,
+                "annualized_excess_vs_market": 0.10,
+                "daily_bt_like_proxy_annualized_excess_vs_market": -0.01,
+                "daily_proxy_admission_threshold": 0.0,
+                "daily_proxy_full_backtest_threshold": 0.03,
+            },
+            {
+                "group": "G1",
+                "val_rank_ic": 0.04,
+                "annualized_excess_vs_market": 0.15,
+                "daily_bt_like_proxy_annualized_excess_vs_market": 0.04,
+                "daily_proxy_admission_threshold": 0.0,
+                "daily_proxy_full_backtest_threshold": 0.03,
+            },
+            {
+                "group": "G2",
+                "val_rank_ic": 0.02,
+                "annualized_excess_vs_market": 0.20,
+                "daily_bt_like_proxy_annualized_excess_vs_market": 0.01,
+                "daily_proxy_admission_threshold": 0.0,
+                "daily_proxy_full_backtest_threshold": 0.03,
+            },
+        ]
+    )
+    leaderboard = build_daily_proxy_first_leaderboard(summary)
+    assert leaderboard["group"].tolist() == ["G1", "G2", "G0"]
+    assert leaderboard.loc[0, "daily_proxy_first_status"] == "full_backtest_candidate"
+    assert leaderboard.loc[1, "daily_proxy_first_status"] == "gray_zone"
+    assert leaderboard.loc[2, "daily_proxy_first_status"] == "reject"
 
 
 def test_build_group_comparison_table_flags_failed_promotion_gate():
@@ -573,8 +811,9 @@ def test_resolve_label_horizons_cli_horizons_override_config_weights():
 
 
 def test_p1_tree_parse_args_accepts_history_and_sample_start(monkeypatch):
-    from scripts.run_p1_tree_groups import parse_args
     import sys
+
+    from scripts.run_p1_tree_groups import parse_args
 
     monkeypatch.setattr(
         sys,
@@ -593,8 +832,9 @@ def test_p1_tree_parse_args_accepts_history_and_sample_start(monkeypatch):
 
 
 def test_p1_tree_parse_args_accepts_daily_proxy_gate_controls(monkeypatch):
-    from scripts.run_p1_tree_groups import parse_args
     import sys
+
+    from scripts.run_p1_tree_groups import parse_args
 
     monkeypatch.setattr(
         sys,
@@ -603,12 +843,46 @@ def test_p1_tree_parse_args_accepts_daily_proxy_gate_controls(monkeypatch):
             "run_p1_tree_groups.py",
             "--daily-proxy-admission-threshold",
             "-0.01",
+            "--daily-proxy-full-backtest-threshold",
+            "0.03",
             "--disable-daily-proxy-admission-gate",
         ],
     )
     args = parse_args()
     assert args.daily_proxy_admission_threshold == pytest.approx(-0.01)
+    assert args.daily_proxy_full_backtest_threshold == pytest.approx(0.03)
     assert args.disable_daily_proxy_admission_gate is True
+
+
+def test_p1_tree_parse_args_defaults_allow_full_monthly_turnover(monkeypatch):
+    import sys
+
+    from scripts.run_p1_tree_groups import parse_args
+
+    monkeypatch.setattr(sys, "argv", ["run_p1_tree_groups.py"])
+
+    args = parse_args()
+
+    assert args.proxy_max_turnover == pytest.approx(1.0)
+    assert args.backtest_max_turnover == pytest.approx(1.0)
+
+
+def test_p1_tree_parse_args_accepts_monthly_investable_label(monkeypatch):
+    import sys
+
+    from scripts.run_p1_tree_groups import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_p1_tree_groups.py",
+            "--label-mode",
+            "monthly_investable",
+        ],
+    )
+    args = parse_args()
+    assert args.label_mode == "monthly_investable"
 
 
 def test_build_p1_tree_research_config_id_is_stable_and_readable():

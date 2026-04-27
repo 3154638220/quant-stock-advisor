@@ -5,6 +5,15 @@ import sys
 from scripts.run_backtest_eval import parse_args
 
 
+def test_parse_args_defaults_to_full_turnover_grid(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_backtest_eval.py"])
+
+    args = parse_args()
+
+    assert args.max_turnover is None
+    assert args.grid_max_turnover_values == "1.0"
+
+
 def test_parse_args_accepts_b3_b4_portfolio_overrides(monkeypatch):
     monkeypatch.setattr(
         sys,

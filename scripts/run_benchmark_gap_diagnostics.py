@@ -599,7 +599,7 @@ def main() -> None:
     db_path = str(PROJECT_ROOT / str(cfg["paths"]["duckdb_path"]))
     top_k = int(signals.get("top_k", 20))
     rebalance_rule = str(backtest_cfg.get("eval_rebalance_rule", "M"))
-    max_turnover = float(portfolio_cfg.get("max_turnover", 0.3))
+    max_turnover = float(portfolio_cfg.get("max_turnover", 1.0))
     execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open")).lower().strip()
 
     print(f"[1/6] load daily data: start={args.start} end={end_date}", flush=True)

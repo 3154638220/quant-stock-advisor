@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P1：运行树模型 G0~G4 特征分组 A/B。"""
+"""P1：运行树模型分组 A/B，并以 daily proxy first 作为准入口径。"""
 
 from __future__ import annotations
 
@@ -21,24 +21,28 @@ from src.models.xtree.p1_workflow import (
     FUND_FLOW_TREE_FEATURES,
     attach_p1_experimental_features,
     attach_weekly_kdj_interaction_features,
-    baseline_tree_feature_names,
+    build_daily_proxy_first_leaderboard,
+    build_group_comparison_table,
+    build_p1_monthly_investable_label,
     build_p1_training_label,
     build_p1_tree_output_stem,
     build_p1_tree_research_config_id,
-    build_group_comparison_table,
     build_tree_daily_backtest_like_proxy_detail,
     build_tree_direction_diagnostic_table,
     build_tree_light_proxy_detail,
+    build_tree_topk_boundary_diagnostic,
     build_tree_turnover_aware_proxy_detail,
-    panel_generation_feature_names,
     p1_tree_feature_groups,
+    panel_generation_feature_names,
     resolve_available_feature_names,
-    summarize_p1_label_diagnostics,
     summarize_p1_full_backtest_payload,
+    summarize_p1_label_diagnostics,
     summarize_tree_daily_backtest_like_proxy,
+    summarize_tree_daily_proxy_state_slices,
     summarize_tree_group_result,
     summarize_tree_score_direction,
 )
+
 
 def _parse_features(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
@@ -115,7 +119,7 @@ def _cross_section_rank_fusion(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="P1 树模型分组实验：G0~G4")
+    p = argparse.ArgumentParser(description="P1 树模型分组实验：daily-proxy-first")
     p.add_argument("--config", type=Path, default=None, help="默认项目根 config.yaml")
     p.add_argument("--max-symbols", type=int, default=None)
     p.add_argument("--symbols", type=str, default=None, help="逗号分隔 6 位代码")
@@ -126,9 +130,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--label-weights", type=str, default="", help="多窗口标签融合权重，如 0.5,0.3,0.2")
     p.add_argument(
         "--label-mode",
-        choices=("rank_fusion", "raw_fusion", "market_relative", "benchmark_relative"),
+        choices=(
+            "rank_fusion",
+            "raw_fusion",
+            "market_relative",
+            "benchmark_relative",
+            "monthly_investable",
+            "monthly_investable_market_relative",
+        ),
         default="rank_fusion",
-        help="训练标签口径：截面 rank 融合、原始收益融合、市场相对或 benchmark 相对",
+        help="训练标签口径：截面 rank 融合、原始收益融合、市场相对、benchmark 相对或月频可投资收益",
     )
     p.add_argument("--proxy-horizon", type=int, default=None, help="light proxy 使用的 forward_ret_h 列")
     p.add_argument(
@@ -142,19 +153,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--proxy-max-turnover",
         type=float,
-        default=0.3,
-        help="full-like light proxy 的 half-L1 换手上限；旧 light proxy 仍保持无约束 Top-K",
+        default=1.0,
+        help="full-like/daily proxy 的 half-L1 换手上限；默认 1.0 表示允许全买全卖",
     )
     p.add_argument(
         "--daily-proxy-admission-threshold",
         type=float,
         default=0.0,
-        help="daily full-backtest-like proxy 准入阈值；低于该值时默认不补正式 full backtest",
+        help="daily full-backtest-like proxy 硬停止阈值；低于该值时停止候选",
+    )
+    p.add_argument(
+        "--daily-proxy-full-backtest-threshold",
+        type=float,
+        default=0.03,
+        help="daily proxy 进入正式 full backtest 的安全边际阈值；默认 3pct，介于硬停止线和该阈值之间只归档诊断",
     )
     p.add_argument(
         "--disable-daily-proxy-admission-gate",
         action="store_true",
-        help="关闭 daily proxy 准入拦截；仅用于复现历史失败样本或断层诊断",
+        help="关闭 daily-proxy-first 拦截；仅用于复现历史失败样本或校准",
     )
     p.add_argument("--val-frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
@@ -176,7 +193,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--backtest-end", type=str, default="")
     p.add_argument("--backtest-lookback-days", type=int, default=260)
     p.add_argument("--backtest-min-hist-days", type=int, default=130)
-    p.add_argument("--backtest-max-turnover", type=float, default=0.3)
+    p.add_argument("--backtest-max-turnover", type=float, default=1.0)
     p.add_argument("--backtest-top-k", type=int, default=20)
     p.add_argument("--backtest-portfolio-method", type=str, default="equal_weight")
     p.add_argument("--backtest-prepared-factors-cache", type=str, default="")
@@ -281,16 +298,21 @@ def _run_full_backtest_for_group(
 
 
 def main() -> int:
+    from src.backtest.transaction_costs import transaction_cost_params_from_mapping
     from src.data_fetcher import DuckDBManager, list_default_universe_symbols
     from src.features.tree_dataset import long_factor_panel_from_daily
     from src.models.data_slice import normalize_slice_spec
     from src.models.inference import predict_xgboost_tree
     from src.models.rank_score import apply_cross_section_z_by_date
     from src.models.xtree.train import train_xgboost_panel
-    from src.backtest.transaction_costs import transaction_cost_params_from_mapping
     from src.settings import load_config, resolve_asof_trade_end
 
     args = parse_args()
+    daily_proxy_admission_threshold = float(args.daily_proxy_admission_threshold)
+    daily_proxy_full_backtest_threshold = max(
+        daily_proxy_admission_threshold,
+        float(args.daily_proxy_full_backtest_threshold),
+    )
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
     feat = cfg.get("features", {}) or {}
@@ -428,7 +450,18 @@ def main() -> int:
         )
 
     label_mode = str(args.label_mode)
-    if len(y_columns) == 1 and label_mode == "raw_fusion":
+    execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open"))
+    if label_mode in {"monthly_investable", "monthly_investable_market_relative"}:
+        panel, target_column, label_meta = build_p1_monthly_investable_label(
+            panel,
+            daily_df,
+            rebalance_rule=args.rebalance_rule,
+            execution_mode=execution_mode,
+            label_mode=label_mode,
+            date_col="trade_date",
+            out_col="forward_ret_investable",
+        )
+    elif len(y_columns) == 1 and label_mode == "raw_fusion":
         target_column = y_columns[0]
         label_meta = {
             "label_mode": "raw_fusion",
@@ -454,11 +487,13 @@ def main() -> int:
     if proxy_col not in panel.columns:
         print(f"缺少 proxy_horizon 对应列: {proxy_col}", file=sys.stderr)
         return 1
+    diagnostic_label_columns = [target_column] if label_mode.startswith("monthly_investable") else y_columns
+    diagnostic_label_weights = [1.0] if label_mode.startswith("monthly_investable") else label_weights
     label_diagnostics = summarize_p1_label_diagnostics(
         panel,
         target_column=target_column,
-        label_columns=y_columns,
-        label_weights=label_weights,
+        label_columns=diagnostic_label_columns,
+        label_weights=diagnostic_label_weights,
         proxy_return_col=proxy_col,
     )
 
@@ -489,6 +524,7 @@ def main() -> int:
 
     run_rows: list[dict[str, object]] = []
     detail_frames: list[pd.DataFrame] = []
+    boundary_frames: list[pd.DataFrame] = []
     group_defs = p1_tree_feature_groups(include_interaction_groups=bool(args.include_interaction_groups))
     if args.groups.strip():
         requested_groups = _parse_group_list(args.groups)
@@ -605,35 +641,57 @@ def main() -> int:
         daily_bt_like_excess = float(daily_bt_like_summary.get("annualized_excess_vs_market", np.nan))
         pass_daily_proxy_admission = bool(
             np.isfinite(daily_bt_like_excess)
-            and daily_bt_like_excess >= float(args.daily_proxy_admission_threshold)
+            and daily_bt_like_excess >= daily_proxy_admission_threshold
+        )
+        pass_daily_proxy_full_backtest = bool(
+            np.isfinite(daily_bt_like_excess)
+            and daily_bt_like_excess >= daily_proxy_full_backtest_threshold
+        )
+        boundary_detail_df, boundary_summary = build_tree_topk_boundary_diagnostic(
+            z_val,
+            daily_df,
+            score_col="tree_score",
+            rebalance_rule=args.rebalance_rule,
+            top_k=int(args.top_k),
+            execution_mode=execution_mode,
+            scenario=group_name,
         )
         bundle_label = f"p1_tree_{group_name.lower()}_{research_config_id}"
         detail_df["proxy_variant"] = "topk_unconstrained"
         detail_df["group"] = group_name
-        detail_df["result_type"] = "light_strategy_proxy"
+        detail_df["result_type"] = "legacy_light_strategy_proxy"
         detail_df["research_topic"] = "p1_tree_groups"
         detail_df["research_config_id"] = research_config_id
         detail_df["output_stem"] = output_stem
         detail_frames.append(detail_df)
         full_like_detail_df["proxy_variant"] = "full_like_turnover_aware"
         full_like_detail_df["group"] = group_name
-        full_like_detail_df["result_type"] = "light_strategy_proxy"
+        full_like_detail_df["result_type"] = "legacy_light_strategy_proxy"
         full_like_detail_df["research_topic"] = "p1_tree_groups"
         full_like_detail_df["research_config_id"] = research_config_id
         full_like_detail_df["output_stem"] = output_stem
         detail_frames.append(full_like_detail_df)
         daily_bt_like_detail_df["proxy_variant"] = "daily_backtest_like"
         daily_bt_like_detail_df["group"] = group_name
-        daily_bt_like_detail_df["result_type"] = "light_strategy_proxy"
+        daily_bt_like_detail_df["result_type"] = "daily_bt_like_proxy"
         daily_bt_like_detail_df["research_topic"] = "p1_tree_groups"
         daily_bt_like_detail_df["research_config_id"] = research_config_id
         daily_bt_like_detail_df["output_stem"] = output_stem
         detail_frames.append(daily_bt_like_detail_df)
+        boundary_detail_df["group"] = group_name
+        boundary_detail_df["result_type"] = "topk_boundary_diagnostic"
+        boundary_detail_df["research_topic"] = "p1_tree_groups"
+        boundary_detail_df["research_config_id"] = research_config_id
+        boundary_detail_df["output_stem"] = output_stem
+        boundary_frames.append(boundary_detail_df)
 
         run_rows.append(
             {
                 "group": group_name,
-                "result_type": "light_strategy_proxy",
+                "result_type": "daily_bt_like_proxy",
+                "primary_result_type": "daily_bt_like_proxy",
+                "primary_decision_metric": "daily_bt_like_proxy_annualized_excess_vs_market",
+                "legacy_proxy_decision_role": "diagnostic_only",
                 "research_topic": "p1_tree_groups",
                 "research_config_id": research_config_id,
                 "output_stem": output_stem,
@@ -649,6 +707,9 @@ def main() -> int:
                 **summarize_tree_score_direction(res.metrics),
                 "val_mse": float(res.metrics.get("val_mse", np.nan)),
                 "annualized_excess_vs_market": float(proxy_summary.get("annualized_excess_vs_market", np.nan)),
+                "legacy_unconstrained_proxy_annualized_excess_vs_market": float(
+                    proxy_summary.get("annualized_excess_vs_market", np.nan)
+                ),
                 "strategy_annualized_return": float(proxy_summary.get("strategy_annualized_return", np.nan)),
                 "benchmark_annualized_return": float(proxy_summary.get("benchmark_annualized_return", np.nan)),
                 "strategy_sharpe_ratio": float(proxy_summary.get("strategy_sharpe_ratio", np.nan)),
@@ -657,6 +718,9 @@ def main() -> int:
                 "n_periods": int(proxy_summary.get("n_periods", 0)),
                 "periods_per_year": float(proxy_summary.get("periods_per_year", np.nan)),
                 "full_like_proxy_annualized_excess_vs_market": float(
+                    full_like_proxy_summary.get("annualized_excess_vs_market", np.nan)
+                ),
+                "legacy_full_like_proxy_annualized_excess_vs_market": float(
                     full_like_proxy_summary.get("annualized_excess_vs_market", np.nan)
                 ),
                 "full_like_proxy_strategy_annualized_return": float(
@@ -701,8 +765,11 @@ def main() -> int:
                     daily_bt_like_summary.get("annualized_excess_vs_market", np.nan)
                     - proxy_summary.get("annualized_excess_vs_market", np.nan)
                 ),
-                "daily_proxy_admission_threshold": float(args.daily_proxy_admission_threshold),
+                "daily_proxy_admission_threshold": daily_proxy_admission_threshold,
+                "daily_proxy_full_backtest_threshold": daily_proxy_full_backtest_threshold,
                 "pass_p1_daily_proxy_admission_gate": pass_daily_proxy_admission,
+                "pass_p1_daily_proxy_full_backtest_gate": pass_daily_proxy_full_backtest,
+                **boundary_summary,
             }
         )
         bundle_manifest_rows.append(
@@ -719,12 +786,13 @@ def main() -> int:
         print(
             "[P1] 完成训练 {group}: val_rank_ic={val_ic:.6f}, "
             "proxy_excess={proxy:.2%}, full_like_proxy={full_like:.2%}, "
-            "daily_bt_like={daily_bt_like:.2%}, auto_flip={auto_flip}".format(
+            "daily_bt_like={daily_bt_like:.2%}, daily_full_bt_gate={daily_gate}, auto_flip={auto_flip}".format(
                 group=group_name,
                 val_ic=float(res.metrics.get("val_rank_ic", np.nan)),
                 proxy=float(proxy_summary.get("annualized_excess_vs_market", np.nan)),
                 full_like=float(full_like_proxy_summary.get("annualized_excess_vs_market", np.nan)),
                 daily_bt_like=daily_bt_like_excess,
+                daily_gate=pass_daily_proxy_full_backtest,
                 auto_flip=bool(summarize_tree_score_direction(res.metrics)["tree_score_auto_flipped"]),
             ),
             flush=True,
@@ -736,7 +804,7 @@ def main() -> int:
                         "full_backtest_skipped_reason": (
                             "daily_bt_like_proxy_below_admission_threshold:"
                             f"{daily_bt_like_excess:.6g}<"
-                            f"{float(args.daily_proxy_admission_threshold):.6g}"
+                            f"{daily_proxy_admission_threshold:.6g}"
                         ),
                     }
                 )
@@ -744,7 +812,27 @@ def main() -> int:
                     "[P1] 跳过 {group} 正式回测: daily_bt_like={daily_bt_like:.2%} < threshold={threshold:.2%}".format(
                         group=group_name,
                         daily_bt_like=daily_bt_like_excess,
-                        threshold=float(args.daily_proxy_admission_threshold),
+                        threshold=daily_proxy_admission_threshold,
+                    ),
+                    flush=True,
+                )
+                continue
+            if (not args.disable_daily_proxy_admission_gate) and (not pass_daily_proxy_full_backtest):
+                run_rows[-1].update(
+                    {
+                        "full_backtest_skipped_reason": (
+                            "daily_bt_like_proxy_gray_zone_below_full_backtest_threshold:"
+                            f"{daily_bt_like_excess:.6g}<"
+                            f"{daily_proxy_full_backtest_threshold:.6g}"
+                        ),
+                    }
+                )
+                print(
+                    "[P1] 跳过 {group} 正式回测: daily_bt_like={daily_bt_like:.2%} "
+                    "< full_backtest_threshold={threshold:.2%} (gray zone)".format(
+                        group=group_name,
+                        daily_bt_like=daily_bt_like_excess,
+                        threshold=daily_proxy_full_backtest_threshold,
                     ),
                     flush=True,
                 )
@@ -772,17 +860,32 @@ def main() -> int:
             run_rows[-1].update(backtest_metrics)
 
     summary_df = build_group_comparison_table(run_rows, baseline_group="G0")
+    daily_leaderboard_df = build_daily_proxy_first_leaderboard(summary_df)
     direction_diag_df = build_tree_direction_diagnostic_table(run_rows)
     detail_all = pd.concat(detail_frames, ignore_index=True) if detail_frames else pd.DataFrame()
+    boundary_all = pd.concat(boundary_frames, ignore_index=True) if boundary_frames else pd.DataFrame()
+    state_monthly_df, state_summary_df = summarize_tree_daily_proxy_state_slices(
+        detail_all,
+        daily_df,
+        execution_mode=execution_mode,
+    )
     bundle_manifest_df = pd.DataFrame(bundle_manifest_rows)
 
     summary_path = Path(results_dir) / f"{output_stem}_summary.csv"
     detail_path = Path(results_dir) / f"{output_stem}_detail.csv"
+    boundary_path = Path(results_dir) / f"{output_stem}_topk_boundary.csv"
+    state_monthly_path = Path(results_dir) / f"{output_stem}_daily_proxy_monthly_state.csv"
+    state_summary_path = Path(results_dir) / f"{output_stem}_daily_proxy_state_summary.csv"
+    daily_leaderboard_path = Path(results_dir) / f"{output_stem}_daily_proxy_leaderboard.csv"
     bundle_manifest_path = Path(results_dir) / f"{output_stem}_bundle_manifest.csv"
     direction_diag_path = Path(results_dir) / f"{output_stem}_direction_diagnostic.csv"
     json_path = Path(results_dir) / f"{output_stem}.json"
     summary_df.to_csv(summary_path, index=False)
     detail_all.to_csv(detail_path, index=False)
+    boundary_all.to_csv(boundary_path, index=False)
+    state_monthly_df.to_csv(state_monthly_path, index=False)
+    state_summary_df.to_csv(state_summary_path, index=False)
+    daily_leaderboard_df.to_csv(daily_leaderboard_path, index=False)
     bundle_manifest_df.to_csv(bundle_manifest_path, index=False)
     direction_diag_df.to_csv(direction_diag_path, index=False)
     payload = {
@@ -792,6 +895,10 @@ def main() -> int:
         "output_stem": output_stem,
         "summary_csv": str(summary_path),
         "detail_csv": str(detail_path),
+        "topk_boundary_csv": str(boundary_path),
+        "daily_proxy_monthly_state_csv": str(state_monthly_path),
+        "daily_proxy_state_summary_csv": str(state_summary_path),
+        "daily_proxy_leaderboard_csv": str(daily_leaderboard_path),
         "bundle_manifest_csv": str(bundle_manifest_path),
         "direction_diagnostic_csv": str(direction_diag_path),
         "bundle_manifest": bundle_manifest_df.to_dict(orient="records"),
@@ -799,15 +906,21 @@ def main() -> int:
         "label_meta": label_meta,
         "xgboost_objective": str(args.xgboost_objective),
         "direction_diagnostics": direction_diag_df.to_dict(orient="records"),
+        "daily_proxy_state_slices": state_summary_df.to_dict(orient="records"),
+        "daily_proxy_first_leaderboard": daily_leaderboard_df.to_dict(orient="records"),
         "groups": summary_df.to_dict(orient="records"),
         "config": {
+            "p1_experiment_mode": "daily_proxy_first",
+            "legacy_proxy_decision_role": "diagnostic_only",
             "label_horizons": label_horizons,
             "label_weights": label_weights,
             "proxy_horizon": proxy_horizon,
             "rebalance_rule": args.rebalance_rule,
             "top_k": int(args.top_k),
+            "execution_mode": execution_mode,
             "proxy_max_turnover": float(args.proxy_max_turnover),
-            "daily_proxy_admission_threshold": float(args.daily_proxy_admission_threshold),
+            "daily_proxy_admission_threshold": daily_proxy_admission_threshold,
+            "daily_proxy_full_backtest_threshold": daily_proxy_full_backtest_threshold,
             "daily_proxy_admission_gate_enabled": not bool(args.disable_daily_proxy_admission_gate),
             "val_frac": float(args.val_frac),
         },
