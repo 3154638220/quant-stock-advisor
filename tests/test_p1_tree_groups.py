@@ -852,7 +852,32 @@ def test_build_p1_daily_proxy_first_report_includes_required_sections():
             "config_source": "config.yaml.backtest",
             "top_k": 20,
             "rebalance_rule": "M",
+            "portfolio_method": "equal_weight",
             "execution_mode": "tplus1_open",
+            "proxy_horizon": 5,
+            "proxy_max_turnover": 1.0,
+            "label_horizons": [5, 10, 20],
+            "label_weights": [1 / 3, 1 / 3, 1 / 3],
+            "label_transform": "calmar",
+            "label_truncate_quantile": "",
+            "label_spec": {
+                "label_component_columns": "forward_ret_5d,forward_ret_10d,forward_ret_20d",
+                "label_transform": "calmar",
+                "target_column": "forward_ret_fused",
+            },
+            "backtest_config": "config.yaml.backtest",
+            "backtest_start": "2021-01-01",
+            "backtest_end": "",
+            "backtest_top_k": 20,
+            "backtest_max_turnover": 1.0,
+            "backtest_portfolio_method": "equal_weight",
+            "backtest_prepared_factors_cache": "",
+            "transaction_costs": {
+                "commission_buy_bps": 2.5,
+                "commission_sell_bps": 2.5,
+                "slippage_bps_per_side": 2.0,
+                "stamp_duty_sell_bps": 5.0,
+            },
             "daily_proxy_admission_threshold": 0.0,
             "daily_proxy_full_backtest_threshold": 0.03,
         },
@@ -873,6 +898,11 @@ def test_build_p1_daily_proxy_first_report_includes_required_sections():
     assert "strong_up_median_excess" in report
     assert "switch_in_minus_out" in report
     assert "Top-K 边界样本" in report
+    assert "portfolio_method" in report
+    assert "transaction_costs_bps" in report
+    assert "label_component_columns" in report
+    assert "label_transform" in report
+    assert "backtest_prepared_factors_cache" in report
 
 
 def test_build_group_comparison_table_flags_failed_promotion_gate():
@@ -1113,6 +1143,25 @@ def test_p1_tree_parse_args_accepts_up_capture_market_relative_label(monkeypatch
     assert args.label_mode == "up_capture_market_relative"
 
 
+def test_p1_tree_parse_args_accepts_path_quality_label_transform(monkeypatch):
+    import sys
+
+    from scripts.run_p1_tree_groups import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_p1_tree_groups.py",
+            "--label-transform",
+            "calmar",
+        ],
+    )
+    args = parse_args()
+    assert args.label_transform == "calmar"
+    assert args.label_truncate_quantile == pytest.approx(0.98)
+
+
 def test_build_p1_tree_research_config_id_is_stable_and_readable():
     config_id = build_p1_tree_research_config_id(
         rebalance_rule="2W",
@@ -1149,6 +1198,20 @@ def test_build_p1_tree_research_config_id_includes_non_default_label_weights():
         xgboost_objective="regression",
     )
     assert config_id == "rb_m_top20_lh_5-10-20_px_5_val20_lw_10-20-70_lbl_rank_fusion_obj_regression"
+
+
+def test_build_p1_tree_research_config_id_includes_non_raw_label_transform():
+    config_id = build_p1_tree_research_config_id(
+        rebalance_rule="M",
+        top_k=20,
+        label_horizons=[5, 10, 20],
+        proxy_horizon=5,
+        val_frac=0.2,
+        label_mode="rank_fusion",
+        label_transform="calmar",
+        xgboost_objective="regression",
+    )
+    assert config_id == "rb_m_top20_lh_5-10-20_px_5_val20_lbl_rank_fusion_lt_calmar_obj_regression"
 
 
 def test_build_p1_tree_output_stem_includes_tag_config_and_timestamp():

@@ -130,6 +130,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--label-horizons", type=str, default="", help="多窗口标签融合，如 5,10,20")
     p.add_argument("--label-weights", type=str, default="", help="多窗口标签融合权重，如 0.5,0.3,0.2")
     p.add_argument(
+        "--label-transform",
+        choices=("raw", "sharpe", "calmar", "truncate"),
+        default="raw",
+        help="前瞻标签变换：raw 为收益，sharpe/calmar 惩罚持有路径波动或回撤，truncate 截断极端收益",
+    )
+    p.add_argument(
+        "--label-truncate-quantile",
+        type=float,
+        default=0.98,
+        help="label-transform=truncate 时的截断分位数",
+    )
+    p.add_argument(
         "--label-mode",
         choices=(
             "rank_fusion",
@@ -302,7 +314,10 @@ def _run_full_backtest_for_group(
 
 
 def main() -> int:
-    from src.backtest.transaction_costs import transaction_cost_params_from_mapping
+    from src.backtest.transaction_costs import (
+        cost_params_dict_for_logging,
+        transaction_cost_params_from_mapping,
+    )
     from src.data_fetcher import DuckDBManager, list_default_universe_symbols
     from src.features.tree_dataset import long_factor_panel_from_daily
     from src.models.data_slice import normalize_slice_spec
@@ -392,6 +407,9 @@ def main() -> int:
     technical_names = panel_generation_feature_names()
     panel_parts: list[pd.DataFrame] = []
     y_columns: list[str] = []
+    label_transform = str(args.label_transform).lower().strip()
+    label_truncate_quantile = float(args.label_truncate_quantile)
+    transformed_label_columns: list[str] = []
     for h in label_horizons:
         panel_h = long_factor_panel_from_daily(
             daily_df,
@@ -423,13 +441,49 @@ def main() -> int:
             return 1
         y_h = f"forward_ret_{h}d"
         keep_cols = ["symbol", "trade_date", *technical_names, y_h]
+        if label_transform != "raw":
+            label_panel_h = long_factor_panel_from_daily(
+                daily_df,
+                horizon=h,
+                min_valid_days=min_valid,
+                momentum_window=mom_w,
+                rsi_period=rsi_p,
+                atr_period=atr_p,
+                vol_window=vol_w,
+                turnover_window=to_w,
+                vp_corr_window=vp_w,
+                reversal_window=rev_w,
+                device=device_str,
+                dtype=torch_dtype,
+                factor_names=technical_names,
+                label_transform=label_transform,
+                label_truncate_quantile=label_truncate_quantile,
+                bias_window_short=bias_ws,
+                bias_window_long=bias_wl,
+                max_drop_window=max_drop_w,
+                recent_return_window=recent_ret_w,
+                price_position_window=pp_w,
+                tail_window=tail_w,
+                vpt_window=vpt_w,
+                range_skew_window=range_skew_w,
+                orthogonalize=orthogonalize,
+                orthogonalize_method=orthogonalize_method,
+            )
+            if label_panel_h.empty:
+                print(f"horizon={h}, label_transform={label_transform} 生成标签面板为空", file=sys.stderr)
+                return 1
+            y_label = f"forward_{label_transform}_{h}d"
+            label_panel_h = label_panel_h[["symbol", "trade_date", y_h]].rename(columns={y_h: y_label})
+            panel_h = panel_h.merge(label_panel_h, on=["symbol", "trade_date"], how="inner")
+            keep_cols.append(y_label)
+            transformed_label_columns.append(y_label)
         y_columns.append(y_h)
         panel_parts.append(panel_h[keep_cols].copy())
 
     panel = panel_parts[0]
     for panel_h in panel_parts[1:]:
-        y_h = [c for c in panel_h.columns if c.startswith("forward_ret_")][0]
-        panel = panel.merge(panel_h[["symbol", "trade_date", y_h]], on=["symbol", "trade_date"], how="inner")
+        forward_cols = [c for c in panel_h.columns if c.startswith("forward_ret_") or c.startswith("forward_")]
+        panel = panel.merge(panel_h[["symbol", "trade_date", *forward_cols]], on=["symbol", "trade_date"], how="inner")
     if panel.empty:
         print("合并多标签后面板为空", file=sys.stderr)
         return 1
@@ -456,7 +510,10 @@ def main() -> int:
 
     label_mode = str(args.label_mode)
     execution_mode = str(backtest_cfg.get("execution_mode", "tplus1_open"))
+    effective_y_columns = transformed_label_columns if label_transform != "raw" else y_columns
     if label_mode.startswith("monthly_investable"):
+        if label_transform != "raw":
+            raise ValueError("monthly_investable 标签已自行按调仓期构造，不能叠加 --label-transform")
         panel, target_column, label_meta = build_p1_monthly_investable_label(
             panel,
             daily_df,
@@ -467,23 +524,27 @@ def main() -> int:
             out_col="forward_ret_investable",
         )
     elif len(y_columns) == 1 and label_mode == "raw_fusion":
-        target_column = y_columns[0]
+        target_column = effective_y_columns[0]
         label_meta = {
             "label_mode": "raw_fusion",
-            "label_scope": "raw_return",
-            "label_component_columns": ",".join(y_columns),
+            "label_scope": "raw_return" if label_transform == "raw" else f"{label_transform}_path_quality",
+            "label_component_columns": ",".join(effective_y_columns),
             "label_weights_normalized": "1",
             "label_market_proxy": "",
+            "label_transform": label_transform,
+            "label_truncate_quantile": label_truncate_quantile if label_transform == "truncate" else "",
         }
     else:
         panel, target_column, label_meta = build_p1_training_label(
             panel,
-            label_columns=y_columns,
+            label_columns=effective_y_columns,
             label_weights=label_weights,
             label_mode=label_mode,
             date_col="trade_date",
             out_col="forward_ret_fused",
         )
+        label_meta["label_transform"] = label_transform
+        label_meta["label_truncate_quantile"] = label_truncate_quantile if label_transform == "truncate" else ""
     if panel.empty:
         print("标签融合后无有效样本", file=sys.stderr)
         return 1
@@ -492,7 +553,7 @@ def main() -> int:
     if proxy_col not in panel.columns:
         print(f"缺少 proxy_horizon 对应列: {proxy_col}", file=sys.stderr)
         return 1
-    diagnostic_label_columns = [target_column] if label_mode.startswith("monthly_investable") else y_columns
+    diagnostic_label_columns = [target_column] if label_mode.startswith("monthly_investable") else effective_y_columns
     diagnostic_label_weights = [1.0] if label_mode.startswith("monthly_investable") else label_weights
     label_diagnostics = summarize_p1_label_diagnostics(
         panel,
@@ -545,6 +606,7 @@ def main() -> int:
         proxy_horizon=int(proxy_horizon),
         val_frac=float(args.val_frac),
         label_mode=label_mode,
+        label_transform=label_transform,
         xgboost_objective=str(args.xgboost_objective),
     )
     generated_at = pd.Timestamp.utcnow()
@@ -579,6 +641,8 @@ def main() -> int:
                 "scope": str(label_meta.get("label_scope") or label_mode),
                 "label_mode": label_mode,
                 "label_market_proxy": str(label_meta.get("label_market_proxy") or ""),
+                "label_transform": label_transform,
+                "label_truncate_quantile": label_truncate_quantile if label_transform == "truncate" else "",
                 "xgboost_objective": str(args.xgboost_objective),
                 "research_topic": "p1_tree_groups",
                 "research_config_id": research_config_id,
@@ -799,12 +863,23 @@ def main() -> int:
                 "label_scope": str(label_meta.get("label_scope") or label_mode),
                 "label_horizons": ",".join(str(x) for x in label_horizons),
                 "label_weights": ",".join(f"{float(x):.8g}" for x in label_weights),
+                "label_transform": label_transform,
+                "label_truncate_quantile": label_truncate_quantile if label_transform == "truncate" else "",
                 "xgboost_objective": str(args.xgboost_objective),
                 "rebalance_rule": args.rebalance_rule,
                 "top_k": int(args.top_k),
                 "execution_mode": execution_mode,
                 "daily_proxy_admission_threshold": daily_proxy_admission_threshold,
                 "daily_proxy_full_backtest_threshold": daily_proxy_full_backtest_threshold,
+                "daily_proxy_max_turnover": float(args.proxy_max_turnover),
+                "backtest_config": str(args.backtest_config),
+                "backtest_start": str(args.backtest_start),
+                "backtest_end": str(args.backtest_end),
+                "backtest_top_k": int(args.backtest_top_k),
+                "backtest_max_turnover": float(args.backtest_max_turnover),
+                "backtest_portfolio_method": str(args.backtest_portfolio_method),
+                "backtest_prepared_factors_cache": str(args.backtest_prepared_factors_cache),
+                "transaction_costs": json.dumps(cost_params_dict_for_logging(costs), ensure_ascii=False, sort_keys=True),
                 "feature_count": int(len(available_features)),
                 "features": ",".join(available_features),
                 "missing_features": ",".join(missing_features),
@@ -945,11 +1020,35 @@ def main() -> int:
             "benchmark_symbol": "market_ew_proxy",
             "label_horizons": label_horizons,
             "label_weights": label_weights,
+            "label_transform": label_transform,
+            "label_truncate_quantile": label_truncate_quantile if label_transform == "truncate" else "",
+            "label_spec": {
+                "label_mode": label_mode,
+                "label_scope": str(label_meta.get("label_scope") or label_mode),
+                "label_horizons": label_horizons,
+                "label_weights": label_weights,
+                "label_component_columns": str(label_meta.get("label_component_columns") or ""),
+                "label_weights_normalized": str(label_meta.get("label_weights_normalized") or ""),
+                "label_market_proxy": str(label_meta.get("label_market_proxy") or ""),
+                "label_transform": label_transform,
+                "label_truncate_quantile": label_truncate_quantile if label_transform == "truncate" else "",
+                "target_column": target_column,
+                "proxy_horizon": int(proxy_horizon),
+            },
             "proxy_horizon": proxy_horizon,
             "rebalance_rule": args.rebalance_rule,
             "top_k": int(args.top_k),
+            "portfolio_method": str(args.backtest_portfolio_method),
             "execution_mode": execution_mode,
             "proxy_max_turnover": float(args.proxy_max_turnover),
+            "backtest_config": str(args.backtest_config),
+            "backtest_start": str(args.backtest_start),
+            "backtest_end": str(args.backtest_end),
+            "backtest_top_k": int(args.backtest_top_k),
+            "backtest_max_turnover": float(args.backtest_max_turnover),
+            "backtest_portfolio_method": str(args.backtest_portfolio_method),
+            "backtest_prepared_factors_cache": str(args.backtest_prepared_factors_cache),
+            "transaction_costs": cost_params_dict_for_logging(costs),
             "daily_proxy_admission_threshold": daily_proxy_admission_threshold,
             "daily_proxy_full_backtest_threshold": daily_proxy_full_backtest_threshold,
             "daily_proxy_admission_gate_enabled": not bool(args.disable_daily_proxy_admission_gate),

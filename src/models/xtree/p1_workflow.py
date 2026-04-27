@@ -124,6 +124,7 @@ def build_p1_tree_research_config_id(
     proxy_horizon: int,
     val_frac: float,
     label_mode: str = "",
+    label_transform: str = "raw",
     xgboost_objective: str = "",
 ) -> str:
     """把核心研究参数压成稳定 config id，便于结果/工件追踪。"""
@@ -149,6 +150,9 @@ def build_p1_tree_research_config_id(
             parts.append("lw_" + "-".join(f"{int(round(w * 100)):02d}" for w in weights))
     if label_mode:
         parts.append(f"lbl_{_slugify_token(label_mode)}")
+    transform = _slugify_token(label_transform or "raw")
+    if transform != "raw":
+        parts.append(f"lt_{transform}")
     if xgboost_objective:
         parts.append(f"obj_{_slugify_token(xgboost_objective)}")
     return "_".join(parts)
@@ -1868,6 +1872,8 @@ def build_p1_daily_proxy_first_report(
     research_config_id = str(payload.get("research_config_id", ""))
     generated_at = str(payload.get("generated_at_utc", ""))
     label_meta = payload.get("label_meta", {}) or {}
+    label_spec = cfg.get("label_spec", {}) or {}
+    transaction_costs = cfg.get("transaction_costs", {}) or {}
 
     if daily_leaderboard_df.empty:
         headline = "无 daily proxy leaderboard，不能判读。"
@@ -2017,11 +2023,28 @@ def build_p1_daily_proxy_first_report(
 | legacy_proxy_decision_role | `{cfg.get("legacy_proxy_decision_role", "")}` |
 | label_mode | `{label_meta.get("label_mode", "")}` |
 | label_scope | `{label_meta.get("label_scope", "")}` |
+| label_horizons | `{",".join(str(x) for x in cfg.get("label_horizons", []))}` |
+| label_weights | `{",".join(str(x) for x in cfg.get("label_weights", []))}` |
+| label_transform | `{cfg.get("label_transform", label_spec.get("label_transform", ""))}` |
+| label_truncate_quantile | `{cfg.get("label_truncate_quantile", label_spec.get("label_truncate_quantile", ""))}` |
+| label_component_columns | `{label_spec.get("label_component_columns", label_meta.get("label_component_columns", ""))}` |
+| target_column | `{label_spec.get("target_column", "")}` |
+| proxy_horizon | `{cfg.get("proxy_horizon", "")}` |
 | xgboost_objective | `{payload.get("xgboost_objective", "")}` |
 | benchmark_symbol | `market_ew_proxy` |
 | top_k | `{cfg.get("top_k", "")}` |
 | rebalance_rule | `{cfg.get("rebalance_rule", "")}` |
+| portfolio_method | `{cfg.get("portfolio_method", cfg.get("backtest_portfolio_method", ""))}` |
 | execution_mode | `{cfg.get("execution_mode", "")}` |
+| proxy_max_turnover | `{_format_report_pct(cfg.get("proxy_max_turnover"))}` |
+| backtest_config | `{cfg.get("backtest_config", "")}` |
+| backtest_start | `{cfg.get("backtest_start", "")}` |
+| backtest_end | `{cfg.get("backtest_end", "")}` |
+| backtest_top_k | `{cfg.get("backtest_top_k", "")}` |
+| backtest_max_turnover | `{_format_report_pct(cfg.get("backtest_max_turnover"))}` |
+| backtest_portfolio_method | `{cfg.get("backtest_portfolio_method", "")}` |
+| backtest_prepared_factors_cache | `{cfg.get("backtest_prepared_factors_cache", "")}` |
+| transaction_costs_bps | `buy_commission={transaction_costs.get("commission_buy_bps", "")}, sell_commission={transaction_costs.get("commission_sell_bps", "")}, slippage={transaction_costs.get("slippage_bps_per_side", "")}, stamp_duty={transaction_costs.get("stamp_duty_sell_bps", "")}` |
 | daily_proxy_admission_threshold | `{_format_report_pct(cfg.get("daily_proxy_admission_threshold"))}` |
 | daily_proxy_full_backtest_threshold | `{_format_report_pct(cfg.get("daily_proxy_full_backtest_threshold"))}` |
 
