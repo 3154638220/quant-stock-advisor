@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.light_strategy_proxy import infer_periods_per_year, summarize_signal_diagnostic
+from src.backtest.engine import BacktestConfig, build_open_to_open_returns, run_backtest
 from src.features.tree_dataset import default_tree_factor_names
 
 WEEKLY_KDJ_TREE_FEATURES: tuple[str, ...] = (
@@ -442,6 +443,431 @@ def build_tree_light_proxy_detail(
     return pd.DataFrame(rows)
 
 
+def _equal_weight_turnover(prev: set[str], cur: set[str], *, top_k: int) -> float:
+    if top_k <= 0:
+        return float("nan")
+    if not prev and not cur:
+        return 0.0
+    if not prev:
+        return 1.0
+    return float(1.0 - (len(prev & cur) / float(top_k)))
+
+
+def build_tree_turnover_aware_proxy_detail(
+    scored_panel: pd.DataFrame,
+    *,
+    score_col: str,
+    proxy_return_col: str,
+    rebalance_rule: str,
+    top_k: int,
+    max_turnover: float,
+    scenario: str,
+) -> pd.DataFrame:
+    """
+    构造更接近正式回测的轻量代理。
+
+    与 ``build_tree_light_proxy_detail`` 一样只使用验证集前瞻收益；额外模拟
+    ``equal_weight + Top-K + max_turnover`` 的月频持仓延续，避免每期无约束重选
+    导致 proxy 高估可执行收益。
+    """
+    if top_k < 1:
+        raise ValueError("top_k 须 >= 1")
+    if score_col not in scored_panel.columns:
+        raise ValueError(f"缺少 score_col={score_col}")
+    if proxy_return_col not in scored_panel.columns:
+        raise ValueError(f"缺少 proxy_return_col={proxy_return_col}")
+    if "symbol" not in scored_panel.columns:
+        raise ValueError("缺少 symbol 列")
+
+    df = scored_panel.copy()
+    df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["trade_date"]).copy()
+    out_cols = [
+        "period",
+        "trade_date",
+        "strategy_return",
+        "benchmark_return",
+        "scenario",
+        "excess_return",
+        "benchmark_up",
+        "strategy_up",
+        "beat_benchmark",
+        "selected_count",
+        "turnover_half_l1",
+        "retained_from_prev_count",
+        "target_topk_overlap_count",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    max_turnover = float(max(0.0, min(1.0, max_turnover)))
+    chosen = select_rebalance_dates(df["trade_date"].unique(), rebalance_rule=rebalance_rule)
+    prev_holdings: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for row in chosen.itertuples(index=False):
+        day = df[df["trade_date"] == row.trade_date].copy()
+        if day.empty:
+            continue
+        day[score_col] = pd.to_numeric(day[score_col], errors="coerce")
+        day[proxy_return_col] = pd.to_numeric(day[proxy_return_col], errors="coerce")
+        day = day[np.isfinite(day[score_col]) & np.isfinite(day[proxy_return_col])].copy()
+        if day.empty:
+            continue
+
+        ranked = day.sort_values(score_col, ascending=False).drop_duplicates(subset=["symbol"], keep="first")
+        target = ranked.head(top_k).copy()
+        selected = target.copy()
+        target_symbols = set(target["symbol"].astype(str))
+        target_overlap_count = int(len(target_symbols & prev_holdings))
+
+        if prev_holdings and max_turnover < 1.0 and len(selected) >= top_k:
+            required_overlap = int(np.ceil(top_k * (1.0 - max_turnover)))
+            if target_overlap_count < required_overlap:
+                need = required_overlap - target_overlap_count
+                selected_symbols = set(selected["symbol"].astype(str))
+                cand_prev = ranked[
+                    ranked["symbol"].astype(str).isin(prev_holdings)
+                    & ~ranked["symbol"].astype(str).isin(selected_symbols)
+                ].head(need)
+                if not cand_prev.empty:
+                    drop_cnt = min(len(cand_prev), len(selected))
+                    non_overlap = selected[~selected["symbol"].astype(str).isin(prev_holdings)]
+                    if len(non_overlap) >= drop_cnt:
+                        to_drop = non_overlap.nsmallest(drop_cnt, score_col).index
+                    else:
+                        to_drop = selected.nsmallest(drop_cnt, score_col).index
+                    selected = selected.drop(index=to_drop)
+                    selected = pd.concat([selected, cand_prev], ignore_index=True)
+                    selected = (
+                        selected.drop_duplicates(subset=["symbol"], keep="first")
+                        .sort_values(score_col, ascending=False)
+                        .head(top_k)
+                    )
+
+        selected_symbols = set(selected["symbol"].astype(str))
+        strategy_ret = float(pd.to_numeric(selected[proxy_return_col], errors="coerce").mean())
+        benchmark_ret = float(pd.to_numeric(day[proxy_return_col], errors="coerce").mean())
+        excess_ret = strategy_ret - benchmark_ret
+        rows.append(
+            {
+                "period": row.period,
+                "trade_date": pd.Timestamp(row.trade_date),
+                "strategy_return": strategy_ret,
+                "benchmark_return": benchmark_ret,
+                "scenario": scenario,
+                "excess_return": excess_ret,
+                "benchmark_up": benchmark_ret > 0.0,
+                "strategy_up": strategy_ret > 0.0,
+                "beat_benchmark": excess_ret > 0.0,
+                "selected_count": int(len(selected_symbols)),
+                "turnover_half_l1": _equal_weight_turnover(prev_holdings, selected_symbols, top_k=top_k),
+                "retained_from_prev_count": int(len(selected_symbols & prev_holdings)),
+                "target_topk_overlap_count": target_overlap_count,
+            }
+        )
+        prev_holdings = selected_symbols
+
+    return pd.DataFrame(rows, columns=out_cols)
+
+
+def _select_turnover_capped_equal_weight_symbols(
+    ranked: pd.DataFrame,
+    *,
+    symbol_col: str,
+    score_col: str,
+    top_k: int,
+    max_turnover: float,
+    prev_holdings: set[str],
+) -> tuple[list[str], int]:
+    target = ranked.head(top_k).copy()
+    selected = target.copy()
+    target_symbols = set(target[symbol_col].astype(str))
+    target_overlap_count = int(len(target_symbols & prev_holdings))
+
+    if prev_holdings and max_turnover < 1.0 and len(selected) >= top_k:
+        required_overlap = int(np.ceil(top_k * (1.0 - max_turnover)))
+        if target_overlap_count < required_overlap:
+            need = required_overlap - target_overlap_count
+            selected_symbols = set(selected[symbol_col].astype(str))
+            cand_prev = ranked[
+                ranked[symbol_col].astype(str).isin(prev_holdings)
+                & ~ranked[symbol_col].astype(str).isin(selected_symbols)
+            ].head(need)
+            if not cand_prev.empty:
+                drop_cnt = min(len(cand_prev), len(selected))
+                non_overlap = selected[~selected[symbol_col].astype(str).isin(prev_holdings)]
+                if len(non_overlap) >= drop_cnt:
+                    to_drop = non_overlap.nsmallest(drop_cnt, score_col).index
+                else:
+                    to_drop = selected.nsmallest(drop_cnt, score_col).index
+                selected = selected.drop(index=to_drop)
+                selected = pd.concat([selected, cand_prev], ignore_index=True)
+                selected = (
+                    selected.drop_duplicates(subset=[symbol_col], keep="first")
+                    .sort_values(score_col, ascending=False)
+                    .head(top_k)
+                )
+
+    return [str(s).zfill(6) for s in selected[symbol_col].astype(str).tolist()], target_overlap_count
+
+
+def build_tree_score_weight_matrix(
+    scored_panel: pd.DataFrame,
+    *,
+    score_col: str,
+    rebalance_rule: str,
+    top_k: int,
+    max_turnover: float,
+    symbol_col: str = "symbol",
+    date_col: str = "trade_date",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """由树模型分数构造 equal-weight Top-K 调仓权重，并显式应用换手上限。"""
+    if top_k < 1:
+        raise ValueError("top_k 须 >= 1")
+    required = {symbol_col, date_col, score_col}
+    missing = sorted(required - set(scored_panel.columns))
+    if missing:
+        raise ValueError(f"scored_panel 缺少列: {missing}")
+
+    df = scored_panel[[symbol_col, date_col, score_col]].copy()
+    df[symbol_col] = df[symbol_col].astype(str).str.zfill(6)
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+    df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
+    df = df.dropna(subset=[symbol_col, date_col, score_col]).copy()
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    max_turnover = float(max(0.0, min(1.0, max_turnover)))
+    chosen = select_rebalance_dates(df[date_col].unique(), rebalance_rule=rebalance_rule)
+    prev_holdings: set[str] = set()
+    rows: list[pd.Series] = []
+    diag_rows: list[dict[str, Any]] = []
+    all_symbols = sorted(df[symbol_col].unique().tolist())
+
+    for row in chosen.itertuples(index=False):
+        day = df[df[date_col] == row.trade_date].copy()
+        if day.empty:
+            continue
+        ranked = day.sort_values(score_col, ascending=False).drop_duplicates(subset=[symbol_col], keep="first")
+        if ranked.empty:
+            continue
+        selected_symbols, target_overlap_count = _select_turnover_capped_equal_weight_symbols(
+            ranked,
+            symbol_col=symbol_col,
+            score_col=score_col,
+            top_k=int(top_k),
+            max_turnover=max_turnover,
+            prev_holdings=prev_holdings,
+        )
+        if not selected_symbols:
+            continue
+        selected_set = set(selected_symbols)
+        weight = 1.0 / float(len(selected_symbols))
+        w = pd.Series(0.0, index=all_symbols, name=pd.Timestamp(row.trade_date), dtype=np.float64)
+        for sym in selected_symbols:
+            w.loc[sym] = weight
+        rows.append(w)
+        diag_rows.append(
+            {
+                "period": row.period,
+                "trade_date": pd.Timestamp(row.trade_date),
+                "selected_count": int(len(selected_symbols)),
+                "turnover_half_l1": _equal_weight_turnover(prev_holdings, selected_set, top_k=top_k),
+                "retained_from_prev_count": int(len(selected_set & prev_holdings)),
+                "target_topk_overlap_count": int(target_overlap_count),
+            }
+        )
+        prev_holdings = selected_set
+
+    weights = pd.DataFrame(rows) if rows else pd.DataFrame()
+    if not weights.empty:
+        weights.index = pd.to_datetime(weights.index).normalize()
+        weights = weights.sort_index()
+    return weights, pd.DataFrame(diag_rows)
+
+
+def _market_ew_close_to_close_benchmark(
+    daily_df: pd.DataFrame,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    min_days: int,
+) -> pd.Series:
+    df = daily_df[
+        (pd.to_datetime(daily_df["trade_date"], errors="coerce") >= start)
+        & (pd.to_datetime(daily_df["trade_date"], errors="coerce") <= end)
+        & (pd.to_numeric(daily_df["close"], errors="coerce") > 0)
+    ].copy()
+    if df.empty:
+        return pd.Series(dtype=np.float64)
+    df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.normalize()
+    sym_cnt = df.groupby("symbol")["trade_date"].count()
+    good = sym_cnt[sym_cnt >= int(max(1, min_days))].index
+    if len(good) == 0:
+        good = sym_cnt.index
+    df = df[df["symbol"].isin(good)].sort_values(["symbol", "trade_date"])
+    df["ret"] = pd.to_numeric(df.groupby("symbol")["close"].pct_change(), errors="coerce")
+    out = df.dropna(subset=["ret"]).groupby("trade_date")["ret"].mean()
+    out.index = pd.to_datetime(out.index).normalize()
+    return out.sort_index().astype(np.float64)
+
+
+def build_tree_daily_backtest_like_proxy_detail(
+    scored_panel: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    *,
+    score_col: str,
+    rebalance_rule: str,
+    top_k: int,
+    max_turnover: float,
+    scenario: str,
+    cost_params: Any = None,
+    execution_mode: str = "tplus1_open",
+    execution_lag: int = 1,
+    limit_up_mode: str = "idle",
+    vwap_slippage_bps_per_side: float = 3.0,
+    vwap_impact_bps: float = 8.0,
+    market_ew_min_days: int | None = None,
+    precomputed_asset_returns: pd.DataFrame | None = None,
+    precomputed_market_benchmark: pd.Series | None = None,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """
+    构造 full-backtest-like 日频轻量代理。
+
+    该层直接复用正式回测引擎的日频收益、成本和 ``market_ew`` 对齐口径，
+    但只跑当前验证窗分数生成的一条权重序列，不进入完整 OOS/grid/report。
+    """
+    weights, weight_diag = build_tree_score_weight_matrix(
+        scored_panel,
+        score_col=score_col,
+        rebalance_rule=rebalance_rule,
+        top_k=top_k,
+        max_turnover=max_turnover,
+    )
+    out_cols = [
+        "period",
+        "trade_date",
+        "strategy_return",
+        "benchmark_return",
+        "scenario",
+        "excess_return",
+        "benchmark_up",
+        "strategy_up",
+        "beat_benchmark",
+        "turnover_half_l1",
+    ]
+    if weights.empty:
+        return pd.DataFrame(columns=out_cols), {"n_rebalances": 0, "avg_turnover_half_l1": float("nan")}
+
+    daily = daily_df.copy()
+    daily["symbol"] = daily["symbol"].astype(str).str.zfill(6)
+    daily["trade_date"] = pd.to_datetime(daily["trade_date"], errors="coerce").dt.normalize()
+    start = pd.Timestamp(weights.index.min()).normalize()
+    end = pd.Timestamp(daily["trade_date"].max()).normalize()
+    target_cols = sorted(set(weights.columns) | set(daily["symbol"].unique()))
+
+    exe = str(execution_mode).lower().strip()
+    if precomputed_asset_returns is not None:
+        asset_returns = precomputed_asset_returns.copy().sort_index()
+        asset_returns.index = pd.to_datetime(asset_returns.index, errors="coerce").normalize()
+        asset_returns = asset_returns.reindex(columns=target_cols).fillna(0.0)
+        asset_returns = asset_returns[(asset_returns.index >= start) & (asset_returns.index <= end)]
+    elif exe == "tplus1_open":
+        asset_returns = build_open_to_open_returns(daily, zero_if_limit_up_open=False).sort_index()
+        asset_returns = asset_returns.reindex(columns=target_cols).fillna(0.0)
+        asset_returns = asset_returns[(asset_returns.index >= start) & (asset_returns.index <= end)]
+    else:
+        d = daily[
+            (daily["trade_date"] >= start)
+            & (daily["trade_date"] <= end)
+            & (pd.to_numeric(daily["close"], errors="coerce") > 0)
+        ].sort_values(["symbol", "trade_date"]).copy()
+        d["ret"] = d.groupby("symbol")["close"].pct_change()
+        asset_returns = d.pivot(index="trade_date", columns="symbol", values="ret").sort_index()
+        asset_returns = asset_returns.reindex(columns=target_cols).fillna(0.0)
+
+    weights = weights.reindex(columns=target_cols, fill_value=0.0)
+    if asset_returns.empty:
+        return pd.DataFrame(columns=out_cols), {"n_rebalances": int(len(weights)), "avg_turnover_half_l1": float("nan")}
+    asset_returns = asset_returns[asset_returns.index >= start]
+    if weights.index.min() > asset_returns.index.min():
+        seed = weights.iloc[[0]].copy()
+        seed.index = pd.DatetimeIndex([asset_returns.index.min()])
+        weights = pd.concat([seed, weights], axis=0)
+        weights = weights[~weights.index.duplicated(keep="last")].sort_index()
+
+    bt = BacktestConfig(
+        cost_params=cost_params,
+        execution_mode=exe,
+        execution_lag=int(execution_lag),
+        limit_up_mode=str(limit_up_mode),
+        vwap_slippage_bps_per_side=float(vwap_slippage_bps_per_side),
+        vwap_impact_bps=float(vwap_impact_bps),
+    )
+    res = run_backtest(asset_returns, weights, config=bt)
+
+    n_trade_days = int(asset_returns.index.nunique())
+    min_days = int(market_ew_min_days) if market_ew_min_days is not None else max(20, int(0.35 * max(n_trade_days, 1)))
+    if precomputed_market_benchmark is not None:
+        bench = precomputed_market_benchmark.copy().sort_index()
+        bench.index = pd.to_datetime(bench.index, errors="coerce").normalize()
+        bench = bench[(bench.index >= start) & (bench.index <= end)].astype(np.float64)
+    else:
+        bench = _market_ew_close_to_close_benchmark(daily, start=start, end=end, min_days=min_days)
+    common = res.daily_returns.index.intersection(bench.index).sort_values()
+    if common.empty:
+        detail = pd.DataFrame(columns=out_cols)
+    else:
+        strat = res.daily_returns.reindex(common).fillna(0.0)
+        b = bench.reindex(common).fillna(0.0)
+        detail = pd.DataFrame(
+            {
+                "period": pd.DatetimeIndex(common).strftime("%Y-%m-%d"),
+                "trade_date": common,
+                "strategy_return": strat.to_numpy(dtype=np.float64),
+                "benchmark_return": b.to_numpy(dtype=np.float64),
+                "scenario": scenario,
+            }
+        )
+        detail["excess_return"] = detail["strategy_return"] - detail["benchmark_return"]
+        detail["benchmark_up"] = detail["benchmark_return"] > 0.0
+        detail["strategy_up"] = detail["strategy_return"] > 0.0
+        detail["beat_benchmark"] = detail["excess_return"] > 0.0
+        detail = detail.merge(
+            res.rebalance_turnover.rename("turnover_half_l1").reset_index().rename(columns={"index": "trade_date"}),
+            on="trade_date",
+            how="left",
+        )
+    meta = {
+        "n_rebalances": int(len(weight_diag)),
+        "avg_turnover_half_l1": float(pd.to_numeric(weight_diag.get("turnover_half_l1"), errors="coerce").mean())
+        if not weight_diag.empty
+        else float("nan"),
+        "market_ew_min_days": int(min_days),
+        "daily_periods_per_year": 252.0,
+        "backtest_like_strategy_annualized_return_engine": float(res.panel.annualized_return),
+        "backtest_like_strategy_max_drawdown_engine": float(res.panel.max_drawdown),
+    }
+    return detail, meta
+
+
+def summarize_tree_daily_backtest_like_proxy(
+    detail_df: pd.DataFrame,
+) -> dict[str, float]:
+    """汇总 full-backtest-like 日频轻量代理。"""
+    summary = summarize_signal_diagnostic(detail_df, periods_per_year=252.0)
+    summary["periods_per_year"] = 252.0
+    if not detail_df.empty:
+        summary["avg_turnover_half_l1"] = float(
+            pd.to_numeric(detail_df.get("turnover_half_l1"), errors="coerce").mean()
+        )
+    else:
+        summary["avg_turnover_half_l1"] = float("nan")
+    return summary
+
+
 def summarize_tree_group_result(
     detail_df: pd.DataFrame,
     *,
@@ -677,6 +1103,7 @@ def build_group_comparison_table(
         pd.to_numeric(out["annualized_excess_vs_market"], errors="coerce") - base_proxy
     )
     delta_pairs = {
+        "daily_bt_like_proxy_annualized_excess_vs_market": "delta_vs_baseline_daily_bt_like_proxy_excess",
         "full_backtest_annualized_excess_vs_market": "delta_vs_baseline_full_backtest_excess",
         "rolling_oos_median_ann_return": "delta_vs_baseline_rolling_oos_ann_return",
         "slice_oos_median_ann_return": "delta_vs_baseline_slice_oos_ann_return",
@@ -690,6 +1117,14 @@ def build_group_comparison_table(
             continue
         base_val = float(pd.to_numeric(base[col], errors="coerce").iloc[0])
         out[delta_col] = pd.to_numeric(out[col], errors="coerce") - base_val
+
+    if "daily_bt_like_proxy_annualized_excess_vs_market" in out.columns:
+        daily_proxy = pd.to_numeric(out["daily_bt_like_proxy_annualized_excess_vs_market"], errors="coerce")
+        if "daily_proxy_admission_threshold" in out.columns:
+            threshold = pd.to_numeric(out["daily_proxy_admission_threshold"], errors="coerce").fillna(0.0)
+        else:
+            threshold = pd.Series(0.0, index=out.index)
+        out["pass_p1_daily_proxy_admission_gate"] = daily_proxy.notna() & (daily_proxy >= threshold)
 
     if "delta_vs_baseline_full_backtest_excess" in out.columns:
         out["pass_p1_val_rank_ic_gate"] = _non_degrade(out["delta_vs_baseline_val_rank_ic"])

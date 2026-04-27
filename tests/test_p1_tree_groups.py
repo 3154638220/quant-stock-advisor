@@ -18,11 +18,15 @@ from src.models.xtree.p1_workflow import (
     build_p1_tree_output_stem,
     build_p1_tree_research_config_id,
     build_group_comparison_table,
+    build_tree_daily_backtest_like_proxy_detail,
     build_tree_direction_diagnostic_table,
     build_tree_light_proxy_detail,
+    build_tree_score_weight_matrix,
+    build_tree_turnover_aware_proxy_detail,
     p1_tree_feature_groups,
     resolve_available_feature_names,
     summarize_p1_label_diagnostics,
+    summarize_tree_daily_backtest_like_proxy,
     select_rebalance_dates,
     summarize_p1_full_backtest_payload,
     summarize_tree_group_result,
@@ -144,6 +148,98 @@ def test_build_tree_light_proxy_detail_selects_topk_by_period():
     assert out["strategy_return"].tolist() == [0.08, 0.05]
     assert out["benchmark_return"].tolist() == pytest.approx([0.045, 0.015])
     assert out["beat_benchmark"].tolist() == [True, True]
+
+
+def test_build_tree_turnover_aware_proxy_keeps_prev_holdings_under_cap():
+    df = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(
+                ["2024-01-31"] * 4
+                + ["2024-02-29"] * 4
+            ),
+            "symbol": ["000001", "000002", "000003", "000004"] * 2,
+            "tree_score": [0.9, 0.8, 0.1, 0.0, 0.2, 0.1, 0.95, 0.94],
+            "forward_ret_5d": [0.05, 0.04, 0.00, 0.00, 0.01, 0.00, -0.10, -0.10],
+        }
+    )
+
+    out = build_tree_turnover_aware_proxy_detail(
+        df,
+        score_col="tree_score",
+        proxy_return_col="forward_ret_5d",
+        rebalance_rule="M",
+        top_k=2,
+        max_turnover=0.5,
+        scenario="G1",
+    )
+
+    assert out["period"].tolist() == ["2024-01", "2024-02"]
+    assert out.loc[1, "retained_from_prev_count"] == 1
+    assert out.loc[1, "turnover_half_l1"] == pytest.approx(0.5)
+    assert out.loc[1, "strategy_return"] == pytest.approx((-0.10 + 0.01) / 2.0)
+
+
+def test_build_tree_score_weight_matrix_applies_turnover_cap():
+    df = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-31"] * 4 + ["2024-02-29"] * 4),
+            "symbol": ["000001", "000002", "000003", "000004"] * 2,
+            "tree_score": [0.9, 0.8, 0.1, 0.0, 0.2, 0.1, 0.95, 0.94],
+        }
+    )
+
+    weights, diag = build_tree_score_weight_matrix(
+        df,
+        score_col="tree_score",
+        rebalance_rule="M",
+        top_k=2,
+        max_turnover=0.5,
+    )
+
+    assert weights.index.strftime("%Y-%m-%d").tolist() == ["2024-01-31", "2024-02-29"]
+    assert weights.loc[pd.Timestamp("2024-01-31"), ["000001", "000002"]].tolist() == [0.5, 0.5]
+    assert weights.loc[pd.Timestamp("2024-02-29"), "000001"] == pytest.approx(0.5)
+    assert weights.loc[pd.Timestamp("2024-02-29"), "000003"] == pytest.approx(0.5)
+    assert diag.loc[1, "turnover_half_l1"] == pytest.approx(0.5)
+
+
+def test_daily_backtest_like_proxy_uses_daily_open_returns_and_market_benchmark():
+    scored = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-31"] * 3),
+            "symbol": ["000001", "000002", "000003"],
+            "tree_score": [0.9, 0.2, 0.1],
+        }
+    )
+    daily = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2024-01-30", "2024-01-31", "2024-02-01", "2024-02-02"] * 3),
+            "symbol": ["000001"] * 4 + ["000002"] * 4 + ["000003"] * 4,
+            "open": [10.0, 10.0, 10.5, 11.025, 20.0, 20.0, 20.0, 20.0, 30.0, 30.0, 30.0, 30.0],
+            "close": [10.0, 10.0, 10.5, 11.025, 20.0, 20.0, 20.0, 20.0, 30.0, 30.0, 30.0, 30.0],
+        }
+    )
+
+    detail, meta = build_tree_daily_backtest_like_proxy_detail(
+        scored,
+        daily,
+        score_col="tree_score",
+        rebalance_rule="M",
+        top_k=1,
+        max_turnover=1.0,
+        scenario="G0",
+        cost_params=None,
+        market_ew_min_days=1,
+    )
+    summary = summarize_tree_daily_backtest_like_proxy(detail)
+
+    row = detail.loc[detail["trade_date"] == pd.Timestamp("2024-02-01")].iloc[0]
+    assert row["strategy_return"] == pytest.approx(0.05)
+    assert row["benchmark_return"] == pytest.approx(0.05 / 3.0)
+    assert row["excess_return"] == pytest.approx(0.05 - 0.05 / 3.0)
+    assert meta["n_rebalances"] == 1
+    assert summary["periods_per_year"] == 252.0
+    assert summary["n_periods"] >= 1
 
 
 def test_summarize_tree_group_result_uses_frequency_aware_annualization():
@@ -320,6 +416,53 @@ def test_build_group_comparison_table_adds_full_backtest_delta_when_present():
     assert bool(out.loc[out["group"] == "G4", "pass_p1_promotion_gate"].iloc[0]) is True
 
 
+def test_build_group_comparison_table_adds_daily_proxy_admission_gate():
+    out = build_group_comparison_table(
+        [
+            {
+                "group": "G0",
+                "val_rank_ic": 0.03,
+                "annualized_excess_vs_market": 0.10,
+                "daily_bt_like_proxy_annualized_excess_vs_market": -0.01,
+            },
+            {
+                "group": "G1",
+                "val_rank_ic": 0.04,
+                "annualized_excess_vs_market": 0.15,
+                "daily_bt_like_proxy_annualized_excess_vs_market": 0.002,
+            },
+        ]
+    )
+    row = out.loc[out["group"] == "G1"].iloc[0]
+    assert row["delta_vs_baseline_daily_bt_like_proxy_excess"] == pytest.approx(0.012)
+    assert bool(row["pass_p1_daily_proxy_admission_gate"]) is True
+    assert bool(out.loc[out["group"] == "G0", "pass_p1_daily_proxy_admission_gate"].iloc[0]) is False
+
+
+def test_build_group_comparison_table_respects_daily_proxy_threshold_column():
+    out = build_group_comparison_table(
+        [
+            {
+                "group": "G0",
+                "val_rank_ic": 0.03,
+                "annualized_excess_vs_market": 0.10,
+                "daily_bt_like_proxy_annualized_excess_vs_market": -0.005,
+                "daily_proxy_admission_threshold": -0.01,
+            },
+            {
+                "group": "G1",
+                "val_rank_ic": 0.04,
+                "annualized_excess_vs_market": 0.15,
+                "daily_bt_like_proxy_annualized_excess_vs_market": -0.02,
+                "daily_proxy_admission_threshold": -0.01,
+            },
+        ]
+    )
+
+    assert bool(out.loc[out["group"] == "G0", "pass_p1_daily_proxy_admission_gate"].iloc[0]) is True
+    assert bool(out.loc[out["group"] == "G1", "pass_p1_daily_proxy_admission_gate"].iloc[0]) is False
+
+
 def test_build_group_comparison_table_flags_failed_promotion_gate():
     out = build_group_comparison_table(
         [
@@ -447,6 +590,25 @@ def test_p1_tree_parse_args_accepts_history_and_sample_start(monkeypatch):
     args = parse_args()
     assert args.history_start == "2020-01-01"
     assert args.sample_start == "2021-01-01"
+
+
+def test_p1_tree_parse_args_accepts_daily_proxy_gate_controls(monkeypatch):
+    from scripts.run_p1_tree_groups import parse_args
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_p1_tree_groups.py",
+            "--daily-proxy-admission-threshold",
+            "-0.01",
+            "--disable-daily-proxy-admission-gate",
+        ],
+    )
+    args = parse_args()
+    assert args.daily_proxy_admission_threshold == pytest.approx(-0.01)
+    assert args.disable_daily_proxy_admission_gate is True
 
 
 def test_build_p1_tree_research_config_id_is_stable_and_readable():

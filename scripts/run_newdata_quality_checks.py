@@ -69,6 +69,94 @@ def build_newdata_quality_output_stem(
     return f"{slugify_token(output_prefix)}_{research_config_id}"
 
 
+def _markdown_cell(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value)
+    return text.replace("|", "\\|").replace("\n", "<br>")
+
+
+def _format_markdown_table(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "_无质量检查结果_"
+    columns = [str(col) for col in df.columns]
+    header = "| " + " | ".join(columns) + " |"
+    separator = "| " + " | ".join("---" for _ in columns) + " |"
+    rows = [
+        "| " + " | ".join(_markdown_cell(row[col]) for col in df.columns) + " |"
+        for _, row in df.iterrows()
+    ]
+    return "\n".join([header, separator, *rows])
+
+
+def _build_budget_decisions(report_df: pd.DataFrame) -> str:
+    if report_df.empty:
+        return "- 无可用质量检查结果；不继续投入 P2 研究预算。"
+
+    lines: list[str] = []
+    for _, row in report_df.iterrows():
+        family = str(row.get("family", "unknown"))
+        ok = bool(row.get("ok", False))
+        notes = str(row.get("notes", "") or "")
+        if family == "fund_flow":
+            if ok:
+                decision = "保留低优先级研究预算，只允许在明确机制假设下继续。"
+                reason = "基础覆盖、重复、全零与日线对齐检查通过；但既有 G2/G4 回测未给出主线增量。"
+            else:
+                decision = "暂停新增研究预算，仅保留数据链路维护。"
+                reason = notes or "基础质量检查未通过。"
+        elif family == "shareholder":
+            if ok:
+                decision = "保留极低优先级研究预算，仅在 PIT/覆盖带来新证据时重启。"
+                reason = "基础质量检查通过；但既有单因子与 G3 结论仍偏弱。"
+            else:
+                decision = "暂停新增研究预算，仅保留数据链路维护。"
+                reason = notes or "基础质量检查未通过。"
+        else:
+            decision = "暂不投入研究预算。"
+            reason = notes or "未知数据家族。"
+        lines.append(f"- `{family}`：{decision}原因：{reason}")
+    return "\n".join(lines)
+
+
+def _build_alignment_breakdown(report_df: pd.DataFrame) -> str:
+    if report_df.empty or "family" not in report_df.columns:
+        return "_无可用断层拆解。_"
+
+    lines: list[str] = []
+    fund = report_df[report_df["family"] == "fund_flow"]
+    if not fund.empty:
+        row = fund.iloc[0]
+
+        def _int(name: str) -> int:
+            val = row.get(name, 0)
+            return 0 if pd.isna(val) else int(float(val))
+
+        flow_max = str(row.get("max_date", "") or "")
+        daily_max = str(row.get("daily_max_date", "") or "")
+        total_missing = _int("rows_without_daily_match")
+        after_daily = _int("rows_after_daily_max_date")
+        in_span = _int("rows_without_daily_match_within_daily_span")
+        absent_rows = _int("rows_without_daily_match_absent_symbols")
+        known_rows = _int("rows_without_daily_match_known_symbols")
+        absent_symbols = _int("absent_symbol_count")
+        lines.append(
+            "- `fund_flow`："
+            f"资金流最新 `{flow_max}`，日线最新 `{daily_max}`；"
+            f"未匹配 `{total_missing}` 行，其中 `{after_daily}` 行晚于日线最新日期，"
+            f"`{in_span}` 行位于日线覆盖区间内。覆盖区间内未匹配里，"
+            f"`{absent_rows}` 行来自日线表完全没有的 `{absent_symbols}` 个标的，"
+            f"`{known_rows}` 行是日线已覆盖标的但具体日期未匹配。"
+        )
+
+    holder = report_df[report_df["family"] == "shareholder"]
+    if not holder.empty:
+        row = holder.iloc[0]
+        notes = str(row.get("notes", "") or "")
+        lines.append(f"- `shareholder`：当前主要断点仍是 `{notes or '未发现额外拆解信息'}`。")
+    return "\n".join(lines) if lines else "_无可用断层拆解。_"
+
+
 def _build_doc(
     report_df: pd.DataFrame,
     *,
@@ -78,7 +166,9 @@ def _build_doc(
     families: list[str],
 ) -> str:
     generated_at = pd.Timestamp.utcnow().isoformat()
-    table = report_df.to_markdown(index=False) if not report_df.empty else "_无质量检查结果_"
+    table = _format_markdown_table(report_df)
+    budget_decisions = _build_budget_decisions(report_df)
+    alignment_breakdown = _build_alignment_breakdown(report_df)
     return f"""# Newdata Quality Checks
 
 - 生成时间：`{generated_at}`
@@ -91,6 +181,14 @@ def _build_doc(
 ## Summary
 
 {table}
+
+## Research Budget Decision
+
+{budget_decisions}
+
+## Alignment Breakdown
+
+{alignment_breakdown}
 
 ## 说明
 
@@ -169,9 +267,17 @@ def main() -> int:
                     "total_rows": flow_report.total_rows,
                     "distinct_symbols": flow_report.distinct_symbols,
                     "max_date": flow_report.max_trade_date,
+                    "daily_max_date": flow_report.daily_max_trade_date,
                     "duplicate_pk_rows": flow_report.duplicate_pk_rows,
                     "coverage_ratio_vs_daily": flow_report.coverage_ratio_vs_daily,
                     "rows_without_daily_match": flow_report.rows_without_daily_match,
+                    "rows_after_daily_max_date": flow_report.rows_after_daily_max_date,
+                    "rows_without_daily_match_within_daily_span": (
+                        flow_report.rows_without_daily_match_within_daily_span
+                    ),
+                    "rows_without_daily_match_absent_symbols": flow_report.rows_without_daily_match_absent_symbols,
+                    "rows_without_daily_match_known_symbols": flow_report.rows_without_daily_match_known_symbols,
+                    "absent_symbol_count": flow_report.absent_symbol_count,
                     "all_zero_rows": flow_report.all_zero_flow_rows,
                     "notes": " | ".join(flow_report.notes),
                 }

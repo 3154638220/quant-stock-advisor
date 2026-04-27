@@ -192,9 +192,82 @@ def test_run_fund_flow_quality_checks_detects_alignment_and_zero_rows() -> None:
     assert r.table_exists
     assert r.duplicate_pk_rows == 1
     assert r.rows_without_daily_match == 1
+    assert r.rows_after_daily_max_date == 1
+    assert r.rows_without_daily_match_within_daily_span == 0
+    assert r.rows_without_daily_match_absent_symbols == 0
+    assert r.rows_without_daily_match_known_symbols == 0
+    assert r.absent_symbol_count == 0
+    assert r.daily_max_trade_date == "2024-01-03"
     assert r.all_zero_flow_rows == 1
     assert r.null_ratio_by_col["super_large_net_inflow_pct"] > 0.0
     assert r.coverage_ratio_vs_daily is not None
+
+
+def test_run_fund_flow_quality_checks_separates_in_span_mismatch_from_stale_daily() -> None:
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE a_share_daily (symbol VARCHAR, trade_date DATE)")
+    con.execute(
+        """
+        INSERT INTO a_share_daily VALUES
+        ('000001', '2024-01-02'),
+        ('000001', '2024-01-04'),
+        ('000002', '2024-01-02')
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE a_share_fund_flow (
+          symbol VARCHAR,
+          trade_date DATE,
+          main_net_inflow_pct DOUBLE,
+          super_large_net_inflow_pct DOUBLE,
+          small_net_inflow_pct DOUBLE
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO a_share_fund_flow VALUES
+        ('000001', '2024-01-03', 1.0, 0.5, -0.2),
+        ('000002', '2024-01-05', 2.0, 1.0, -1.0)
+        """
+    )
+
+    r = run_fund_flow_quality_checks(con)
+
+    assert r.rows_without_daily_match == 2
+    assert r.rows_without_daily_match_within_daily_span == 1
+    assert r.rows_after_daily_max_date == 1
+    assert r.rows_without_daily_match_absent_symbols == 0
+    assert r.rows_without_daily_match_known_symbols == 1
+    assert any("日线已覆盖标的" in note for note in r.notes)
+
+
+def test_run_fund_flow_quality_checks_treats_extra_market_symbols_as_nonblocking_note() -> None:
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE a_share_daily (symbol VARCHAR, trade_date DATE)")
+    con.execute("INSERT INTO a_share_daily VALUES ('000001', '2024-01-02')")
+    con.execute(
+        """
+        CREATE TABLE a_share_fund_flow (
+          symbol VARCHAR,
+          trade_date DATE,
+          main_net_inflow_pct DOUBLE,
+          super_large_net_inflow_pct DOUBLE,
+          small_net_inflow_pct DOUBLE
+        )
+        """
+    )
+    con.execute("INSERT INTO a_share_fund_flow VALUES ('920001', '2024-01-02', 1.0, 0.5, -0.2)")
+
+    r = run_fund_flow_quality_checks(con)
+
+    assert r.rows_without_daily_match_within_daily_span == 1
+    assert r.rows_without_daily_match_absent_symbols == 1
+    assert r.rows_without_daily_match_known_symbols == 0
+    assert r.absent_symbol_count == 1
+    assert any("完全不在日线表" in note for note in r.notes)
+    assert r.ok
 
 
 def test_run_shareholder_quality_checks_reports_notice_and_width() -> None:

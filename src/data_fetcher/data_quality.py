@@ -65,6 +65,12 @@ class FundFlowQualityReport:
     max_trade_date: Optional[str] = None
     duplicate_pk_rows: int = 0
     rows_without_daily_match: int = 0
+    rows_after_daily_max_date: int = 0
+    rows_without_daily_match_within_daily_span: int = 0
+    rows_without_daily_match_absent_symbols: int = 0
+    rows_without_daily_match_known_symbols: int = 0
+    absent_symbol_count: int = 0
+    daily_max_trade_date: Optional[str] = None
     all_zero_flow_rows: int = 0
     null_ratio_by_col: Dict[str, float] = field(default_factory=dict)
     coverage_ratio_vs_daily: Optional[float] = None
@@ -368,6 +374,12 @@ def run_fund_flow_quality_checks(
     )
 
     rows_without_daily_match = 0
+    rows_after_daily_max_date = 0
+    rows_without_daily_match_within_daily_span = 0
+    rows_without_daily_match_absent_symbols = 0
+    rows_without_daily_match_known_symbols = 0
+    absent_symbol_count = 0
+    daily_max_trade_date: Optional[str] = None
     coverage_ratio_vs_daily: Optional[float] = None
     if _table_exists(conn, daily_table):
         daily_pairs = conn.execute(
@@ -381,8 +393,20 @@ def run_fund_flow_quality_checks(
         if not daily_pairs.empty:
             daily_pairs["symbol"] = daily_pairs["symbol"].astype(str).str.zfill(6)
             daily_pairs["trade_date"] = pd.to_datetime(daily_pairs["trade_date"], errors="coerce").dt.normalize()
+            max_daily_ts = daily_pairs["trade_date"].max()
+            daily_max_trade_date = str(max_daily_ts.date()) if pd.notna(max_daily_ts) else None
             merged = dedup.merge(daily_pairs, on=["symbol", "trade_date"], how="left", indicator=True)
             rows_without_daily_match = int((merged["_merge"] == "left_only").sum())
+            if pd.notna(max_daily_ts):
+                missing = merged[merged["_merge"] == "left_only"].copy()
+                rows_after_daily_max_date = int((missing["trade_date"] > max_daily_ts).sum())
+                in_span_missing = missing[missing["trade_date"] <= max_daily_ts].copy()
+                rows_without_daily_match_within_daily_span = int(len(in_span_missing))
+                daily_symbols = set(daily_pairs["symbol"].dropna().astype(str))
+                absent_symbol_mask = ~in_span_missing["symbol"].astype(str).isin(daily_symbols)
+                rows_without_daily_match_absent_symbols = int(absent_symbol_mask.sum())
+                rows_without_daily_match_known_symbols = int((~absent_symbol_mask).sum())
+                absent_symbol_count = int(in_span_missing.loc[absent_symbol_mask, "symbol"].nunique())
             overlap_days = daily_pairs["trade_date"].isin(dedup["trade_date"].dropna().unique())
             daily_overlap = daily_pairs.loc[overlap_days]
             if not daily_overlap.empty:
@@ -393,9 +417,17 @@ def run_fund_flow_quality_checks(
     if dup > 0:
         ok = False
         notes.append("存在重复 (symbol, trade_date) 主键。")
-    if rows_without_daily_match > 0:
+    if rows_without_daily_match_known_symbols > 0:
         ok = False
-        notes.append("存在资金流 trade_date 在日线表中找不到对应行，可能有时间戳错位。")
+        notes.append("存在日线已覆盖标的的资金流 trade_date 找不到对应日线行，可能有日期错位。")
+    if rows_without_daily_match_absent_symbols > 0:
+        notes.append("部分资金流标的完全不在日线表中，通常是数据源市场范围宽于当前日线 universe。")
+    elif rows_after_daily_max_date > 0:
+        ok = False
+        notes.append("资金流日期晚于日线表最新日期；请先补齐日线表再判断资金流对齐质量。")
+    if rows_without_daily_match_absent_symbols > 0 and rows_after_daily_max_date > 0:
+        ok = False
+        notes.append("资金流日期晚于日线表最新日期；请先补齐日线表再判断剩余对齐质量。")
     if all_zero_rows > 0 and all_zero_rows / max(len(dedup), 1) > 0.2:
         ok = False
         notes.append("全零资金流行占比偏高，需排查是否有静默失败或异常回填。")
@@ -413,6 +445,12 @@ def run_fund_flow_quality_checks(
         max_trade_date=str(dedup["trade_date"].max().date()) if dedup["trade_date"].notna().any() else None,
         duplicate_pk_rows=dup,
         rows_without_daily_match=rows_without_daily_match,
+        rows_after_daily_max_date=rows_after_daily_max_date,
+        rows_without_daily_match_within_daily_span=rows_without_daily_match_within_daily_span,
+        rows_without_daily_match_absent_symbols=rows_without_daily_match_absent_symbols,
+        rows_without_daily_match_known_symbols=rows_without_daily_match_known_symbols,
+        absent_symbol_count=absent_symbol_count,
+        daily_max_trade_date=daily_max_trade_date,
         all_zero_flow_rows=all_zero_rows,
         null_ratio_by_col=null_ratio_by_col,
         coverage_ratio_vs_daily=coverage_ratio_vs_daily,

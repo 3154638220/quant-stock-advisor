@@ -26,13 +26,16 @@ from src.models.xtree.p1_workflow import (
     build_p1_tree_output_stem,
     build_p1_tree_research_config_id,
     build_group_comparison_table,
+    build_tree_daily_backtest_like_proxy_detail,
     build_tree_direction_diagnostic_table,
     build_tree_light_proxy_detail,
+    build_tree_turnover_aware_proxy_detail,
     panel_generation_feature_names,
     p1_tree_feature_groups,
     resolve_available_feature_names,
     summarize_p1_label_diagnostics,
     summarize_p1_full_backtest_payload,
+    summarize_tree_daily_backtest_like_proxy,
     summarize_tree_group_result,
     summarize_tree_score_direction,
 )
@@ -136,6 +139,23 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--rebalance-rule", type=str, default="M", help="light proxy 调仓频率")
     p.add_argument("--top-k", type=int, default=20, help="light proxy Top-K")
+    p.add_argument(
+        "--proxy-max-turnover",
+        type=float,
+        default=0.3,
+        help="full-like light proxy 的 half-L1 换手上限；旧 light proxy 仍保持无约束 Top-K",
+    )
+    p.add_argument(
+        "--daily-proxy-admission-threshold",
+        type=float,
+        default=0.0,
+        help="daily full-backtest-like proxy 准入阈值；低于该值时默认不补正式 full backtest",
+    )
+    p.add_argument(
+        "--disable-daily-proxy-admission-gate",
+        action="store_true",
+        help="关闭 daily proxy 准入拦截；仅用于复现历史失败样本或断层诊断",
+    )
     p.add_argument("--val-frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--gpu", action="store_true")
@@ -267,6 +287,7 @@ def main() -> int:
     from src.models.inference import predict_xgboost_tree
     from src.models.rank_score import apply_cross_section_z_by_date
     from src.models.xtree.train import train_xgboost_panel
+    from src.backtest.transaction_costs import transaction_cost_params_from_mapping
     from src.settings import load_config, resolve_asof_trade_end
 
     args = parse_args()
@@ -277,6 +298,8 @@ def main() -> int:
     sig = cfg.get("signals", {}) or {}
     tree_sig = sig.get("tree_model") or {}
     label_cfg = tree_sig.get("labels") or {}
+    backtest_cfg = cfg.get("backtest", {}) or {}
+    costs = transaction_cost_params_from_mapping(cfg.get("transaction_costs", {}))
 
     if args.symbols:
         symbols = [s.strip().zfill(6) for s in args.symbols.split(",") if s.strip()]
@@ -549,14 +572,63 @@ def main() -> int:
             top_k=int(args.top_k),
             scenario=group_name,
         )
+        full_like_detail_df = build_tree_turnover_aware_proxy_detail(
+            z_val,
+            score_col="tree_score",
+            proxy_return_col=proxy_col,
+            rebalance_rule=args.rebalance_rule,
+            top_k=int(args.top_k),
+            max_turnover=float(args.proxy_max_turnover),
+            scenario=group_name,
+        )
         proxy_summary = summarize_tree_group_result(detail_df, rebalance_rule=args.rebalance_rule)
+        full_like_proxy_summary = summarize_tree_group_result(
+            full_like_detail_df,
+            rebalance_rule=args.rebalance_rule,
+        )
+        daily_bt_like_detail_df, daily_bt_like_meta = build_tree_daily_backtest_like_proxy_detail(
+            z_val,
+            daily_df,
+            score_col="tree_score",
+            rebalance_rule=args.rebalance_rule,
+            top_k=int(args.top_k),
+            max_turnover=float(args.proxy_max_turnover),
+            scenario=group_name,
+            cost_params=costs,
+            execution_mode=str(backtest_cfg.get("execution_mode", "tplus1_open")),
+            execution_lag=int(backtest_cfg.get("execution_lag", 1)),
+            limit_up_mode=str(backtest_cfg.get("limit_up_mode", "idle")),
+            vwap_slippage_bps_per_side=float(backtest_cfg.get("vwap_slippage_bps_per_side", 3.0)),
+            vwap_impact_bps=float(backtest_cfg.get("vwap_impact_bps", 8.0)),
+        )
+        daily_bt_like_summary = summarize_tree_daily_backtest_like_proxy(daily_bt_like_detail_df)
+        daily_bt_like_excess = float(daily_bt_like_summary.get("annualized_excess_vs_market", np.nan))
+        pass_daily_proxy_admission = bool(
+            np.isfinite(daily_bt_like_excess)
+            and daily_bt_like_excess >= float(args.daily_proxy_admission_threshold)
+        )
         bundle_label = f"p1_tree_{group_name.lower()}_{research_config_id}"
+        detail_df["proxy_variant"] = "topk_unconstrained"
         detail_df["group"] = group_name
         detail_df["result_type"] = "light_strategy_proxy"
         detail_df["research_topic"] = "p1_tree_groups"
         detail_df["research_config_id"] = research_config_id
         detail_df["output_stem"] = output_stem
         detail_frames.append(detail_df)
+        full_like_detail_df["proxy_variant"] = "full_like_turnover_aware"
+        full_like_detail_df["group"] = group_name
+        full_like_detail_df["result_type"] = "light_strategy_proxy"
+        full_like_detail_df["research_topic"] = "p1_tree_groups"
+        full_like_detail_df["research_config_id"] = research_config_id
+        full_like_detail_df["output_stem"] = output_stem
+        detail_frames.append(full_like_detail_df)
+        daily_bt_like_detail_df["proxy_variant"] = "daily_backtest_like"
+        daily_bt_like_detail_df["group"] = group_name
+        daily_bt_like_detail_df["result_type"] = "light_strategy_proxy"
+        daily_bt_like_detail_df["research_topic"] = "p1_tree_groups"
+        daily_bt_like_detail_df["research_config_id"] = research_config_id
+        daily_bt_like_detail_df["output_stem"] = output_stem
+        detail_frames.append(daily_bt_like_detail_df)
 
         run_rows.append(
             {
@@ -584,6 +656,53 @@ def main() -> int:
                 "period_beat_rate": float(proxy_summary.get("period_beat_rate", np.nan)),
                 "n_periods": int(proxy_summary.get("n_periods", 0)),
                 "periods_per_year": float(proxy_summary.get("periods_per_year", np.nan)),
+                "full_like_proxy_annualized_excess_vs_market": float(
+                    full_like_proxy_summary.get("annualized_excess_vs_market", np.nan)
+                ),
+                "full_like_proxy_strategy_annualized_return": float(
+                    full_like_proxy_summary.get("strategy_annualized_return", np.nan)
+                ),
+                "full_like_proxy_benchmark_annualized_return": float(
+                    full_like_proxy_summary.get("benchmark_annualized_return", np.nan)
+                ),
+                "full_like_proxy_strategy_sharpe_ratio": float(
+                    full_like_proxy_summary.get("strategy_sharpe_ratio", np.nan)
+                ),
+                "full_like_proxy_strategy_max_drawdown": float(
+                    full_like_proxy_summary.get("strategy_max_drawdown", np.nan)
+                ),
+                "full_like_proxy_period_beat_rate": float(full_like_proxy_summary.get("period_beat_rate", np.nan)),
+                "full_like_proxy_n_periods": int(full_like_proxy_summary.get("n_periods", 0)),
+                "full_like_proxy_max_turnover": float(args.proxy_max_turnover),
+                "proxy_gap_full_like_minus_unconstrained": float(
+                    full_like_proxy_summary.get("annualized_excess_vs_market", np.nan)
+                    - proxy_summary.get("annualized_excess_vs_market", np.nan)
+                ),
+                "daily_bt_like_proxy_annualized_excess_vs_market": daily_bt_like_excess,
+                "daily_bt_like_proxy_strategy_annualized_return": float(
+                    daily_bt_like_summary.get("strategy_annualized_return", np.nan)
+                ),
+                "daily_bt_like_proxy_benchmark_annualized_return": float(
+                    daily_bt_like_summary.get("benchmark_annualized_return", np.nan)
+                ),
+                "daily_bt_like_proxy_strategy_sharpe_ratio": float(
+                    daily_bt_like_summary.get("strategy_sharpe_ratio", np.nan)
+                ),
+                "daily_bt_like_proxy_strategy_max_drawdown": float(
+                    daily_bt_like_summary.get("strategy_max_drawdown", np.nan)
+                ),
+                "daily_bt_like_proxy_period_beat_rate": float(daily_bt_like_summary.get("period_beat_rate", np.nan)),
+                "daily_bt_like_proxy_n_periods": int(daily_bt_like_summary.get("n_periods", 0)),
+                "daily_bt_like_proxy_n_rebalances": int(daily_bt_like_meta.get("n_rebalances", 0)),
+                "daily_bt_like_proxy_avg_turnover_half_l1": float(
+                    daily_bt_like_meta.get("avg_turnover_half_l1", np.nan)
+                ),
+                "proxy_gap_daily_bt_like_minus_unconstrained": float(
+                    daily_bt_like_summary.get("annualized_excess_vs_market", np.nan)
+                    - proxy_summary.get("annualized_excess_vs_market", np.nan)
+                ),
+                "daily_proxy_admission_threshold": float(args.daily_proxy_admission_threshold),
+                "pass_p1_daily_proxy_admission_gate": pass_daily_proxy_admission,
             }
         )
         bundle_manifest_rows.append(
@@ -599,15 +718,37 @@ def main() -> int:
         )
         print(
             "[P1] 完成训练 {group}: val_rank_ic={val_ic:.6f}, "
-            "proxy_excess={proxy:.2%}, auto_flip={auto_flip}".format(
+            "proxy_excess={proxy:.2%}, full_like_proxy={full_like:.2%}, "
+            "daily_bt_like={daily_bt_like:.2%}, auto_flip={auto_flip}".format(
                 group=group_name,
                 val_ic=float(res.metrics.get("val_rank_ic", np.nan)),
                 proxy=float(proxy_summary.get("annualized_excess_vs_market", np.nan)),
+                full_like=float(full_like_proxy_summary.get("annualized_excess_vs_market", np.nan)),
+                daily_bt_like=daily_bt_like_excess,
                 auto_flip=bool(summarize_tree_score_direction(res.metrics)["tree_score_auto_flipped"]),
             ),
             flush=True,
         )
         if args.run_full_backtest:
+            if (not args.disable_daily_proxy_admission_gate) and (not pass_daily_proxy_admission):
+                run_rows[-1].update(
+                    {
+                        "full_backtest_skipped_reason": (
+                            "daily_bt_like_proxy_below_admission_threshold:"
+                            f"{daily_bt_like_excess:.6g}<"
+                            f"{float(args.daily_proxy_admission_threshold):.6g}"
+                        ),
+                    }
+                )
+                print(
+                    "[P1] 跳过 {group} 正式回测: daily_bt_like={daily_bt_like:.2%} < threshold={threshold:.2%}".format(
+                        group=group_name,
+                        daily_bt_like=daily_bt_like_excess,
+                        threshold=float(args.daily_proxy_admission_threshold),
+                    ),
+                    flush=True,
+                )
+                continue
             backtest_metrics = _run_full_backtest_for_group(
                 config_path=str(args.backtest_config),
                 bundle_dir=res.bundle_dir,
@@ -665,6 +806,9 @@ def main() -> int:
             "proxy_horizon": proxy_horizon,
             "rebalance_rule": args.rebalance_rule,
             "top_k": int(args.top_k),
+            "proxy_max_turnover": float(args.proxy_max_turnover),
+            "daily_proxy_admission_threshold": float(args.daily_proxy_admission_threshold),
+            "daily_proxy_admission_gate_enabled": not bool(args.disable_daily_proxy_admission_gate),
             "val_frac": float(args.val_frac),
         },
     }
