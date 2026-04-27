@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from scripts.run_backtest_eval import DEFAULT_CONFIG, _deep_merge
+from scripts.run_backtest_eval import DEFAULT_CONFIG, _deep_merge, load_config
+from src.settings import resolve_config_path
 
 
 def test_deep_merge_signals_composite_extended_full_replace():
@@ -19,3 +20,14 @@ def test_default_config_exposes_weekly_kdj_weights():
     assert "weekly_kdj_j" not in ce
     assert "weekly_kdj_oversold_depth" not in ce
     assert "weekly_kdj_rebound" not in ce
+
+
+def test_legacy_backtest_snapshot_name_resolves_to_configs_dir():
+    legacy_name = "config.yaml.backtest.r7_s2_prefilter_off_universe_on"
+
+    resolved = resolve_config_path(legacy_name)
+    cfg, source = load_config(legacy_name)
+
+    assert resolved.as_posix().endswith(f"configs/backtests/{legacy_name}")
+    assert source.endswith(f"configs/backtests/{legacy_name}")
+    assert cfg["signals"]["top_k"] == 20

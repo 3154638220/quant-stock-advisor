@@ -249,7 +249,9 @@ def materialize_scenario_config(
         return scenario.config_path
 
     snapshot_name = f"config.yaml.backtest.{scenario.key}"
-    snapshot_path = root_dir / snapshot_name
+    snapshot_rel_path = Path("configs") / "backtests" / snapshot_name
+    snapshot_path = root_dir / snapshot_rel_path
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     payload = _deep_merge(
         cfg,
         {
@@ -261,7 +263,7 @@ def materialize_scenario_config(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    return snapshot_name
+    return snapshot_rel_path.as_posix()
 
 
 def summarize_yearly_excess(strategy_daily: pd.Series, benchmark_daily: pd.Series) -> tuple[pd.DataFrame, dict[str, Any]]:

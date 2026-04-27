@@ -30,6 +30,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.update_ic_weights import build_weights_by_date
 from scripts.research_identity import build_full_backtest_research_identity, canonical_research_config, slugify_token
+from src.settings import config_path_candidates
 from src.features.fund_flow_factors import attach_fund_flow
 from src.features.fundamental_factors import preprocess_fundamental_cross_section
 from src.features.ic_monitor import ICMonitor
@@ -183,8 +184,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def load_config(config_path: str = "") -> tuple[dict, str]:
     candidate_paths: list[Path] = []
     if str(config_path).strip():
-        p = Path(str(config_path).strip())
-        candidate_paths.append(p if p.is_absolute() else PROJECT_ROOT / p)
+        candidate_paths.extend(config_path_candidates(str(config_path).strip()))
     else:
         candidate_paths.extend([PROJECT_ROOT / "config.yaml.backtest", PROJECT_ROOT / "config.yaml"])
 

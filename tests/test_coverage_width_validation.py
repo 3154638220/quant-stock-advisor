@@ -72,7 +72,7 @@ def test_materialize_scenario_config_writes_snapshot_for_dynamic_variant(tmp_pat
     snapshot_name = materialize_scenario_config(scenario, cfg, root_dir=tmp_path)
     snapshot_path = tmp_path / snapshot_name
 
-    assert snapshot_name == "config.yaml.backtest.vb4_20_35_t8_s65"
+    assert snapshot_name == "configs/backtests/config.yaml.backtest.vb4_20_35_t8_s65"
     assert snapshot_path.exists()
     loaded = yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
     assert loaded["signals"]["top_k"] == 20

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import pandas as pd
 import yaml
@@ -17,17 +17,48 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
+def _append_unique(paths: list[Path], path: Path) -> None:
+    if path not in paths:
+        paths.append(path)
+
+
+def config_path_candidates(config_path: Union[str, Path]) -> list[Path]:
+    """Return compatible config lookup paths rooted at the project directory."""
+    root = project_root()
+    raw = Path(config_path).expanduser()
+    candidates: list[Path] = []
+
+    if raw.is_absolute():
+        _append_unique(candidates, raw)
+        if raw.parent == root and raw.name.startswith("config.yaml.backtest."):
+            _append_unique(candidates, root / "configs" / "backtests" / raw.name)
+        return candidates
+
+    _append_unique(candidates, root / raw)
+    if len(raw.parts) == 1 and raw.name.startswith("config.yaml.backtest."):
+        _append_unique(candidates, root / "configs" / "backtests" / raw.name)
+    return candidates
+
+
+def resolve_config_path(config_path: Union[str, Path]) -> Path:
+    candidates = config_path_candidates(config_path)
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     if config_path is not None:
-        path = Path(config_path)
+        path = resolve_config_path(config_path)
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
     root = project_root()
-    candidates = []
+    candidates: list[Path] = []
     env_path = os.environ.get("QUANT_CONFIG", "").strip()
     if env_path:
-        candidates.append(Path(env_path))
+        candidates.extend(config_path_candidates(env_path))
     candidates.extend(
         [
             root / "config.yaml",
