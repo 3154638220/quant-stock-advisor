@@ -216,6 +216,16 @@ def main_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
     log_cfg = cfg.get("logging", {}) or {}
+    logs_dir = paths.get("logs_dir", "data/logs")
+    if not Path(logs_dir).is_absolute():
+        logs_dir = ROOT / logs_dir
+    setup_app_logging(
+        logs_dir,
+        name="daily_run",
+        log_format=str(log_cfg.get("format", "json")),
+    )
+    log = get_logger("daily_run")
+
     feat = cfg.get("features", {})
     sig = cfg.get("signals", {})
     fund_cfg = cfg.get("fundamental", {}) or {}
@@ -408,16 +418,6 @@ def main_run(args: argparse.Namespace) -> int:
         except Exception as e_mon:  # noqa: BLE001
             log.warning("从 IC 监控构建动态权重失败（回退静态）: %s", e_mon)
             return None
-
-    logs_dir = paths.get("logs_dir", "data/logs")
-    if not Path(logs_dir).is_absolute():
-        logs_dir = ROOT / logs_dir
-    setup_app_logging(
-        logs_dir,
-        name="daily_run",
-        log_format=str(log_cfg.get("format", "json")),
-    )
-    log = get_logger("daily_run")
 
     if args.symbols:
         symbols = [s.strip().zfill(6) for s in args.symbols.split(",") if s.strip()]

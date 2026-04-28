@@ -11,7 +11,7 @@ from src.data_fetcher.shareholder_client import ShareholderClient
 def test_shareholder_client_creates_table_and_index():
     with tempfile.TemporaryDirectory() as d:
         db = Path(d) / "test.duckdb"
-        with ShareholderClient(duckdb_path=str(db)) as client:
+        with ShareholderClient(duckdb_path=str(db)):
             pass
         con = duckdb.connect(str(db), read_only=True)
         try:

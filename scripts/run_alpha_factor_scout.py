@@ -328,7 +328,6 @@ def main() -> None:
     benchmark_min_days = max(60, int(0.35 * max(daily_df["trade_date"].nunique(), 1)))
     market_benchmark = build_market_ew_benchmark(daily_df, args.start, end_date, min_days=benchmark_min_days).sort_index()
 
-    signals = cfg.get("signals", {}) or {}
     portfolio_cfg = cfg.get("portfolio", {}) or {}
     backtest_cfg = cfg.get("backtest", {}) or {}
     prefilter_cfg = cfg.get("prefilter", {}) or {}

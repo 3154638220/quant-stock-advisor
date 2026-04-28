@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.backtest.engine import BacktestConfig, build_open_to_open_returns, run_backtest
+from src.backtest.engine import BacktestConfig, build_limit_up_open_mask, build_open_to_open_returns, run_backtest
 from src.backtest.performance_panel import compute_performance_panel
 from src.backtest.transaction_costs import TransactionCostParams
 from src.backtest.walk_forward import (
@@ -67,6 +68,171 @@ def test_run_backtest_tplus1_open_execution_mode():
     res = run_backtest(ar, ws, config=BacktestConfig(execution_mode="tplus1_open"))
     assert res.meta.get("execution_mode") == "tplus1_open"
     assert np.isfinite(res.panel.sharpe_ratio)
+
+
+def test_tplus1_limit_up_buy_fail_only_blocks_new_weight():
+    idx = pd.bdate_range("2024-01-02", periods=4)
+    ar = pd.DataFrame(
+        [
+            [0.0, 0.0],
+            [0.10, 0.0],
+            [0.20, 0.0],
+            [0.30, 0.0],
+        ],
+        index=idx,
+        columns=["000001", "000002"],
+        dtype=np.float64,
+    )
+    ws = pd.DataFrame([[1.0, 0.0]], index=[idx[0]], columns=["000001", "000002"])
+    mask = pd.DataFrame(False, index=idx, columns=ar.columns)
+    mask.loc[idx[1], "000001"] = True
+    mask.loc[idx[2], "000001"] = True
+
+    res = run_backtest(
+        ar,
+        ws,
+        config=BacktestConfig(
+            execution_mode="tplus1_open",
+            limit_up_mode="idle",
+            limit_up_open_mask=mask,
+        ),
+    )
+
+    assert res.daily_returns.loc[idx[1]] == 0.0
+    assert res.daily_returns.loc[idx[2]] == 0.0
+    assert res.daily_returns.loc[idx[3]] == pytest.approx(0.30)
+    assert res.meta["buy_fail_total_weight"] == pytest.approx(2.0)
+    assert res.meta["buy_fail_event_count"] == 2
+    assert res.meta["buy_fail_idle_weight"] == pytest.approx(2.0)
+    assert res.meta["buy_fail_redistributed_weight"] == pytest.approx(0.0)
+    assert res.meta["buy_fail_diagnostic"][0]["idle_weight"] == pytest.approx(1.0)
+
+
+def test_tplus1_limit_up_existing_holding_keeps_return():
+    idx = pd.bdate_range("2024-01-02", periods=4)
+    ar = pd.DataFrame(
+        [
+            [0.0, 0.0],
+            [0.10, 0.0],
+            [0.20, 0.0],
+            [0.30, 0.0],
+        ],
+        index=idx,
+        columns=["000001", "000002"],
+        dtype=np.float64,
+    )
+    ws = pd.DataFrame([[1.0, 0.0]], index=[idx[0]], columns=["000001", "000002"])
+    mask = pd.DataFrame(False, index=idx, columns=ar.columns)
+    mask.loc[idx[2], "000001"] = True
+
+    res = run_backtest(
+        ar,
+        ws,
+        config=BacktestConfig(
+            execution_mode="tplus1_open",
+            limit_up_mode="idle",
+            limit_up_open_mask=mask,
+        ),
+    )
+
+    assert res.daily_returns.loc[idx[1]] == pytest.approx(0.10)
+    assert res.daily_returns.loc[idx[2]] == pytest.approx(0.20)
+    assert res.meta["buy_fail_event_count"] == 0
+
+
+def test_tplus1_limit_up_redistribute_records_idle_when_all_buys_fail():
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    ar = pd.DataFrame(
+        [
+            [0.0, 0.0],
+            [0.10, 0.20],
+            [0.0, 0.0],
+        ],
+        index=idx,
+        columns=["000001", "000002"],
+        dtype=np.float64,
+    )
+    ws = pd.DataFrame([[0.6, 0.4]], index=[idx[0]], columns=["000001", "000002"])
+    mask = pd.DataFrame(False, index=idx, columns=ar.columns)
+    mask.loc[idx[1], ["000001", "000002"]] = True
+
+    res = run_backtest(
+        ar,
+        ws,
+        config=BacktestConfig(
+            execution_mode="tplus1_open",
+            limit_up_mode="redistribute",
+            limit_up_open_mask=mask,
+        ),
+    )
+
+    assert res.daily_returns.loc[idx[1]] == 0.0
+    assert res.meta["buy_fail_total_weight"] == pytest.approx(1.0)
+    assert res.meta["buy_fail_redistributed_weight"] == pytest.approx(0.0)
+    assert res.meta["buy_fail_idle_weight"] == pytest.approx(1.0)
+    assert res.meta["buy_fail_diagnostic"][0]["rebalance_idle_total_weight"] == pytest.approx(1.0)
+
+
+def test_tplus1_limit_up_redistributes_failed_delta_to_available_targets():
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    ar = pd.DataFrame(
+        [
+            [0.0, 0.0],
+            [0.10, 0.20],
+            [0.0, 0.0],
+        ],
+        index=idx,
+        columns=["000001", "000002"],
+        dtype=np.float64,
+    )
+    ws = pd.DataFrame([[0.5, 0.5]], index=[idx[0]], columns=["000001", "000002"])
+    mask = pd.DataFrame(False, index=idx, columns=ar.columns)
+    mask.loc[idx[1], "000001"] = True
+
+    res = run_backtest(
+        ar,
+        ws,
+        config=BacktestConfig(
+            execution_mode="tplus1_open",
+            limit_up_mode="redistribute",
+            limit_up_open_mask=mask,
+        ),
+    )
+
+    assert res.daily_returns.loc[idx[1]] == pytest.approx(0.20)
+    assert res.meta["buy_fail_total_weight"] == pytest.approx(0.5)
+    assert res.meta["buy_fail_redistributed_weight"] == pytest.approx(0.5)
+    assert res.meta["buy_fail_idle_weight"] == pytest.approx(0.0)
+
+
+def test_build_limit_up_open_mask_uses_board_specific_open_vs_preclose():
+    df = pd.DataFrame(
+        {
+            "symbol": ["000001", "000001", "300001", "300001"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"] * 2),
+            "open": [10.0, 11.0, 10.0, 11.0],
+            "close": [10.0, 10.5, 10.0, 10.5],
+        }
+    )
+    mask = build_limit_up_open_mask(df)
+    assert bool(mask.loc[pd.Timestamp("2024-01-03"), "000001"]) is True
+    assert bool(mask.loc[pd.Timestamp("2024-01-03"), "300001"]) is False
+
+
+def test_build_limit_up_open_mask_prefers_real_pre_close_over_shifted_close():
+    df = pd.DataFrame(
+        {
+            "symbol": ["000001", "000001"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "open": [10.0, 10.8],
+            "close": [10.0, 10.8],
+            "pre_close": [9.5, 9.8],
+        }
+    )
+
+    mask = build_limit_up_open_mask(df)
+
+    assert bool(mask.loc[pd.Timestamp("2024-01-03"), "000001"]) is True
 
 
 def test_run_backtest_vwap_execution_mode_penalizes_turnover():

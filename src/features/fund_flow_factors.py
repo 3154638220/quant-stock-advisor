@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional, Union
-
 import numpy as np
 import pandas as pd
 import duckdb

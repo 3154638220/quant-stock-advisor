@@ -35,7 +35,7 @@ from src.features.fund_flow_factors import attach_fund_flow
 from src.features.fundamental_factors import preprocess_fundamental_cross_section
 from src.features.ic_monitor import ICMonitor
 from src.features.shareholder_factors import attach_shareholder_factors
-from src.backtest.engine import BacktestConfig, build_open_to_open_returns, run_backtest
+from src.backtest.engine import BacktestConfig, build_limit_up_open_mask, build_open_to_open_returns, run_backtest
 from src.backtest.performance_panel import compute_performance_panel
 from src.backtest.transaction_costs import transaction_cost_params_from_mapping
 from src.backtest.walk_forward import (
@@ -1680,6 +1680,30 @@ def build_market_ew_benchmark(daily_df: pd.DataFrame, start: str, end: str, min_
     return cs
 
 
+def build_market_ew_open_to_open_benchmark(
+    daily_df: pd.DataFrame,
+    start: str,
+    end: str,
+    min_days: int = 500,
+) -> pd.Series:
+    df = daily_df[
+        (daily_df["trade_date"] >= pd.Timestamp(start))
+        & (daily_df["trade_date"] <= pd.Timestamp(end))
+        & (pd.to_numeric(daily_df["open"], errors="coerce") > 0)
+    ].copy()
+    if df.empty:
+        return pd.Series(dtype=np.float64)
+    df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+    sym_cnt = df.groupby("symbol")["trade_date"].count()
+    good = sym_cnt[sym_cnt >= min_days].index
+    if len(good) == 0:
+        good = sym_cnt.index
+    open_returns = build_open_to_open_returns(df[df["symbol"].isin(good)], zero_if_limit_up_open=False)
+    cs = open_returns.mean(axis=1, skipna=True).dropna()
+    cs.index = pd.to_datetime(cs.index)
+    return cs.astype(np.float64)
+
+
 def build_symbol_benchmark(daily_df: pd.DataFrame, symbol: str, start: str, end: str) -> pd.Series:
     sym = str(symbol).zfill(6)
     df = daily_df[
@@ -2259,8 +2283,11 @@ def main() -> None:
         asset_returns = open_returns[
             (open_returns.index >= pd.Timestamp(start_date)) & (open_returns.index <= pd.Timestamp(end_date))
         ]
+        limit_up_open_mask = build_limit_up_open_mask(daily_df).sort_index()
+        limit_up_open_mask = limit_up_open_mask.reindex(columns=target_cols, fill_value=False)
     else:
         asset_returns = build_asset_returns(daily_df, target_cols, start_date, end_date)
+        limit_up_open_mask = None
     weights = weights.reindex(columns=target_cols, fill_value=0.0)
     if weights_base is not None and not weights_base.empty:
         weights_base = weights_base.reindex(columns=target_cols, fill_value=0.0)
@@ -2289,6 +2316,7 @@ def main() -> None:
         execution_mode=execution_mode,
         execution_lag=execution_lag,
         limit_up_mode=str(backtest_cfg.get("limit_up_mode", "idle")),
+        limit_up_open_mask=limit_up_open_mask,
         vwap_slippage_bps_per_side=float(backtest_cfg.get("vwap_slippage_bps_per_side", 3.0)),
         vwap_impact_bps=float(backtest_cfg.get("vwap_impact_bps", 8.0)),
     )
@@ -2297,6 +2325,7 @@ def main() -> None:
         execution_mode=execution_mode,
         execution_lag=execution_lag,
         limit_up_mode=str(backtest_cfg.get("limit_up_mode", "idle")),
+        limit_up_open_mask=limit_up_open_mask,
         vwap_slippage_bps_per_side=float(backtest_cfg.get("vwap_slippage_bps_per_side", 3.0)),
         vwap_impact_bps=float(backtest_cfg.get("vwap_impact_bps", 8.0)),
     )
@@ -2318,11 +2347,19 @@ def main() -> None:
     print("[6/7] 基准与分年统计...")
     n_trade_days = int(asset_returns.index.nunique())
     adaptive_min_days = max(60, int(0.35 * max(n_trade_days, 1)))
+    primary_market_ew = (
+        build_market_ew_open_to_open_benchmark(daily_df, start_date, end_date, min_days=adaptive_min_days)
+        if execution_mode == "tplus1_open"
+        else build_market_ew_benchmark(daily_df, start_date, end_date, min_days=adaptive_min_days)
+    )
+    close_market_ew = build_market_ew_benchmark(daily_df, start_date, end_date, min_days=adaptive_min_days)
     benchmark_series: dict[str, pd.Series] = {
         "hs300_510300": build_symbol_benchmark(daily_df, "510300", start_date, end_date),
         "csi500_510500": build_symbol_benchmark(daily_df, "510500", start_date, end_date),
-        "market_ew": build_market_ew_benchmark(daily_df, start_date, end_date, min_days=adaptive_min_days),
+        "market_ew": primary_market_ew,
     }
+    if execution_mode == "tplus1_open":
+        benchmark_series["market_ew_close_to_close"] = close_market_ew
     benchmark_panels: dict[str, dict] = {}
     excess_panels: dict[str, dict] = {}
     benchmark_yearly: dict[str, pd.Series] = {}
@@ -2661,6 +2698,8 @@ def main() -> None:
                 "risk_aversion": risk_aversion,
                 "execution_mode": execution_mode,
                 "execution_lag": execution_lag,
+                "primary_benchmark_return_mode": "open_to_open" if execution_mode == "tplus1_open" else "close_to_close",
+                "comparison_benchmark_return_mode": "close_to_close" if execution_mode == "tplus1_open" else "",
                 "regime_enabled": regime_enabled,
                 "benchmark_symbol": benchmark_symbol,
                 "industry_cap_count": industry_cap_count,
@@ -2700,6 +2739,12 @@ def main() -> None:
                 "n_trading_days": int(res_wc.panel.n_periods),
                 "n_rebalances": int(res_wc.meta.get("n_rebalances", 0)),
                 "n_weight_symbols": int(weights.shape[1]),
+                "limit_up_detection": str(res_wc.meta.get("limit_up_detection", "")),
+                "buy_fail_event_count": int(res_wc.meta.get("buy_fail_event_count", 0)),
+                "buy_fail_total_weight": float(res_wc.meta.get("buy_fail_total_weight", 0.0)),
+                "buy_fail_redistributed_weight": float(res_wc.meta.get("buy_fail_redistributed_weight", 0.0)),
+                "buy_fail_idle_weight": float(res_wc.meta.get("buy_fail_idle_weight", 0.0)),
+                "buy_fail_diagnostic": _json_sanitize(res_wc.meta.get("buy_fail_diagnostic", [])),
                 "industry_cap_status": industry_cap_status,
                 "portfolio_diagnostics_summary": _json_sanitize(portfolio_diag_summary),
                 "prepared_factors_cache": {

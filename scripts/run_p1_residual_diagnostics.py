@@ -7,7 +7,6 @@ import json
 import sys
 import warnings
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +28,6 @@ from scripts.run_backtest_eval import (
     build_regime_weight_overrides,
     build_score,
     build_topk_weights,
-    compare_full_vs_slices,
     compute_factors,
     contiguous_time_splits,
     load_config,

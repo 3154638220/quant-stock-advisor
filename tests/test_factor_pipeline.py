@@ -244,7 +244,7 @@ def test_neutralize_size_industry_regression_handles_all_nan_group_without_warni
         warnings.simplefilter("error", category=RuntimeWarning)
         out = neutralize_size_industry_regression(df, "raw_f")
 
-    assert f"raw_f_si_neutral" in out.columns
+    assert "raw_f_si_neutral" in out.columns
     assert len(caught) == 0
 
 

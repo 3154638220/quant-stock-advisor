@@ -566,7 +566,7 @@ def main() -> None:
         "",
         f"- 生成时间：`{pd.Timestamp.utcnow().isoformat()}`",
         f"- 区间：`{args.start}` 到 `{end_date}`",
-        f"- 固定口径：`tplus1_open` / `M` / `top_k=20` / `max_turnover=0.3` / `universe_filter=false`（S5 为外部对照，沿用 P1 静态原参数）",
+        "- 固定口径：`tplus1_open` / `M` / `top_k=20` / `max_turnover=0.3` / `universe_filter=false`（S5 为外部对照，沿用 P1 静态原参数）",
         "",
         "## 全样本与 OOS 汇总",
         "",

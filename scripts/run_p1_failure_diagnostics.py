@@ -382,7 +382,6 @@ def _build_doc(
 def main() -> None:
     args = parse_args()
     g0_payload = _read_payload(args.g0_json)
-    g1_payload = _read_payload(args.g1_json)
     params = _params_from_payload(g0_payload)
     if not params["end"]:
         params["end"] = str(pd.Timestamp.today().date())

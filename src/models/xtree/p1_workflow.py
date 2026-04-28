@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.light_strategy_proxy import infer_periods_per_year, summarize_signal_diagnostic
-from src.backtest.engine import BacktestConfig, build_open_to_open_returns, run_backtest
+from src.backtest.engine import BacktestConfig, build_limit_up_open_mask, build_open_to_open_returns, run_backtest
 from src.features.tree_dataset import default_tree_factor_names
 
 WEEKLY_KDJ_TREE_FEATURES: tuple[str, ...] = (
@@ -929,6 +929,55 @@ def _market_ew_close_to_close_benchmark(
     return out.sort_index().astype(np.float64)
 
 
+def build_market_ew_open_to_open_benchmark(
+    daily_df: pd.DataFrame,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    min_days: int,
+) -> pd.Series:
+    """全市场等权 open-to-open benchmark，与 tplus1_open 策略收益同口径。"""
+    df = daily_df.copy()
+    df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.normalize()
+    df = df[
+        (df["trade_date"] >= pd.Timestamp(start).normalize())
+        & (df["trade_date"] <= pd.Timestamp(end).normalize())
+        & (pd.to_numeric(df["open"], errors="coerce") > 0)
+    ].copy()
+    if df.empty:
+        return pd.Series(dtype=np.float64)
+    sym_cnt = df.groupby("symbol")["trade_date"].count()
+    good = sym_cnt[sym_cnt >= int(max(1, min_days))].index
+    if len(good) == 0:
+        good = sym_cnt.index
+    open_ret = build_open_to_open_returns(df[df["symbol"].isin(good)], zero_if_limit_up_open=False)
+    out = open_ret.mean(axis=1, skipna=True).dropna()
+    out.index = pd.to_datetime(out.index).normalize()
+    return out.sort_index().astype(np.float64)
+
+
+def _serialize_buy_fail_diagnostic(rows: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item: dict[str, Any] = {}
+        for key, value in row.items():
+            if isinstance(value, pd.Timestamp):
+                item[str(key)] = value.isoformat()
+            elif isinstance(value, np.integer):
+                item[str(key)] = int(value)
+            elif isinstance(value, np.floating):
+                item[str(key)] = float(value)
+            else:
+                item[str(key)] = value
+        out.append(item)
+    return out
+
+
 def build_tree_daily_backtest_like_proxy_detail(
     scored_panel: pd.DataFrame,
     daily_df: pd.DataFrame,
@@ -1018,6 +1067,9 @@ def build_tree_daily_backtest_like_proxy_detail(
         execution_mode=exe,
         execution_lag=int(execution_lag),
         limit_up_mode=str(limit_up_mode),
+        limit_up_open_mask=build_limit_up_open_mask(daily).reindex(columns=target_cols, fill_value=False)
+        if exe == "tplus1_open"
+        else None,
         vwap_slippage_bps_per_side=float(vwap_slippage_bps_per_side),
         vwap_impact_bps=float(vwap_impact_bps),
     )
@@ -1030,7 +1082,10 @@ def build_tree_daily_backtest_like_proxy_detail(
         bench.index = pd.to_datetime(bench.index, errors="coerce").normalize()
         bench = bench[(bench.index >= start) & (bench.index <= end)].astype(np.float64)
     else:
-        bench = _market_ew_close_to_close_benchmark(daily, start=start, end=end, min_days=min_days)
+        if exe == "tplus1_open":
+            bench = build_market_ew_open_to_open_benchmark(daily, start=start, end=end, min_days=min_days)
+        else:
+            bench = _market_ew_close_to_close_benchmark(daily, start=start, end=end, min_days=min_days)
     common = res.daily_returns.index.intersection(bench.index).sort_values()
     if common.empty:
         detail = pd.DataFrame(columns=out_cols)
@@ -1061,9 +1116,17 @@ def build_tree_daily_backtest_like_proxy_detail(
         if not weight_diag.empty
         else float("nan"),
         "market_ew_min_days": int(min_days),
+        "primary_benchmark_return_mode": "open_to_open" if exe == "tplus1_open" else "close_to_close",
+        "comparison_benchmark_return_mode": "close_to_close" if exe == "tplus1_open" else "",
         "daily_periods_per_year": 252.0,
         "backtest_like_strategy_annualized_return_engine": float(res.panel.annualized_return),
         "backtest_like_strategy_max_drawdown_engine": float(res.panel.max_drawdown),
+        "limit_up_detection": str(res.meta.get("limit_up_detection", "")),
+        "buy_fail_event_count": int(res.meta.get("buy_fail_event_count", 0)),
+        "buy_fail_total_weight": float(res.meta.get("buy_fail_total_weight", 0.0)),
+        "buy_fail_redistributed_weight": float(res.meta.get("buy_fail_redistributed_weight", 0.0)),
+        "buy_fail_idle_weight": float(res.meta.get("buy_fail_idle_weight", 0.0)),
+        "buy_fail_diagnostic": _serialize_buy_fail_diagnostic(res.meta.get("buy_fail_diagnostic", [])),
     }
     return detail, meta
 

@@ -34,6 +34,9 @@ class BacktestConfig:
     # ``idle``：资金闲置（权重归零，对应收益置 0），等价于原 zero_if_limit_up_open
     # ``redistribute``：将涨停票权重均匀分配给同日其他可买标的（顺延到下一个标的）
     limit_up_mode: str = "idle"
+    # 真实开盘涨停不可买 mask，索引为入场日，列为标的。
+    # True 表示该日 open / pre_close 触及对应板块涨停；仅影响新增/增持权重。
+    limit_up_open_mask: Optional[pd.DataFrame] = None
     # vwap 模式额外执行惩罚（按 half L1 换手比例缩放）：
     # extra_drag = turnover * (vwap_slippage_bps_per_side + vwap_impact_bps * turnover) / 1e4
     vwap_slippage_bps_per_side: float = 3.0
@@ -59,21 +62,13 @@ def _align_weights_columns(
     return w.astype(np.float64)
 
 
-def build_open_to_open_returns(
+def build_limit_up_open_mask(
     daily_long: pd.DataFrame,
     *,
     date_col: str = "trade_date",
     sym_col: str = "symbol",
-    zero_if_limit_up_open: bool = False,
 ) -> pd.DataFrame:
-    """
-    由日线长表构造「开盘到次日开盘」单日简单收益宽表，索引为交易日，与 ``run_backtest(..., execution_mode='tplus1_open')`` 输入一致。
-
-    第 ``t`` 行、``s`` 列：``open(t+1,s)/open(t,s)-1``（最后一行全为 ``nan`` 或 0）。
-
-    zero_if_limit_up_open
-        若为 True，当 ``open(t)`` 触及涨停价（相对前收）时将该收益置 0，表示开盘无法买入、该笔不参与。
-    """
+    """构造入场日一字涨停不可买 mask，索引为交易日，列为标的。"""
     from src.market.tradability import is_open_limit_up_unbuyable
 
     if daily_long.empty:
@@ -89,16 +84,66 @@ def build_open_to_open_returns(
     chunks: List[pd.DataFrame] = []
     for sym, g in df.groupby(sym_col, sort=False):
         g = g.sort_values(date_col)
+        open_px = pd.to_numeric(g["open"], errors="coerce")
+        if "pre_close" in g.columns:
+            prev_close = pd.to_numeric(g["pre_close"], errors="coerce")
+        else:
+            prev_close = pd.to_numeric(g["close"], errors="coerce").shift(1)
+        mask = [
+            is_open_limit_up_unbuyable(float(o), float(pc), str(sym))
+            if np.isfinite(float(o)) and np.isfinite(float(pc))
+            else False
+            for o, pc in zip(open_px, prev_close)
+        ]
+        chunks.append(
+            pd.DataFrame(
+                {
+                    date_col: g[date_col].values,
+                    sym_col: sym,
+                    "_limit_up_open": mask,
+                }
+            )
+        )
+    long_mask = pd.concat(chunks, ignore_index=True)
+    wide = long_mask.pivot(index=date_col, columns=sym_col, values="_limit_up_open")
+    wide = wide.sort_index().fillna(False)
+    return wide.astype(bool)
+
+
+def build_open_to_open_returns(
+    daily_long: pd.DataFrame,
+    *,
+    date_col: str = "trade_date",
+    sym_col: str = "symbol",
+    zero_if_limit_up_open: bool = False,
+) -> pd.DataFrame:
+    """
+    由日线长表构造「开盘到次日开盘」单日简单收益宽表，索引为交易日，与 ``run_backtest(..., execution_mode='tplus1_open')`` 输入一致。
+
+    第 ``t`` 行、``s`` 列：``open(t+1,s)/open(t,s)-1``（最后一行全为 ``nan`` 或 0）。
+
+    zero_if_limit_up_open
+        若为 True，当 ``open(t)`` 触及涨停价（相对前收）时将该收益置 0，表示开盘无法买入、该笔不参与。
+    """
+    if daily_long.empty:
+        raise ValueError("daily_long 为空")
+    need = {date_col, sym_col, "open", "close"}
+    miss = need - set(daily_long.columns)
+    if miss:
+        raise ValueError(f"daily_long 缺少列: {miss}")
+
+    df = daily_long.copy()
+    df[sym_col] = df[sym_col].astype(str).str.zfill(6)
+    df[date_col] = pd.to_datetime(df[date_col]).dt.normalize()
+    chunks: List[pd.DataFrame] = []
+    limit_mask = build_limit_up_open_mask(daily_long, date_col=date_col, sym_col=sym_col) if zero_if_limit_up_open else None
+    for sym, g in df.groupby(sym_col, sort=False):
+        g = g.sort_values(date_col)
         o = pd.to_numeric(g["open"], errors="coerce")
-        c = pd.to_numeric(g["close"], errors="coerce")
-        prev_c = c.shift(1)
         o2o = o.shift(-1) / o - 1.0
-        if zero_if_limit_up_open:
-            for i in range(len(g) - 1):
-                pc = float(prev_c.iloc[i])
-                ox = float(o.iloc[i])
-                if np.isfinite(pc) and np.isfinite(ox) and is_open_limit_up_unbuyable(ox, pc, str(sym)):
-                    o2o.iloc[i] = 0.0
+        if limit_mask is not None and sym in limit_mask.columns:
+            sym_mask = limit_mask.reindex(pd.to_datetime(g[date_col]).dt.normalize())[sym].fillna(False).to_numpy(bool)
+            o2o = o2o.mask(sym_mask, 0.0)
         chunks.append(
             pd.DataFrame(
                 {
@@ -112,25 +157,6 @@ def build_open_to_open_returns(
     wide = long_o2o.pivot(index=date_col, columns=sym_col, values="_o2o")
     wide = wide.sort_index()
     return wide.astype(np.float64)
-
-
-def _is_limit_up_open_row(
-    r_row: np.ndarray,
-    *,
-    threshold: float = 0.095,
-) -> np.ndarray:
-    """
-    在「开盘到次日开盘」收益行中，检测哪些资产当日开盘即触及涨停（收益 >= threshold）。
-
-    ``tplus1_open`` 模式下，r_row[j] = open(t+1,j)/open(t,j)-1。
-    若该值 >= threshold（约 9.5%，贴近主板 10% 涨停、创业板/科创板 20% 另做处理），
-    则认为该票 T+1 开盘一字涨停，无法按预期价格买入。
-
-    注意：这是个近似检测，更精确的做法需要前收价格（见 tradability.py）。
-    此处用于回测引擎中的「强校验」近似替代。
-    """
-    r = np.asarray(r_row, dtype=np.float64)
-    return np.where(np.isfinite(r), r >= threshold, False)
 
 
 def _redistribute_limit_up_weights(
@@ -164,6 +190,35 @@ def _redistribute_limit_up_weights(
         w[available] += w[available] / avail_sum * stranded
     # 若所有票均涨停，资金闲置（全部置 0）
     return w
+
+
+def _apply_limit_up_buy_fail(
+    target_w: np.ndarray,
+    prior_w: np.ndarray,
+    limit_up_mask: np.ndarray,
+    *,
+    mode: str,
+) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+    """只冻结新增/增持部分；已有持仓继续承受当日收益。"""
+    target = np.asarray(target_w, dtype=np.float64).copy()
+    prior = np.asarray(prior_w, dtype=np.float64)
+    lim = np.asarray(limit_up_mask, dtype=bool)
+    buy_delta = np.maximum(target - prior, 0.0)
+    failed_delta = np.where(lim, buy_delta, 0.0)
+    failed_total = float(np.nansum(failed_delta))
+    if failed_total <= 1e-15:
+        return target, failed_delta, 0.0, 0.0, 0.0
+
+    effective = target - failed_delta
+    redistributed_total = 0.0
+    if mode == "redistribute":
+        available = ~lim
+        avail_sum = float(np.nansum(effective[available]))
+        if avail_sum > 1e-15:
+            effective[available] += effective[available] / avail_sum * failed_total
+            redistributed_total = failed_total
+    idle_total = failed_total - redistributed_total
+    return effective, failed_delta, failed_total, redistributed_total, idle_total
 
 
 def _apply_gross_exposure(w: np.ndarray, max_gross: float) -> np.ndarray:
@@ -247,8 +302,10 @@ def run_backtest(
     或在配置中将 ``transaction_costs.slippage_bps_per_side`` 设为 4.5。
 
     涨停买入失败（仅 ``tplus1_open`` 模式）：
-    - ``limit_up_mode="idle"``：检测到当日开盘收益 >= 9.5%（涨停近似）的标的，其收益置 0（资金闲置）。
-    - ``limit_up_mode="redistribute"``：将涨停票权重均匀重分配给同日其余可买标的（顺延逻辑）。
+    - 若 ``BacktestConfig.limit_up_open_mask`` 提供真实 open/pre_close mask，只冻结新增/增持权重；
+      已有持仓继续按 open-to-open 收益持有。
+    - ``limit_up_mode="idle"``：冻结的新增资金闲置。
+    - ``limit_up_mode="redistribute"``：将冻结的新增资金按可买标的当前权重比例重分配。
     """
     cfg = config or BacktestConfig()
     cost = cfg.cost_params
@@ -292,48 +349,88 @@ def run_backtest(
     limit_up_mode = str(cfg.limit_up_mode).lower().strip()
     if limit_up_mode not in ("idle", "redistribute"):
         limit_up_mode = "idle"
+    limit_mask_mat: np.ndarray | None = None
+    limit_detection = "disabled_no_mask"
+    if exe == "tplus1_open" and cfg.limit_up_open_mask is not None:
+        lm = cfg.limit_up_open_mask.copy()
+        lm.index = pd.to_datetime(lm.index).normalize()
+        lm = lm.reindex(index=trading_index, columns=sym_cols, fill_value=False).fillna(False)
+        limit_mask_mat = lm.to_numpy(dtype=bool)
+        limit_detection = "open_preclose_mask"
 
     port = np.zeros(n, dtype=np.float64)
     turn_series = np.full(n, np.nan, dtype=np.float64)
     rebalance_dates = ws.index.intersection(trading_index)
+    buy_fail_rows: list[dict[str, Any]] = []
 
     # r_{p,t} = w_{t-1-L}^T r_t（L=execution_lag；tplus1_open 固定 L=0）
     port[0] = 0.0
-    for i in range(1, n):
-        jw = i - 1 - lag
-        if jw < 0:
-            port[i] = 0.0
-        else:
-            w_prev = w_mat[jw].copy()
+    if exe == "tplus1_open" and limit_mask_mat is not None:
+        actual_prev = np.zeros(k, dtype=np.float64)
+        for i in range(1, n):
+            jw = i - 1
+            target_w = w_mat[jw].copy()
             r_today = r_mat[i]
+            lim_mask = limit_mask_mat[i]
+            w_effective, failed_delta, failed_total, redistributed_total, idle_total = _apply_limit_up_buy_fail(
+                target_w,
+                actual_prev,
+                lim_mask,
+                mode=limit_up_mode,
+            )
+            if failed_total > 1e-15:
+                redistributed_ratio = redistributed_total / failed_total if failed_total > 1e-15 else 0.0
+                for col_idx in np.flatnonzero(failed_delta > 1e-15):
+                    failed_weight = float(failed_delta[col_idx])
+                    redistributed_weight = failed_weight * redistributed_ratio
+                    buy_fail_rows.append(
+                        {
+                            "trade_date": trading_index[i],
+                            "signal_weight_date": trading_index[jw],
+                            "symbol": sym_cols[col_idx],
+                            "mode": limit_up_mode,
+                            "target_weight": float(target_w[col_idx]),
+                            "prior_weight": float(actual_prev[col_idx]),
+                            "failed_weight": failed_weight,
+                            "redistributed_weight": float(redistributed_weight),
+                            "idle_weight": float(failed_weight - redistributed_weight),
+                            "rebalance_failed_total_weight": float(failed_total),
+                            "rebalance_redistributed_total_weight": float(redistributed_total),
+                            "rebalance_idle_total_weight": float(idle_total),
+                            "effective_weight": float(w_effective[col_idx]),
+                        }
+                    )
 
-            # 涨停买入失败处理（仅 tplus1_open 模式）
-            if exe == "tplus1_open":
-                # 近似检测：当日收益 >= 9.5% 视为涨停（主板阈值）
-                lim_mask = _is_limit_up_open_row(r_today, threshold=0.095)
-                if lim_mask.any():
-                    if limit_up_mode == "redistribute":
-                        w_prev = _redistribute_limit_up_weights(w_prev, lim_mask)
-                    else:
-                        # idle 模式：直接将收益置 0（已在 r_mat 填充时处理，此处兜底）
-                        r_today = r_today.copy()
-                        r_today[lim_mask] = 0.0
+            port[i] = float(np.dot(w_effective, r_today))
+            half_l1 = 0.5 * float(np.sum(np.abs(w_effective - actual_prev)))
+            if half_l1 > 1e-15:
+                turn_series[i] = half_l1
+                if cost is not None:
+                    port[i] -= turnover_cost_drag(half_l1, cost)
+            actual_prev = w_effective
+    else:
+        for i in range(1, n):
+            jw = i - 1 - lag
+            if jw < 0:
+                port[i] = 0.0
+            else:
+                w_prev = w_mat[jw].copy()
+                r_today = r_mat[i]
+                port[i] = float(np.dot(w_prev, r_today))
 
-            port[i] = float(np.dot(w_prev, r_today))
-
-        w_new = w_mat[i]
-        w_old = w_mat[i - 1]
-        half_l1 = 0.5 * float(np.sum(np.abs(w_new - w_old)))
-        if half_l1 > 1e-15:
-            turn_series[i] = half_l1
-            if cost is not None:
-                port[i] -= turnover_cost_drag(half_l1, cost)
-            if exe == "vwap":
-                # VWAP 模式将尾盘成交冲击显式体现在调仓日：换手越大，冲击惩罚越高。
-                base_bps = max(float(cfg.vwap_slippage_bps_per_side), 0.0)
-                impact_bps = max(float(cfg.vwap_impact_bps), 0.0)
-                extra_drag = half_l1 * (base_bps + impact_bps * half_l1) / 1e4
-                port[i] -= float(extra_drag)
+            w_new = w_mat[i]
+            w_old = w_mat[i - 1]
+            half_l1 = 0.5 * float(np.sum(np.abs(w_new - w_old)))
+            if half_l1 > 1e-15:
+                turn_series[i] = half_l1
+                if cost is not None:
+                    port[i] -= turnover_cost_drag(half_l1, cost)
+                if exe == "vwap":
+                    # VWAP 模式将尾盘成交冲击显式体现在调仓日：换手越大，冲击惩罚越高。
+                    base_bps = max(float(cfg.vwap_slippage_bps_per_side), 0.0)
+                    impact_bps = max(float(cfg.vwap_impact_bps), 0.0)
+                    extra_drag = half_l1 * (base_bps + impact_bps * half_l1) / 1e4
+                    port[i] -= float(extra_drag)
 
     s = pd.Series(port, index=trading_index, name="portfolio_ret")
     turn = pd.Series(turn_series, index=trading_index, name="turnover_half_l1")
@@ -351,6 +448,13 @@ def run_backtest(
         "risk_cfg_resolved": risk_config_from_mapping(cfg.risk_cfg),
         "execution_mode": exe,
         "execution_lag": int(lag),
+        "limit_up_mode": limit_up_mode,
+        "limit_up_detection": limit_detection,
+        "buy_fail_diagnostic": buy_fail_rows,
+        "buy_fail_event_count": int(len(buy_fail_rows)),
+        "buy_fail_total_weight": float(sum(row["failed_weight"] for row in buy_fail_rows)),
+        "buy_fail_redistributed_weight": float(sum(row["redistributed_weight"] for row in buy_fail_rows)),
+        "buy_fail_idle_weight": float(sum(row["idle_weight"] for row in buy_fail_rows)),
     }
     return BacktestResult(daily_returns=s, rebalance_turnover=turn, panel=panel, meta=meta)
 

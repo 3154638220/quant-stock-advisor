@@ -5,26 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from scripts.light_strategy_proxy import (
-    annualize_period_return as _annualize_period_return,
-    build_light_proxy_period_detail,
-    infer_periods_per_year,
-    summarize_light_strategy_proxy,
-)
+from scripts.light_strategy_proxy import build_light_proxy_period_detail, infer_periods_per_year, summarize_light_strategy_proxy
 from scripts.research_identity import build_light_research_identity
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.run_alpha_expression_scout import (
-    DEFAULT_CANDIDATES,
     build_conditioned_flip_factor,
     build_expression_scenarios,
     compute_expression_gate_table,
