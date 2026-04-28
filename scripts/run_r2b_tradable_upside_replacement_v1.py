@@ -119,15 +119,40 @@ def _long_with_id(df: pd.DataFrame, cid: str) -> pd.DataFrame:
     return out
 
 
+PREFIX_FALLBACK_INDUSTRY_SOURCE = "symbol_prefix_proxy_missing_data_cache_industry_map"
+DIAGNOSTIC_FALLBACK_SOURCE = "fallback_only_for_diagnostic"
+
+
+def _industry_source_status(source: str) -> str:
+    s = str(source)
+    if s == PREFIX_FALLBACK_INDUSTRY_SOURCE:
+        return "prefix_fallback_no_alpha_evidence"
+    parts = {p.strip() for p in s.split(",") if p.strip()}
+    if parts and parts <= {DIAGNOSTIC_FALLBACK_SOURCE}:
+        return "fallback_only_for_diagnostic_no_alpha_evidence"
+    return "real_industry_map"
+
+
 def _load_or_build_industry_map(symbols: list[str], path: Path) -> tuple[pd.DataFrame, str]:
     """Load a real industry map if present; otherwise use a stable board proxy."""
     if path.exists():
-        raw = pd.read_csv(path)
+        raw = pd.read_csv(path, encoding="utf-8-sig")
         if {"symbol", "industry"}.issubset(raw.columns):
-            out = raw[["symbol", "industry"]].copy()
+            keep_cols = ["symbol", "industry"]
+            if "source" in raw.columns:
+                keep_cols.append("source")
+            if "asof_date" in raw.columns:
+                keep_cols.append("asof_date")
+            out = raw[keep_cols].copy()
             out["symbol"] = out["symbol"].astype(str).str.zfill(6)
             out["industry"] = out["industry"].astype(str).replace({"": "unknown"}).fillna("unknown")
-            return out.drop_duplicates("symbol", keep="last"), str(path)
+            if "source" in out.columns:
+                source_series = out["source"]
+            else:
+                source_series = pd.Series(["unknown"] * len(out), index=out.index)
+            sources = sorted(set(source_series.astype(str).str.strip()))
+            source_label = ",".join(s for s in sources if s) or str(path)
+            return out[["symbol", "industry"]].drop_duplicates("symbol", keep="last"), source_label
 
     rows = []
     for sym in sorted({str(s).zfill(6) for s in symbols}):
@@ -146,7 +171,7 @@ def _load_or_build_industry_map(symbols: list[str], path: Path) -> tuple[pd.Data
         else:
             industry = f"proxy_prefix_{sym[:2]}"
         rows.append({"symbol": sym, "industry": industry})
-    return pd.DataFrame(rows), "symbol_prefix_proxy_missing_data_cache_industry_map"
+    return pd.DataFrame(rows), PREFIX_FALLBACK_INDUSTRY_SOURCE
 
 
 def _add_basic_r2b_features(panel: pd.DataFrame, daily_df: pd.DataFrame) -> pd.DataFrame:
@@ -659,6 +684,8 @@ def _build_doc(
     lines.append(f"- 配置快照：`{config_source}`")
     lines.append(f"- `eval_contract_version`: `{EVAL_CONTRACT_VERSION}`")
     lines.append(f"- `execution_contract_version`: `{EXECUTION_CONTRACT_VERSION}`")
+    lines.append(f"- `industry_map_source`: `{params.get('industry_map_source', '')}`")
+    lines.append(f"- `industry_map_source_status`: `{params.get('industry_map_source_status', '')}`")
     lines.append("- 组合表达：`S2 defensive Top-20 + capped replacement slots`，不再使用完整 upside Top-20 sleeve。")
     lines.append("- 状态输入：上一已完成月份 `regime/breadth`；仅 `strong_up` 或 `wide` 允许 replacement gate。")
     lines.append("- primary benchmark：`open_to_open`；promotion metric：`daily_bt_like_proxy_annualized_excess_vs_market`。")
@@ -678,6 +705,8 @@ def _build_doc(
         "strong_up_switch_in_minus_out",
         "avg_turnover_half_l1",
         "delta_vs_baseline_turnover",
+        "industry_map_source_status",
+        "industry_alpha_evidence_allowed",
         "n_rebalances",
     ]
     lines.append(leaderboard[[c for c in cols if c in leaderboard.columns]].to_markdown(index=False, floatfmt=".4f"))
@@ -715,6 +744,12 @@ def _build_doc(
     lines.append("_无 switch 样本_" if switch_long.empty else switch_long.to_markdown(index=False, floatfmt=".4f"))
     lines.append("")
     lines.append("## 6. 行业暴露\n")
+    if params.get("industry_map_source_status") != "real_industry_map":
+        lines.append(
+            f"> 行业来源为 `{params.get('industry_map_source_status')}`；"
+            "industry breadth / 行业暴露仅可作诊断，不可作为 alpha 证据。"
+        )
+        lines.append("")
     if industry_exposure.empty:
         lines.append("_无行业暴露_")
     else:
@@ -799,10 +834,14 @@ def main() -> None:
         sorted(panel["symbol"].astype(str).str.zfill(6).unique().tolist()),
         PROJECT_ROOT / args.industry_map,
     )
+    industry_status = _industry_source_status(industry_source)
     panel = panel.merge(industry_map, on="symbol", how="left")
     panel["industry"] = panel["industry"].fillna("unknown").astype(str)
     panel = build_r2b_scores(panel)
-    print(f"  panel(after filter)={panel.shape}; industry_source={industry_source}", flush=True)
+    print(
+        f"  panel(after filter)={panel.shape}; industry_source={industry_source}; industry_status={industry_status}",
+        flush=True,
+    )
 
     print("[3/8] precompute returns + benchmark + lagged state", flush=True)
     open_returns = build_open_to_open_returns(daily_df, zero_if_limit_up_open=False).sort_index()
@@ -932,6 +971,10 @@ def main() -> None:
         ],
         baseline_id=BASELINE_ID,
     )
+    for table in (leaderboard, standalone_leaderboard):
+        table["industry_map_source"] = industry_source
+        table["industry_map_source_status"] = industry_status
+        table["industry_alpha_evidence_allowed"] = industry_status == "real_industry_map"
     base_row = leaderboard[leaderboard["candidate_id"] == BASELINE_ID].iloc[0]
     accept_map = {row["candidate_id"]: _accept_summary(row, base_row) for _, row in leaderboard.iterrows()}
     regime_long = pd.concat([_long_with_id(r["regime_capture"], r["candidate"]["id"]) for r in results], ignore_index=True)
@@ -987,6 +1030,8 @@ def main() -> None:
         "max_limit_up_hits_20d": args.max_limit_up_hits_20d,
         "max_expansion": args.max_expansion,
         "industry_map_source": industry_source,
+        "industry_map_source_status": industry_status,
+        "industry_alpha_evidence_allowed": industry_status == "real_industry_map",
         "prefilter": prefilter_cfg,
         "universe_filter": uf_cfg,
         "benchmark_symbol": str(risk_cfg.get("benchmark_symbol", "market_ew_proxy")),

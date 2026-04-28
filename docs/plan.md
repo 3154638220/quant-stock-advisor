@@ -2,7 +2,7 @@
 
 **文档角色**：当前唯一主计划（canonical）
 **更新时间**：`2026-04-28`
-**当前阶段**：R2B 第一轮 replacement 已完成且无 gray zone；停止 R3；下一步进入 R4 真实行业映射与 R2B oracle replacement attribution
+**当前阶段**：R4A 真实行业映射已完成；下一步进入 R2B oracle replacement attribution
 **生产状态**：当前没有任何 P1/R2/R3 研究候选满足 promotion；不允许写入日更推荐默认配置
 **归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
@@ -26,7 +26,7 @@
 2. P1 原主线的标签近邻微调已经被充分证伪。
 3. pure upside Top-20 与 dual sleeve 都失败。
 4. R2B 第一轮 replacement 证明边界信号有局部信息，但组合收益没有兑现。
-5. 当前缺少真实行业映射，`industry_breadth` 仍使用 symbol prefix fallback，无法真正表达行业/主题扩散。
+5. R4A 已补齐真实申万行业映射；R4A 之前的 `industry_breadth` 仍使用 symbol prefix fallback，不能作为有效行业 alpha 证据。
 6. 当前 replacement gate 过于机械：状态允许后倾向填满 slot，不是“除非有明确优势才替换”。
 
 新的主线必须从：
@@ -292,7 +292,33 @@ daily proxy 不是 promotion 终点。任何生产候选必须进入 promoted re
 
 ### R4A：真实行业映射
 
+**状态**：已完成（`2026-04-28`）。
+
 **目标**：建立 `data/cache/industry_map.csv`，替代 symbol prefix fallback。
+
+完成产物：
+
+```text
+data/cache/industry_map.csv
+data/results/industry_map_quality_2026-04-28_summary.csv
+docs/industry_map_quality_2026-04-28.md
+```
+
+质量摘要：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 当前 universe | `5184` |
+| 映射覆盖 | `5184` |
+| 覆盖率 | `100.00%` |
+| unknown 比例 | `0.00%` |
+| 重复 symbol | `0` |
+| 一级行业数 | `31` |
+| 数据源 | `akshare.stock_industry_clf_hist_sw+stock_industry_category_cninfo` |
+
+说明：数据源为申万官方股票行业历史全量表 + 巨潮申万行业分类目录；`industry` 与 `industry_level1` 使用申万一级行业，`industry_level2` 使用申万二级行业。R2B 报告逻辑已增加 `industry_map_source_status`，只有 `real_industry_map` 才允许把 industry breadth 当作 alpha 证据。
+
+历史任务清单保留如下，作为验收口径记录。
 
 任务：
 

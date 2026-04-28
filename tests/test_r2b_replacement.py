@@ -1,6 +1,13 @@
+from pathlib import Path
+
 import pandas as pd
 
-from scripts.run_r2b_tradable_upside_replacement_v1 import build_replacement_weights
+from scripts.run_r2b_tradable_upside_replacement_v1 import (
+    PREFIX_FALLBACK_INDUSTRY_SOURCE,
+    _industry_source_status,
+    _load_or_build_industry_map,
+    build_replacement_weights,
+)
 
 
 def _panel() -> pd.DataFrame:
@@ -98,3 +105,33 @@ def test_build_replacement_weights_holds_core_when_state_not_allowed():
     assert bool(diag.loc[0, "replacement_allowed"]) is False
     assert diag.loc[0, "replacement_count"] == 0
     pd.testing.assert_series_equal(weights.loc[rd], defensive.loc[rd], check_names=False)
+
+
+def test_load_or_build_industry_map_uses_real_map_when_present(tmp_path):
+    p = tmp_path / "industry_map.csv"
+    pd.DataFrame(
+        [
+            {
+                "symbol": "1",
+                "industry": "银行",
+                "industry_level1": "银行",
+                "industry_level2": "银行",
+                "source": "akshare.stock_board_industry_cons_em",
+                "asof_date": "2026-04-28",
+            }
+        ]
+    ).to_csv(p, index=False)
+
+    out, source = _load_or_build_industry_map(["000001"], p)
+
+    assert out.loc[0, "symbol"] == "000001"
+    assert out.loc[0, "industry"] == "银行"
+    assert _industry_source_status(source) == "real_industry_map"
+
+
+def test_load_or_build_industry_map_reports_prefix_fallback_when_missing():
+    out, source = _load_or_build_industry_map(["600519"], Path("/tmp/not-present-industry-map.csv"))
+
+    assert out.loc[0, "symbol"] == "600519"
+    assert source == PREFIX_FALLBACK_INDUSTRY_SOURCE
+    assert _industry_source_status(source) == "prefix_fallback_no_alpha_evidence"
