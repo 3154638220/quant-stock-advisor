@@ -1,0 +1,75 @@
+{
+  "registry_version": "r5_config_governance_2026-04-28",
+  "updated_at": "2026-04-28",
+  "purpose": "Production promotion registry for daily recommendation configs. Research configs are not production inputs unless an entry is added here after the full promotion gate passes.",
+  "production_policy": {
+    "daily_recommendation_rule": "Daily recommendation must use only configs recorded in promoted_configs.",
+    "daily_proxy_is_promotion_endpoint": false,
+    "gray_zone_is_production_candidate": false,
+    "research_config_roots": [
+      "config.yaml.backtest",
+      "configs/backtests/"
+    ],
+    "production_config_roots": [
+      "config.yaml.example",
+      "config.yaml",
+      "configs/promoted/"
+    ]
+  },
+  "required_entry_fields": [
+    "config_id",
+    "config_path",
+    "promotion_date",
+    "full_backtest_report",
+    "daily_proxy_report",
+    "oos_report",
+    "state_slice_report",
+    "boundary_report",
+    "owner_decision"
+  ],
+  "current_state": {
+    "has_promoted_research_candidates": false,
+    "active_promoted_config_id": null,
+    "decision": "No P1/R2/R3 research candidate satisfies production promotion as of 2026-04-28.",
+    "default_action": "Do not write any unpromoted research result into config.yaml.example or local production config.yaml."
+  },
+  "research_candidate_status": [
+    {
+      "candidate_id": "P1_label_neighborhood_family",
+      "status": "rejected_or_frozen",
+      "production_eligible": false,
+      "evidence": "P1/G0 label-neighborhood tuning failed daily-proxy-first and mechanism gates."
+    },
+    {
+      "candidate_id": "R2_legacy_dual_sleeve_family",
+      "status": "rejected",
+      "production_eligible": false,
+      "evidence": "R1F fixed rerun confirms UPSIDE_C_FIXED and DUAL_V1_FIXED remain reject."
+    },
+    {
+      "candidate_id": "R2B_v1_replacement_family",
+      "status": "rejected",
+      "production_eligible": false,
+      "evidence": "R2B v1 replacement candidates did not outperform BASELINE_S2_FIXED after costs and diagnostics."
+    },
+    {
+      "candidate_id": "U3_A_real_industry_leadership__EDGE_GATED",
+      "status": "gray_zone_rejected_by_weight_audit",
+      "production_eligible": false,
+      "evidence": "Daily proxy was only +0.25pct versus baseline; Day 8 audit found pair_edge_score buckets reversed and replace-1 sensitivity weaker than baseline."
+    },
+    {
+      "candidate_id": "U3_B_buyable_leadership_persistence__EDGE_GATED",
+      "status": "rejected",
+      "production_eligible": false,
+      "evidence": "Daily proxy, strong-down defense, and switch quality were weaker than U3_A."
+    },
+    {
+      "candidate_id": "U3_C_pairwise_residual_edge__EDGE_GATED",
+      "status": "rejected",
+      "production_eligible": false,
+      "evidence": "Strong-up switch diagnostics improved, but daily proxy remained below BASELINE_S2_FIXED."
+    }
+  ],
+  "promoted_configs": []
+}

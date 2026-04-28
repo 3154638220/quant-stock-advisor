@@ -6,5 +6,8 @@
 - `../config.yaml`：本机私有运行配置，通常不入库。
 - `../config.yaml.backtest`：当前 canonical 研究回测快照。
 - `backtests/`：历史 backtest 场景、消融和验证快照。
+- `promoted/`：生产 promotion registry；日更推荐的生产候选只能来自该 registry，当前无任何研究候选进入生产。
 
 配置加载兼容旧命令：传入 `config.yaml.backtest.r7_s2_prefilter_off_universe_on` 这类旧快照名时，加载器会先查根目录，再自动查 `configs/backtests/`。
+
+R5 配置治理约束：`daily proxy` 不是 promotion 终点，`gray zone` 不是 production candidate；未写入 `configs/promoted/promoted_registry.json` 的研究配置不得进入生产默认配置。

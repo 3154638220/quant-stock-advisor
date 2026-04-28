@@ -43,6 +43,7 @@
 ├── config.yaml              # 本地运行配置（建议不入库，支持 QUANT_CONFIG 覆盖路径）
 ├── config.yaml.backtest     # 当前 canonical 研究回测快照
 ├── configs/
+│   ├── promoted/            # production promotion registry
 │   └── backtests/           # 历史研究配置快照与场景变体
 ├── pyproject.toml           # 包名 quant-system、pytest 配置
 ├── environment.yml          # Conda 环境 quant-system（Python 3.10）
@@ -120,6 +121,8 @@ export QUANT_CONFIG=/absolute/path/to/config.yaml
 ```
 
 研究回测默认入口是根目录 `config.yaml.backtest`；历史场景快照统一收纳在 `configs/backtests/`。为了兼容旧报告和旧命令，`--config config.yaml.backtest.r7_s2_prefilter_off_universe_on` 这类旧快照名会自动解析到 `configs/backtests/` 下同名文件。
+
+生产 promotion 边界记录在 `configs/promoted/promoted_registry.json`。截至 `2026-04-28`，registry 中 `promoted_configs` 为空，当前没有任何 P1/R2/R3 研究候选进入生产；`daily proxy` 与 `gray zone` 均不能替代正式 promotion。
 
 ### Conda（推荐，含 Jetson）
 
@@ -264,7 +267,7 @@ python scripts/daily_run.py --help
 
 ## 配置要点（`config.yaml` / `config.yaml.example`）
 
-- **运行配置边界**：`config.yaml.example` 和本地 `config.yaml` 服务生产/日更链路；`config.yaml.backtest` 与 `configs/backtests/` 服务研究回测链路，未 promotion 的研究结论不要写回生产配置。
+- **运行配置边界**：`config.yaml.example` 和本地 `config.yaml` 服务生产/日更链路；`config.yaml.backtest` 与 `configs/backtests/` 服务研究回测链路；`configs/promoted/promoted_registry.json` 记录允许进入生产的 promoted 配置。未 promotion 的研究结论不要写回生产配置。
 - **paths**：`duckdb_path`、`results_dir`、`models_dir` 等
 - **akshare**：复权、超时、重试、股票池缓存策略
 - **akshare**：现还包含 HTTP 连接/读超时、HTTP 重试、本地快照回退与 DNS 诊断脚本配置

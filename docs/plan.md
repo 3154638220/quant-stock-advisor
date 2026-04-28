@@ -2,7 +2,7 @@
 
 **文档角色**：当前唯一主计划（canonical）
 **更新时间**：`2026-04-28`
-**当前阶段**：R4A 真实行业映射已完成；下一步进入 R2B oracle replacement attribution
+**当前阶段**：R5 配置治理已完成；已建立 promoted registry，当前无任何研究候选进入生产
 **生产状态**：当前没有任何 P1/R2/R3 研究候选满足 promotion；不允许写入日更推荐默认配置
 **归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
@@ -27,7 +27,9 @@
 3. pure upside Top-20 与 dual sleeve 都失败。
 4. R2B 第一轮 replacement 证明边界信号有局部信息，但组合收益没有兑现。
 5. R4A 已补齐真实申万行业映射；R4A 之前的 `industry_breadth` 仍使用 symbol prefix fallback，不能作为有效行业 alpha 证据。
-6. 当前 replacement gate 过于机械：状态允许后倾向填满 slot，不是“除非有明确优势才替换”。
+6. R2B-O 证明候选池存在很强的事后 replacement 上限，但 `strong_up_or_wide` 状态门控本身没有提高普通 pair 胜率。
+7. R2B v2 证明 edge gate 能减少机械替换并改善部分 switch quality，但仍没有把 strong-up 收益兑现为可 promotion alpha。
+8. R2B v2 weight audit 进一步证明 `U3_A` gray zone 不稳：手写 `pair_edge_score` bucket 反向，replace-1 更差，不能启动 R3。
 
 新的主线必须从：
 
@@ -45,15 +47,16 @@
 
 ```text
 真实行业映射
--> oracle replacement attribution 判断可学上限
--> R2B v2 edge-gated replacement / overlay
--> 只有进入 gray zone 后才启动 R3 boundary model
+-> oracle replacement attribution 判断可学上限（已完成）
+-> R2B v2 edge-gated replacement / overlay（已完成，`U3_A` gray zone）
+-> Day 8 gray-zone weight audit（已完成，`U3_A` 不稳）
+-> 暂停 R2B/R3 replacement 主线，进入 R5 配置治理
 -> 只有 full backtest 与 promotion gate 全过后才进入生产 registry
 ```
 
 当前禁止动作：
 
-1. 不启动 R3。
+1. 不启动 R3；R2B v2 gray-zone audit 未支持进入模型训练。
 2. 不继续加大 dual sleeve upside 权重。
 3. 不继续 P1/G0 标签近邻微调。
 4. 不把 pure upside Top-20 当 promotion 候选。
@@ -149,7 +152,8 @@ S2 defensive Top-20
 ```text
 R2B v1 全部 reject，无 gray zone。
 不启动 R3。
-下一步回到 R4 数据基础设施与 R2B oracle attribution。
+后续已完成 R4A 真实行业映射、R2B-O oracle attribution、R2B v2 edge-gated replacement 与 Day 8 weight audit。
+当前 R2B/R3 replacement 主线暂停，不写生产配置。
 ```
 
 ### 1.4 S2 的真实定位
@@ -186,6 +190,153 @@ S2 defensive core
 + 少量、有证据、有成本补偿的 replacement
 ```
 
+### 1.5 R2B-O oracle replacement attribution 已完成
+
+R2B-O 已完成，见：
+
+- `docs/r2b_oracle_replacement_attribution_2026-04-28.md`
+- `data/results/r2b_oracle_replacement_attribution_2026-04-28_summary.json`
+- `data/results/r2b_oracle_replacement_attribution_2026-04-28_*.csv`
+
+实验口径：
+
+| 字段 | 当前值 |
+| --- | --- |
+| `eval_contract_version` | `r0_eval_execution_contract_2026-04-28` |
+| `execution_contract_version` | `tplus1_open_buy_delta_limit_mask_2026-04-28` |
+| `industry_map_source_status` | `real_industry_map` |
+| `pair_base_rows` | `4,326,400` |
+| 默认 horizon | `20d` |
+| 默认 cost buffer | `15bp` |
+| oracle replacement cap | `3` |
+
+关键结果：
+
+| 口径 | 最优 oracle daily proxy 年化超额 | 相对 S2 baseline | 平均半 L1 换手 | active rebalance share | 说明 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `all_states / S2_bottom_5 / candidate_buyable` | `+266.08%` | `+274.68pct` | `0.219` | `96.88%` | 全样本事后上限，仅作 diagnostic |
+| `strong_up_or_wide / S2_bottom_5 / candidate_buyable` | `+27.42%` | `+36.01pct` | `0.142` | `25.00%` | 状态门控下仍有明确上限 |
+| `strong_up_or_wide / S2_bottom_5 / candidate_top_pct_90` | `+17.98%` | `+26.57pct` | `0.142` | `25.00%` | 现有 upside score 前 10% 仍保留上限 |
+| `BASELINE_S2_FIXED` | `-8.59%` | `0.00pct` | `0.084` | `0.00%` | baseline |
+
+oracle capacity 观察：
+
+1. `all_states` 下几乎每个月都能找到 3 个正 edge 替换，说明 replacement 问题不是“候选池完全没有上限”。
+2. `strong_up_or_wide` 下活跃月份约 `25.8%`，平均正 edge slot 为 `0.77`，不是每月都应该替换。
+3. `candidate_buyable` 的 oracle 结果对 `U2_A/U2_B/U2_C` 相同，因为 oracle 在完整可买池中事后选边；这不能证明现有 score 已经能学到 edge。
+4. `candidate_top_pct_90` 在 `strong_up_or_wide` 下仍有 `+22.99pct` 到 `+26.57pct` 的 oracle proxy 增量，说明现有 score 对候选池裁剪有一定价值。
+5. `state_strong_up_or_wide=True` 的普通 pair hit rate 反而低于全样本，状态门控不能单独作为 edge 证据；R2B v2 必须以 pair edge / score margin / feature bucket 为主门控。
+
+R2B-O 判定：
+
+```text
+oracle 有明确上限。
+现有 score 只能提供候选池裁剪，不足以直接作为替换决策。
+进入 R2B v2 edge-gated replacement。
+仍不启动 R3 boundary model；先做规则版 pairwise edge gate。
+```
+
+### 1.6 R2B v2 edge-gated replacement 已完成
+
+R2B v2 已完成，见：
+
+- `docs/r2b_edge_gated_replacement_v2_2026-04-28.md`
+- `scripts/run_r2b_edge_gated_replacement_v2.py`
+- `data/results/r2b_edge_gated_replacement_v2_2026-04-28_summary.json`
+- `data/results/r2b_edge_gated_replacement_v2_2026-04-28_*.csv`
+
+实验口径：
+
+| 字段 | 当前值 |
+| --- | --- |
+| `eval_contract_version` | `r0_eval_execution_contract_2026-04-28` |
+| `execution_contract_version` | `tplus1_open_buy_delta_limit_mask_2026-04-28` |
+| `industry_map_source_status` | `real_industry_map` |
+| `pair_base_rows` | `4,280,720` |
+| `portfolio_method` | `defensive_core_edge_gated_replacement` |
+| `max_replace` | `3` |
+| 默认 horizon / cost buffer | `20d / 15bp` |
+
+候选池与 gate：
+
+| candidate | pool | state gate | selected pairs | active month share | 0 替换月份 |
+| --- | --- | --- | ---: | ---: | ---: |
+| `U3_A_real_industry_leadership__EDGE_GATED` | `S2_bottom_3 + candidate_top_pct_95` | `strong_up_and_wide` | `33` | `17.19%` | `82.81%` |
+| `U3_B_buyable_leadership_persistence__EDGE_GATED` | `S2_bottom_3 + candidate_top_pct_90` | `up_or_wide_not_strong_down` | `46` | `25.00%` | `75.00%` |
+| `U3_C_pairwise_residual_edge__EDGE_GATED` | `S2_bottom_5 + candidate_buyable` | `strong_up_or_wide` | `51` | `26.56%` | `73.44%` |
+
+关键结果：
+
+| candidate | daily proxy 年化超额 | 相对 S2 baseline | strong-up 中位超额 | strong-up positive share | strong-up switch-in-minus-out | 平均半 L1 换手 | 判定 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `BASELINE_S2_FIXED` | `-8.59%` | `0.00pct` | `-6.12%` | `15.38%` | `-2.37%` | `0.084` | baseline / reject |
+| `U3_A_real_industry_leadership__EDGE_GATED` | `-8.34%` | `+0.25pct` | `-6.16%` | `15.38%` | `+2.35%` | `0.132` | gray zone |
+| `U3_C_pairwise_residual_edge__EDGE_GATED` | `-9.25%` | `-0.66pct` | `-6.12%` | `23.08%` | `+6.90%` | `0.140` | reject |
+| `U3_B_buyable_leadership_persistence__EDGE_GATED` | `-9.82%` | `-1.23pct` | `-6.12%` | `15.38%` | `-1.10%` | `0.133` | reject |
+
+R2B v2 观察：
+
+1. edge gate 已经解决 R2B v1 “状态允许后倾向填满 slot”的问题，0 替换月份占 `73%~83%`。
+2. `U3_A` daily proxy 略高于 baseline，strong-up switch 转正，且换手增量 `+0.047` 可控，所以进入 gray zone。
+3. `U3_A` 没有改善 strong-up 中位超额或 positive share，因此不是 full-backtest candidate，也不是 production candidate。
+4. `U3_C` 的 strong-up positive share 从 `15.38%` 提升到 `23.08%`，switch 也明显转正，但 daily proxy 低于 baseline，不能进入 gray zone。
+5. `U3_B` daily proxy、strong-down 防守和 switch quality 均弱于 `U3_A`，直接 reject。
+6. 所有 R2B v2 候选 daily proxy 仍为负，没有候选达到 `>= +3%` full-backtest 门槛。
+
+R2B v2 判定：
+
+```text
+U3_A 进入 gray zone，只允许补更细 slice / 阶段判断。
+U3_B、U3_C reject。
+不补正式 full backtest。
+不写入生产配置。
+复杂 R3 boundary model 仍不启动；后续 Day 8 weight audit 已确认 `U3_A` 不稳。
+```
+
+### 1.7 R2B v2 gray-zone weight audit 已完成
+
+R2B v2 weight audit 已完成，见：
+
+- `docs/r2b_v2_weight_audit_2026-04-28.md`
+- `scripts/run_r2b_v2_weight_audit.py`
+- `data/results/r2b_v2_weight_audit_2026-04-28_summary.json`
+- `data/results/r2b_v2_weight_audit_2026-04-28_*.csv`
+
+实验口径：
+
+| 字段 | 当前值 |
+| --- | --- |
+| `target_candidate` | `U3_A_real_industry_leadership__EDGE_GATED` |
+| `industry_map_source_status` | `real_industry_map` |
+| `pair_base_rows` | `486,237` |
+| `target_rule_pair_rows` | `4,755` |
+| `selected_pairs` | `33` |
+| 默认 horizon / cost buffer | `20d / 15bp` |
+
+核心审计结果：
+
+| 诊断 | 结果 | 含义 |
+| --- | --- | --- |
+| `pair_edge_score` bucket | `bucket_edge_spearman=-0.70`，`bucket_win_spearman=-0.90` | 手写综合分越高，真实 pair edge 反而越差 |
+| `amount_expansion_diff` bucket | `bucket_edge_spearman=-0.90`，`bucket_win_spearman=-1.00` | 成交扩张差的正权重方向不成立 |
+| `turnover_expansion_diff` bucket | `bucket_edge_spearman=-1.00`，`bucket_win_spearman=-1.00` | 换手扩张差的正权重方向不成立 |
+| selected pair by year | `2025` 平均 realized edge `-6.71%`，`2026` 中位 realized edge `-19.14%` | 跨年不稳定 |
+| selected pair by slot | slot 1 realized edge `-3.58%`，win rate `27.27%` | 最高分 slot 反而最差，不能收缩为 replace-1 |
+| threshold / capacity | 最好仍是原 `thr0.68_replace3`，仅 `+0.25pct`；`replace1` 为 `-0.25pct` | gray zone 对具体手写规则敏感，不稳健 |
+| simple baseline | `candidate_score_pct_only` 也能达到 `+0.12pct` | 复杂线性权重没有明显优于朴素候选分 |
+
+审计判定：
+
+```text
+U3_A gray zone 不具备足够稳定性。
+手写线性 pair_edge_score 没有得到 feature bucket 支持。
+replace-1 不成立，不能作为 R2B v2.1 的自然收缩方向。
+不启动 R3 classifier / ranker。
+不补正式 full backtest。
+不写生产配置。
+R2B/R3 replacement 主线暂停；除非新增更强特征或更明确目标切片，否则不继续在当前 U3 线性规则上消耗预算。
+```
+
 ---
 
 ## 2. 当前优缺点
@@ -207,6 +358,9 @@ S2 defensive core
 5. **研究纪律清楚**
    当前没有把未 promotion 的研究配置写回生产，也没有用 val_rank_ic 替代可交易收益。
 
+6. **replacement 问题存在可学习上限**
+   R2B-O 显示在真实行业映射和 open-to-open 口径下，S2 边界附近存在足够多事后正 edge 样本；R2B v2 已把它收敛成可审计的规则版 edge gate，并通过 audit 明确了当前规则版不够稳。
+
 ### 2.2 主要缺点
 
 1. **没有可 promotion 的 alpha**
@@ -215,11 +369,11 @@ S2 defensive core
 2. **upside 输入仍然粗糙**
    当前强势特征更像追涨/高换手，而不是稳定可交易领导力。
 
-3. **真实行业/主题信息缺失**
-   `industry_breadth` 使用 symbol prefix fallback，不能真实刻画行业扩散。
+3. **主题与行业持续性信息仍粗糙**
+   真实申万行业映射已经补齐，但 industry breadth 还需要从静态行业归属升级为可交易的行业扩散、持续性和拥挤度信号。
 
-4. **replacement gate 不是 edge-driven**
-   当前状态允许后倾向填满 slot，没有充分体现“hold unless clear edge”。
+4. **replacement edge gate 未学到稳定边界**
+   R2B v2 已经从状态触发改为 edge 触发，但 audit 显示手写 `pair_edge_score` 方向不稳，不能支撑 R3。
 
 5. **状态门控太粗**
    `strong_up or wide` 会把部分非 risk-on 场景也打开 replacement。
@@ -377,6 +531,8 @@ industry_map_source != symbol_prefix_proxy_missing_data_cache_industry_map
 
 ### R2B-O：Oracle replacement attribution
 
+**状态**：已完成（`2026-04-28`）。
+
 **目标**：在继续造新 score 前，先判断 replacement 问题是否有可学习上限。
 
 核心问题：
@@ -386,7 +542,7 @@ industry_map_source != symbol_prefix_proxy_missing_data_cache_industry_map
 候选池里是否真的存在足够多能跑赢 S2 边界持仓的股票？
 ```
 
-建议新增脚本：
+已落地脚本：
 
 ```text
 scripts/run_r2b_oracle_replacement_attribution.py
@@ -430,7 +586,30 @@ scripts/run_r2b_oracle_replacement_attribution.py
 | `state_gate_precision` | `strong_up/wide` 是否真的提高 edge 胜率 |
 | `cost_sensitivity` | 成本 buffer 对可替换样本数的影响 |
 
-判定：
+完成产物：
+
+```text
+docs/r2b_oracle_replacement_attribution_2026-04-28.md
+data/results/r2b_oracle_replacement_attribution_2026-04-28_oracle_hit_rate_by_state.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_oracle_capacity_by_month.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_oracle_capacity_summary.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_best_possible_replace_3_excess.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_feature_bucket_monotonicity.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_state_gate_precision.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_cost_sensitivity.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_oracle_selected_pairs.csv
+data/results/r2b_oracle_replacement_attribution_2026-04-28_summary.json
+```
+
+实际判定：
+
+| 结果 | 动作 |
+| --- | --- |
+| oracle 有明确上限 | 进入 R2B v2 |
+| 现有 score 对候选池裁剪有效，但不能直接决定替换 | 做 pairwise feature / rule，不训练复杂模型 |
+| `strong_up_or_wide` 普通 pair precision 不提升 | R2B v2 必须加入 edge/confidence gate，不能只靠状态触发 |
+
+原判定框架保留：
 
 | 结果 | 动作 |
 | --- | --- |
@@ -439,7 +618,7 @@ scripts/run_r2b_oracle_replacement_attribution.py
 | oracle 有上限，简单 rule 能捕捉一部分 | 进入 R2B v2 |
 | oracle replace-3 已接近 `>= +3%` daily proxy 上限 | 允许 R2B v2 后补更细 gate |
 
-建议产物：
+历史计划产物模板：
 
 ```text
 docs/r2b_oracle_replacement_attribution_YYYY-MM-DD.md
@@ -450,6 +629,29 @@ data/results/r2b_oracle_replacement_attribution_YYYY-MM-DD_summary.json
 ### R2B v2：Edge-gated replacement
 
 **启动条件**：R4A 完成，且 R2B-O 显示存在可学习上限。
+
+**当前状态**：已完成（`2026-04-28`）；`U3_A` 进入 gray zone，`U3_B/U3_C` reject。
+
+完成产物：
+
+```text
+scripts/run_r2b_edge_gated_replacement_v2.py
+tests/test_r2b_edge_gated_replacement_v2.py
+docs/r2b_edge_gated_replacement_v2_2026-04-28.md
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_leaderboard.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_replacement_diag_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_replacement_count_distribution.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_selected_pairs.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_overlap_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_industry_exposure_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_regime_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_breadth_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_year_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_year_strong_up_improvement.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_switch_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_monthly_long.csv
+data/results/r2b_edge_gated_replacement_v2_2026-04-28_summary.json
+```
 
 目标：
 
@@ -522,9 +724,17 @@ R2B v2 的诊断重点：
 | daily proxy `0% ~ +3%` | gray zone，可补更细 slice，不补 production |
 | daily proxy `>= +3%` | full-backtest candidate |
 
+实际判定：
+
+| candidate | 判定 | 动作 |
+| --- | --- | --- |
+| `U3_A_real_industry_leadership__EDGE_GATED` | gray zone | 只允许补更细 slice / 阶段判断，不补 production |
+| `U3_B_buyable_leadership_persistence__EDGE_GATED` | reject | 停止 |
+| `U3_C_pairwise_residual_edge__EDGE_GATED` | reject | 停止，保留 switch 诊断 |
+
 ### R3：Boundary model
 
-**当前状态**：不启动。
+**当前状态**：不启动。R2B v2 虽有 `U3_A` gray zone，但 Day 8 weight audit 未支持其稳定性，当前不训练 classifier / ranker。
 
 启动条件必须满足至少一条：
 
@@ -532,6 +742,14 @@ R2B v2 的诊断重点：
 2. R2B v2 daily proxy 不低于 baseline，且 strong-up 明显改善。
 3. R2B v2 的 `switch_in_minus_out` 在 strong-up 稳定转正，并非少数月份支撑。
 4. oracle attribution 与规则版 gate 都显示有可学习上限。
+
+当前 Day 8 复核结果：
+
+```text
+上述条件未满足。
+U3_A gray zone 不稳定，replace-1 不成立，feature bucket 反向。
+R3 暂停。
+```
 
 R3 第一阶段只做规则版：
 
@@ -729,7 +947,9 @@ R2B/R3 候选必须报告：
 
 ### Day 1-2：R4A 行业映射
 
-任务：
+**状态**：已完成（`2026-04-28`）。
+
+历史任务：
 
 1. 建立 `data/cache/industry_map.csv`。
 2. 输出质量报告。
@@ -744,7 +964,9 @@ R2B/R3 候选必须报告：
 
 ### Day 3-4：R2B-O oracle attribution
 
-任务：
+**状态**：已完成（`2026-04-28`）。
+
+历史任务：
 
 1. 构造 pairwise old/new 样本。
 2. 计算 `5d/10d/20d` pair edge。
@@ -759,12 +981,15 @@ R2B/R3 候选必须报告：
 
 ### Day 5-7：R2B v2
 
+**状态**：已完成（`2026-04-28`）。
+
 任务：
 
-1. 最多测试 3 个新输入。
-2. 只保留 1 个主组合表达。
-3. 替换数量改为 `0/1/2/3`，不得默认填满。
-4. 输出 replacement count distribution、pair edge、switch/topk boundary、行业暴露。
+1. 固化 3 个候选池对照：`S2_bottom_3 + candidate_top_pct_95`、`S2_bottom_3 + candidate_top_pct_90`、`S2_bottom_5 + candidate_buyable`。
+2. 构造规则版 `pair_edge_score`，优先使用 `score_margin`、`rel_strength_diff`、成交扩张差、过热差和行业约束。
+3. 只保留 1 个主组合表达：`defensive core + edge-gated replacement`。
+4. 替换数量改为 `0/1/2/3`，不得默认填满。
+5. 输出 replacement count distribution、pair edge、switch/topk boundary、行业暴露。
 
 通过条件：
 
@@ -772,7 +997,16 @@ R2B/R3 候选必须报告：
 2. strong-up positive share 或中位超额明显改善。
 3. 换手增量可解释。
 
+实际结果：
+
+1. `U3_A` daily proxy `-8.34%`，略高于 baseline `-8.59%`，但 strong-up 中位超额和 positive share 未改善，判定为 gray zone。
+2. `U3_C` strong-up positive share 与 switch 改善，但 daily proxy 低于 baseline，reject。
+3. `U3_B` 全面弱于 `U3_A`，reject。
+4. 所有候选均未达到 `>= +3%` full-backtest 门槛。
+
 ### Day 8：阶段判断
+
+**状态**：已完成（`2026-04-28`）。
 
 任务：
 
@@ -781,13 +1015,46 @@ R2B/R3 候选必须报告：
 3. 若 R2B v2 达到 `>= +3%`，允许补正式 full backtest。
 4. 只有 gray zone 或更好才启动 R3。
 
+实际执行：
+
+1. 已新增并运行 `scripts/run_r2b_v2_weight_audit.py`。
+2. `U3_A` gray zone 未通过 weight audit：`pair_edge_score` bucket 反向，slot 1 真实 edge 为负，`replace1` sensitivity 弱于 baseline。
+3. 不启动 R3，不补正式 full backtest。
+4. R2B/R3 replacement 主线暂停，除非后续新增更强特征或更明确切片。
+
 ### Day 9-10：R5 配置治理
+
+**状态**：已完成（`2026-04-28`）。
 
 任务：
 
 1. 新增 promoted registry 骨架。
 2. 明确日更推荐只能读取 promoted 配置。
 3. 检查 `config.yaml.example` 不包含未 promotion 研究主线。
+
+完成产物：
+
+```text
+configs/promoted/README.md
+configs/promoted/promoted_registry.json
+docs/r5_config_governance_2026-04-28.md
+tests/test_promoted_registry.py
+```
+
+当前 registry 结论：
+
+```text
+promoted_configs = []
+active_promoted_config_id = null
+has_promoted_research_candidates = false
+```
+
+实际判定：
+
+1. 当前没有任何 P1/R2/R3 研究候选满足 production promotion。
+2. `U3_A` gray zone 已被 Day 8 weight audit 判定不稳，不进入生产。
+3. `U3_B/U3_C` reject，不进入生产。
+4. `config.yaml.backtest` 继续作为 canonical 研究入口；未 promotion 研究配置不得写入 `config.yaml.example`。
 
 建议阶段总结产物：
 
@@ -944,6 +1211,21 @@ data/results/phase_decision_industry_oracle_replacement_YYYY-MM-DD_summary.json
 - `data/results/r2b_tradable_upside_replacement_v1_2026-04-28_*.csv`
 - `data/results/r2b_tradable_upside_replacement_v1_2026-04-28_summary.json`
 
+### R2B oracle 与 v2 edge gate
+
+- `docs/r2b_oracle_replacement_attribution_2026-04-28.md`
+- `scripts/run_r2b_oracle_replacement_attribution.py`
+- `data/results/r2b_oracle_replacement_attribution_2026-04-28_*.csv`
+- `data/results/r2b_oracle_replacement_attribution_2026-04-28_summary.json`
+- `docs/r2b_edge_gated_replacement_v2_2026-04-28.md`
+- `scripts/run_r2b_edge_gated_replacement_v2.py`
+- `data/results/r2b_edge_gated_replacement_v2_2026-04-28_*.csv`
+- `data/results/r2b_edge_gated_replacement_v2_2026-04-28_summary.json`
+- `docs/r2b_v2_weight_audit_2026-04-28.md`
+- `scripts/run_r2b_v2_weight_audit.py`
+- `data/results/r2b_v2_weight_audit_2026-04-28_*.csv`
+- `data/results/r2b_v2_weight_audit_2026-04-28_summary.json`
+
 ### R1 strong-up 归因
 
 - `docs/p1_strong_up_failure_attribution_2026-04-27.md`
@@ -988,9 +1270,12 @@ data/results/phase_decision_industry_oracle_replacement_YYYY-MM-DD_summary.json
 - `src/models/xtree/p1_workflow.py`
 - `src/market/tradability.py`
 - `scripts/run_r2b_tradable_upside_replacement_v1.py`
+- `scripts/run_r2b_oracle_replacement_attribution.py`
+- `scripts/run_r2b_edge_gated_replacement_v2.py`
+- `scripts/run_r2b_v2_weight_audit.py`
 
 ---
 
 ## 12. 当前一句话路线
 
-**停止 P1 标签近邻微调和旧 R2 sleeve 扩权；保留 S2 作为 defensive core；先补真实行业映射，再做 oracle replacement attribution 判断可学上限；只有确认候选池里存在可交易 pair edge 后，才做 R2B v2 edge-gated replacement；只有 R2B v2 至少进入 gray zone，才启动 R3 boundary model。**
+**停止 P1 标签近邻微调和旧 R2 sleeve 扩权；保留 S2 作为 defensive core；真实行业映射、oracle replacement attribution、R2B v2 edge-gated replacement、gray-zone weight audit 与 R5 配置治理已完成；`U3_A` gray zone 不稳，R2B/R3 replacement 主线暂停，promoted registry 当前为空，没有任何研究候选进入生产配置。**
