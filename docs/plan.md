@@ -2,10 +2,10 @@
 
 **文档角色**：当前唯一主计划（canonical）  
 **更新时间**：`2026-04-29`  
-**当前目标**：月度选股 M5 多源特征扩展；M4 baseline ranker 已落地  
+**当前目标**：月度选股 M6 learning-to-rank 主模型；M5 多源特征扩展已全量跑通  
 **研究终点**：每月输出可解释、可回测、PIT-safe 的 Top-K 股票推荐名单  
 **生产状态**：当前无任何研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前进度**：M0 / M1 / M2 / M3 / M4 已完成；下一步进入 M5 多源特征扩展  
+**当前进度**：M0 / M1 / M2 / M3 / M4 / M5 已完成；下一步进入 M6 learning-to-rank  
 **归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
 ---
@@ -782,6 +782,8 @@ data/results/monthly_selection_baselines_2026-04-29_manifest.json
 
 ### M5：多源数据扩展
 
+**状态**：已完成第一版全量诊断。
+
 目标：
 
 ```text
@@ -805,6 +807,32 @@ data/results/monthly_selection_baselines_2026-04-29_manifest.json
 4. 分桶单调性。
 5. 特征重要性。
 6. 年度和 regime slice。
+
+当前 M5 质量摘要：
+
+| 项 | 当前值 |
+| --- | --- |
+| 主报告 | `docs/monthly_selection_m5_multisource_full_2026-04-29.md` |
+| 输入 dataset | `data/cache/monthly_selection_features.parquet` |
+| 数据库 | `data/market.duckdb` |
+| candidate_pools | `U1_liquid_tradable`, `U2_risk_sane` |
+| top_k | `20`, `30`, `50` |
+| feature specs | `price_volume_only` -> `+industry_breadth` -> `+fund_flow` -> `+fundamental` -> `+shareholder` |
+| ML models | `elasticnet`, `logistic`, `extratrees`, `xgboost_excess`, `xgboost_top20` |
+| walk-forward | 24 个月起训；每个测试月只用历史月训练 |
+| max_fit_rows | `0`，全训练窗不抽样 |
+| valid_rows / valid_months | `387709` / `62` |
+
+当前 M5 关键结论：
+
+1. 全量 M5 产物已落盘：leaderboard、incremental delta、feature coverage、feature importance、Top-K holdings、industry exposure、year slice、regime slice 与 manifest 均已生成。
+2. `U1` Top20 最强 after-cost 结果来自 `+industry_breadth+fund_flow+fundamental` 的 `extratrees_excess`：月均超额约 `0.012327`，after-cost 月均超额约 `0.011436`，Rank IC 约 `0.1075`，top-bottom quantile spread 约 `0.014534`。
+3. `U1` 中 `+industry_breadth+fund_flow+fundamental` 的 `elasticnet_excess` 更适合作为可解释线性候选：after-cost 月均超额约 `0.010598`，Rank IC 约 `0.104957`，分桶 spread 约 `0.017400`。
+4. `U2` Top20 最强 after-cost 结果同样来自 `+industry_breadth+fund_flow+fundamental` 的 `extratrees_excess`：after-cost 月均超额约 `0.009373`，Rank IC 约 `0.088744`；`elasticnet_excess` after-cost 约 `0.009175`，Rank IC 约 `0.086659`。
+5. `industry_breadth` 覆盖完整，`fundamental` 主字段覆盖高，但 `ev_ebitda` 当前覆盖为 `0`；`fund_flow` 是近端特征，候选池内覆盖约 `9.6% - 11.5%`；`shareholder` 候选池内覆盖约 `16.8%`。
+6. `fundamental` 在多种模型上带来 Top-K 增量；`fund_flow` 受历史覆盖短约束，当前更适合作为近端/缺失感知增量；`shareholder` 加入后没有稳定改善，暂不作为 M6 主输入核心。
+7. 强市参与度仍未完全解决：部分 Top-K 最强模型的 strong-up 中位超额仍为负；M6 需要重点处理 regime-aware ranking 或 top-bucket calibration。
+8. M5 不进入生产；它把 M6 的候选特征空间收敛到 `price_volume + industry_breadth + selected fundamental + cautious fund_flow flags`，并保留 shareholder 作为低优先级 ablation。
 
 ### M6：Learning-to-rank 主模型
 
@@ -1059,4 +1087,4 @@ data/results/monthly_selection_baselines_2026-04-29_manifest.json
 
 ## 12. 当前一句话路线
 
-**项目主线已从“量化持仓 replacement”切换为“量化月度选股”：M1 多源数据质量修复、M2 月度截面特征与标签表、M3 oracle top-bucket 诊断、M4 baseline ranker 均已完成第一版；`U1_liquid_tradable` 候选池存在很强事后上限，但 price-volume-only 静态因子整体较弱，walk-forward ML baseline 仅给出弱正向起点；下一步进入 M5 多源特征扩展，优先验证 industry breadth / fund flow / fundamental 等数据家族能否稳定提高 Rank IC、Top-K 超额、分桶 spread 与强市参与度；R2B/R3 replacement 主线冻结，生产 promoted registry 继续为空。**
+**项目主线已从“量化持仓 replacement”切换为“量化月度选股”：M1 多源数据质量修复、M2 月度截面特征与标签表、M3 oracle top-bucket 诊断、M4 baseline ranker、M5 多源特征扩展均已完成第一版；`U1_liquid_tradable` 候选池存在很强事后上限，M5 显示 industry breadth + selected fundamental 可提高 Top-K 超额与保持正 Rank IC，但 fund flow / shareholder 仍受覆盖约束，强市参与度仍需修复；下一步进入 M6 learning-to-rank / top-bucket calibration，生产 promoted registry 继续为空。**

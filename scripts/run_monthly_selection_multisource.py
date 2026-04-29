@@ -543,6 +543,12 @@ def build_walk_forward_scores_for_spec(
             test = pool_df[pool_df["signal_date"] == test_month].copy()
             if train["signal_date"].nunique() < cfg.min_train_months or len(train) < cfg.min_train_rows or test.empty:
                 continue
+            print(
+                "[monthly-m5] "
+                f"spec={spec.name} pool={pool} test_month={pd.Timestamp(test_month).date()} "
+                f"train_months={train['signal_date'].nunique()} train_rows={len(train)} test_rows={len(test)}",
+                flush=True,
+            )
             train_fit = _cap_fit_rows(train, max_rows=cfg.max_fit_rows, random_seed=cfg.random_seed)
             for base_model_name, model_type in model_specs:
                 if base_model_name.startswith("M4_xgboost"):
