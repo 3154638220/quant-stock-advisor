@@ -1,7 +1,7 @@
 # 量化月度选股主计划
 
 **文档角色**：当前唯一主计划（canonical）  
-**更新时间**：`2026-04-28`  
+**更新时间**：`2026-04-29`  
 **当前目标**：月度选股 M5 多源特征扩展；M4 baseline ranker 已落地  
 **研究终点**：每月输出可解释、可回测、PIT-safe 的 Top-K 股票推荐名单  
 **生产状态**：当前无任何研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
@@ -730,21 +730,21 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 当前产物：
 
 ```text
-docs/monthly_selection_baselines_2026-04-28.md
-data/results/monthly_selection_baselines_2026-04-28_summary.json
-data/results/monthly_selection_baselines_2026-04-28_leaderboard.csv
-data/results/monthly_selection_baselines_2026-04-28_monthly_long.csv
-data/results/monthly_selection_baselines_2026-04-28_rank_ic.csv
-data/results/monthly_selection_baselines_2026-04-28_quantile_spread.csv
-data/results/monthly_selection_baselines_2026-04-28_topk_holdings.csv
-data/results/monthly_selection_baselines_2026-04-28_industry_exposure.csv
-data/results/monthly_selection_baselines_2026-04-28_candidate_pool_width.csv
-data/results/monthly_selection_baselines_2026-04-28_candidate_pool_reject_reason.csv
-data/results/monthly_selection_baselines_2026-04-28_feature_importance.csv
-data/results/monthly_selection_baselines_2026-04-28_year_slice.csv
-data/results/monthly_selection_baselines_2026-04-28_regime_slice.csv
-data/results/monthly_selection_baselines_2026-04-28_market_states.csv
-data/results/monthly_selection_baselines_2026-04-28_manifest.json
+docs/monthly_selection_baselines_2026-04-29.md
+data/results/monthly_selection_baselines_2026-04-29_summary.json
+data/results/monthly_selection_baselines_2026-04-29_leaderboard.csv
+data/results/monthly_selection_baselines_2026-04-29_monthly_long.csv
+data/results/monthly_selection_baselines_2026-04-29_rank_ic.csv
+data/results/monthly_selection_baselines_2026-04-29_quantile_spread.csv
+data/results/monthly_selection_baselines_2026-04-29_topk_holdings.csv
+data/results/monthly_selection_baselines_2026-04-29_industry_exposure.csv
+data/results/monthly_selection_baselines_2026-04-29_candidate_pool_width.csv
+data/results/monthly_selection_baselines_2026-04-29_candidate_pool_reject_reason.csv
+data/results/monthly_selection_baselines_2026-04-29_feature_importance.csv
+data/results/monthly_selection_baselines_2026-04-29_year_slice.csv
+data/results/monthly_selection_baselines_2026-04-29_regime_slice.csv
+data/results/monthly_selection_baselines_2026-04-29_market_states.csv
+data/results/monthly_selection_baselines_2026-04-29_manifest.json
 ```
 
 当前 M4 已满足：
@@ -1004,7 +1004,7 @@ data/results/monthly_selection_baselines_2026-04-28_manifest.json
 
 - `docs/monthly_selection_dataset_2026-04-28.md`
 - `docs/monthly_selection_oracle_2026-04-28.md`
-- `docs/monthly_selection_baselines_2026-04-28.md`
+- `docs/monthly_selection_baselines_2026-04-29.md`
 - `data/cache/monthly_selection_features.parquet`
 - `data/results/monthly_selection_dataset_2026-04-28_quality.csv`
 - `data/results/monthly_selection_dataset_2026-04-28_candidate_pool_width.csv`
@@ -1016,14 +1016,14 @@ data/results/monthly_selection_baselines_2026-04-28_manifest.json
 - `data/results/monthly_selection_oracle_2026-04-28_baseline_overlap.csv`
 - `data/results/monthly_selection_oracle_2026-04-28_regime_oracle_capacity.csv`
 - `data/results/monthly_selection_oracle_2026-04-28_industry_oracle_distribution.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_summary.json`
-- `data/results/monthly_selection_baselines_2026-04-28_leaderboard.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_monthly_long.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_rank_ic.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_quantile_spread.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_topk_holdings.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_industry_exposure.csv`
-- `data/results/monthly_selection_baselines_2026-04-28_feature_importance.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_summary.json`
+- `data/results/monthly_selection_baselines_2026-04-29_leaderboard.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_monthly_long.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_rank_ic.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_quantile_spread.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_topk_holdings.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_industry_exposure.csv`
+- `data/results/monthly_selection_baselines_2026-04-29_feature_importance.csv`
 
 ### 新数据质量
 

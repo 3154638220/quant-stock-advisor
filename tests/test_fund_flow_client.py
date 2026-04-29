@@ -11,6 +11,7 @@ def test_fetch_symbol_fund_flow_records_exception_reason(monkeypatch, tmp_path):
     def _boom(*args, **kwargs):
         raise ConnectionError("upstream closed")
 
+    monkeypatch.setattr("src.data_fetcher.fund_flow_client.requests.get", _boom)
     monkeypatch.setattr("src.data_fetcher.fund_flow_client.ak.stock_individual_fund_flow", _boom)
 
     with FundFlowClient(duckdb_path=str(tmp_path / "fund_flow.duckdb")) as client:
@@ -25,6 +26,10 @@ def test_update_symbols_logs_failed_examples(monkeypatch, tmp_path, caplog):
     def _empty(*args, **kwargs):
         return pd.DataFrame()
 
+    def _h5_boom(*args, **kwargs):
+        raise ConnectionError("h5 upstream closed")
+
+    monkeypatch.setattr("src.data_fetcher.fund_flow_client.requests.get", _h5_boom)
     monkeypatch.setattr("src.data_fetcher.fund_flow_client.ak.stock_individual_fund_flow", _empty)
 
     with FundFlowClient(duckdb_path=str(tmp_path / "fund_flow.duckdb")) as client:
