@@ -1,17 +1,17 @@
 # Monthly Selection Dataset
 
-- 生成时间：`2026-04-28T12:12:44.412504+00:00`
+- 生成时间：`2026-04-28T14:25:20.091718+00:00`
 - 结果类型：`monthly_selection_dataset`
 - 研究主题：`monthly_selection_dataset`
 - 研究配置：`rb_m_exec_tplus1_open_label_o2o_start_2021_01_01_end_latest_hist_120_amt20m_50_lmmax_3_daily_a_share_daily`
 - 输出 stem：`monthly_selection_dataset_2026-04-28`
-- 配置来源：`default_config_lookup`
+- 配置来源：`/home/x12dpg/hjx/lh/config.yaml.backtest`
 
 ## Quality
 
 | result_type | research_topic | research_config_id | output_stem | config_source | dataset_version | rebalance_rule | execution_mode | benchmark_return_mode | candidate_pool_versions | industry_map_source_status | rows | symbols | signal_months | min_signal_date | max_signal_date | label_valid_rows |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| monthly_selection_dataset_quality | monthly_selection_dataset | rb_m_exec_tplus1_open_label_o2o_start_2021_01_01_end_latest_hist_120_amt20m_50_lmmax_3_daily_a_share_daily | monthly_selection_dataset_2026-04-28 | default_config_lookup | monthly_selection_features_v1 | M | tplus1_open | market_ew_open_to_open | U0_all_tradable,U1_liquid_tradable,U2_risk_sane | real_industry_map | 922173 | 5197 | 64 | 2021-01-29 | 2026-04-13 | 297028 |
+| monthly_selection_dataset_quality | monthly_selection_dataset | rb_m_exec_tplus1_open_label_o2o_start_2021_01_01_end_latest_hist_120_amt20m_50_lmmax_3_daily_a_share_daily | monthly_selection_dataset_2026-04-28 | /home/x12dpg/hjx/lh/config.yaml.backtest | monthly_selection_features_v1 | M | tplus1_open | market_ew_open_to_open | U0_all_tradable,U1_liquid_tradable,U2_risk_sane | real_industry_map | 922173 | 5197 | 64 | 2021-01-29 | 2026-04-13 | 297028 |
 
 ## Candidate Pool Width
 

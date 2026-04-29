@@ -2,10 +2,10 @@
 
 **文档角色**：当前唯一主计划（canonical）  
 **更新时间**：`2026-04-28`  
-**当前目标**：月度选股 M4 baseline ranker；M2 canonical dataset 与 M3 oracle 诊断已落地  
+**当前目标**：月度选股 M5 多源特征扩展；M4 baseline ranker 已落地  
 **研究终点**：每月输出可解释、可回测、PIT-safe 的 Top-K 股票推荐名单  
 **生产状态**：当前无任何研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前进度**：M0 / M1 / M2 / M3 已完成；下一步进入 M4 baseline ranker  
+**当前进度**：M0 / M1 / M2 / M3 / M4 已完成；下一步进入 M5 多源特征扩展  
 **归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
 ---
@@ -696,7 +696,7 @@ tests/test_monthly_selection_oracle.py
 
 ### M4：Baseline ranker
 
-**状态**：下一步主线，尚未完成。
+**状态**：已完成第一版 price-volume-only baseline ranker。
 
 目标：
 
@@ -704,7 +704,7 @@ tests/test_monthly_selection_oracle.py
 用简单模型建立可复现月度选股基线。
 ```
 
-建议新增脚本：
+已落地脚本：
 
 ```text
 scripts/run_monthly_selection_baselines.py
@@ -718,7 +718,7 @@ scripts/run_monthly_selection_baselines.py
 4. Logistic top-bucket classifier。
 5. XGBoost / LightGBM baseline。
 
-输出：
+已落地产物：
 
 ```text
 data/results/monthly_selection_baselines_YYYY-MM-DD_leaderboard.csv
@@ -727,7 +727,27 @@ data/results/monthly_selection_baselines_YYYY-MM-DD_quantile_spread.csv
 docs/monthly_selection_baselines_YYYY-MM-DD.md
 ```
 
-当前 M4 起步要求：
+当前产物：
+
+```text
+docs/monthly_selection_baselines_2026-04-28.md
+data/results/monthly_selection_baselines_2026-04-28_summary.json
+data/results/monthly_selection_baselines_2026-04-28_leaderboard.csv
+data/results/monthly_selection_baselines_2026-04-28_monthly_long.csv
+data/results/monthly_selection_baselines_2026-04-28_rank_ic.csv
+data/results/monthly_selection_baselines_2026-04-28_quantile_spread.csv
+data/results/monthly_selection_baselines_2026-04-28_topk_holdings.csv
+data/results/monthly_selection_baselines_2026-04-28_industry_exposure.csv
+data/results/monthly_selection_baselines_2026-04-28_candidate_pool_width.csv
+data/results/monthly_selection_baselines_2026-04-28_candidate_pool_reject_reason.csv
+data/results/monthly_selection_baselines_2026-04-28_feature_importance.csv
+data/results/monthly_selection_baselines_2026-04-28_year_slice.csv
+data/results/monthly_selection_baselines_2026-04-28_regime_slice.csv
+data/results/monthly_selection_baselines_2026-04-28_market_states.csv
+data/results/monthly_selection_baselines_2026-04-28_manifest.json
+```
+
+当前 M4 已满足：
 
 1. 输入固定为 `data/cache/monthly_selection_features.parquet`。
 2. 主训练池先用 `U1_liquid_tradable`，并并行报告 `U2_risk_sane`。
@@ -736,6 +756,29 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 5. 输出必须包含 Rank IC、Top-K 超额、hit rate、Top-K vs next-K、quantile spread、year slice、realized market state slice、行业暴露与换手。
 6. baseline overlap 只作为附表，不作为 gate。
 7. 若单因子/线性 blend 无法跑赢市场，仍需保留为基准；下一步由 M5 多源特征扩展寻找增量。
+
+当前 M4 质量摘要：
+
+| 项 | 当前值 |
+| --- | --- |
+| 输入 dataset | `monthly_selection_features_v1` |
+| industry_map_source_status | `real_industry_map` |
+| valid_rows | `387709` |
+| valid_signal_months | `62` |
+| candidate_pools | `U1_liquid_tradable`, `U2_risk_sane` |
+| top_k | `20`, `30`, `50` |
+| feature_spec | `price_volume_only_v1` |
+| ML policy | `walk_forward_by_signal_month`，只用测试月之前数据训练 |
+| cost_assumption | `10 bps per unit half-L1 turnover` |
+
+当前 M4 关键结论：
+
+1. price-volume-only 的静态单因子/线性 blend 多数无法稳定跑赢市场，特别是动量类在 `U1` Top20 上表现弱。
+2. walk-forward ML baseline 有正向但不稳的起步信号：`U1` Top20 中 `M4_xgboost_top20` 平均月超额约 `0.009633`，`M4_elasticnet_excess` 平均月超额约 `0.009347`，`M4_extratrees_excess` 平均月超额约 `0.007915`。
+3. `M4_elasticnet_excess` / `M4_extratrees_excess` 的 Rank IC 为正，说明当前 price-volume-only 特征仍有弱排序信息，但强度不足以作为推荐候选。
+4. `M4_xgboost_top20` 的 Top20 超额较高但 Rank IC 为负，说明 top-bucket classifier 可能只捕捉到局部头部结构，不能单独作为主模型证据。
+5. `U2_risk_sane` 下 `M4_elasticnet_excess` Top20 平均月超额约 `0.009566`，但 strong-up 中位超额仍为负，强市参与度问题仍在。
+6. M4 不进入生产；它作为 M5/M6 的可复现 baseline 与评估底座。下一步优先验证 industry breadth / fund flow / fundamental 等数据家族能否稳定提高 Rank IC、Top-K 超额与强市参与度。
 
 ### M5：多源数据扩展
 
@@ -961,6 +1004,7 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 
 - `docs/monthly_selection_dataset_2026-04-28.md`
 - `docs/monthly_selection_oracle_2026-04-28.md`
+- `docs/monthly_selection_baselines_2026-04-28.md`
 - `data/cache/monthly_selection_features.parquet`
 - `data/results/monthly_selection_dataset_2026-04-28_quality.csv`
 - `data/results/monthly_selection_dataset_2026-04-28_candidate_pool_width.csv`
@@ -972,6 +1016,14 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 - `data/results/monthly_selection_oracle_2026-04-28_baseline_overlap.csv`
 - `data/results/monthly_selection_oracle_2026-04-28_regime_oracle_capacity.csv`
 - `data/results/monthly_selection_oracle_2026-04-28_industry_oracle_distribution.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_summary.json`
+- `data/results/monthly_selection_baselines_2026-04-28_leaderboard.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_monthly_long.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_rank_ic.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_quantile_spread.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_topk_holdings.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_industry_exposure.csv`
+- `data/results/monthly_selection_baselines_2026-04-28_feature_importance.csv`
 
 ### 新数据质量
 
@@ -990,8 +1042,10 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 - `config.yaml.backtest`
 - `scripts/run_monthly_selection_dataset.py`
 - `scripts/run_monthly_selection_oracle.py`
+- `scripts/run_monthly_selection_baselines.py`
 - `tests/test_monthly_selection_dataset.py`
 - `tests/test_monthly_selection_oracle.py`
+- `tests/test_monthly_selection_baselines.py`
 - `src/models/xtree/p1_workflow.py`
 - `src/features/tensor_base_factors.py`
 - `src/features/intraday_proxy_factors.py`
@@ -1005,4 +1059,4 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 
 ## 12. 当前一句话路线
 
-**项目主线已从“量化持仓 replacement”切换为“量化月度选股”：M1 多源数据质量修复、M2 月度截面特征与标签表、M3 oracle top-bucket 诊断均已完成第一版，确认 `U1_liquid_tradable` 候选池存在很强事后上限，但当前 price-volume-only 单因子离 oracle imitation 仍远；下一步进入 M4 baseline ranker，用可复现的简单排序模型衡量 Top-K 超额、Rank IC、分桶 spread、年度和 regime 稳定性，同时把已通过 gate 的 fund flow / shareholder / fundamental 作为 M5 多源特征扩展候选；R2B/R3 replacement 主线冻结，生产 promoted registry 继续为空。**
+**项目主线已从“量化持仓 replacement”切换为“量化月度选股”：M1 多源数据质量修复、M2 月度截面特征与标签表、M3 oracle top-bucket 诊断、M4 baseline ranker 均已完成第一版；`U1_liquid_tradable` 候选池存在很强事后上限，但 price-volume-only 静态因子整体较弱，walk-forward ML baseline 仅给出弱正向起点；下一步进入 M5 多源特征扩展，优先验证 industry breadth / fund flow / fundamental 等数据家族能否稳定提高 Rank IC、Top-K 超额、分桶 spread 与强市参与度；R2B/R3 replacement 主线冻结，生产 promoted registry 继续为空。**

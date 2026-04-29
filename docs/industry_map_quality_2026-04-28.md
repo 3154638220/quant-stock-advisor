@@ -2,9 +2,9 @@
 
 ## Summary
 
-| asof_date   | source                                                            | universe_source                              |   universe_count |   mapped_universe_count |   coverage_ratio |   unknown_count |   unknown_ratio |   duplicate_symbol_count |   industry_count |   min_industry_size |   median_industry_size |   max_industry_size | fallback_used   | pass_coverage_90pct   | pass_no_duplicate_symbols   |
-|:------------|:------------------------------------------------------------------|:---------------------------------------------|-----------------:|------------------------:|-----------------:|----------------:|----------------:|-------------------------:|-----------------:|--------------------:|-----------------------:|--------------------:|:----------------|:----------------------|:----------------------------|
-| 2026-04-28  | akshare.stock_industry_clf_hist_sw+stock_industry_category_cninfo | duckdb_latest:/mnt/ssd/lh/data/market.duckdb |             5184 |                    5184 |           1.0000 |               0 |          0.0000 |                        0 |               31 |                  15 |               123.0000 |                 533 | False           | True                  | True                        |
+| asof_date   | source                                                            | universe_source                                      |   universe_count |   mapped_universe_count |   coverage_ratio |   unknown_count |   unknown_ratio |   duplicate_symbol_count |   industry_count |   min_industry_size |   median_industry_size |   max_industry_size | fallback_used   | pass_coverage_90pct   | pass_no_duplicate_symbols   |
+|:------------|:------------------------------------------------------------------|:-----------------------------------------------------|-----------------:|------------------------:|-----------------:|----------------:|----------------:|-------------------------:|-----------------:|--------------------:|-----------------------:|--------------------:|:----------------|:----------------------|:----------------------------|
+| 2026-04-28  | akshare.stock_industry_clf_hist_sw+stock_industry_category_cninfo | duckdb_latest:/home/x12dpg/hjx/lh/data/market.duckdb |             5184 |                    5184 |           1.0000 |               0 |          0.0000 |                        0 |               31 |                  15 |               123.0000 |                 533 | False           | True                  | True                        |
 
 ## Checks
 
