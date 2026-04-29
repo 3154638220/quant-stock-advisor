@@ -2,10 +2,10 @@
 
 **文档角色**：当前唯一主计划（canonical）  
 **更新时间**：`2026-04-29`  
-**当前目标**：月度选股 M6 learning-to-rank 主模型；M5 多源特征扩展已全量跑通  
+**当前目标**：月度选股 M7 研究版月度推荐报告；M6 learning-to-rank 已 full-fit 完成  
 **研究终点**：每月输出可解释、可回测、PIT-safe 的 Top-K 股票推荐名单  
 **生产状态**：当前无任何研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前进度**：M0 / M1 / M2 / M3 / M4 / M5 已完成；下一步进入 M6 learning-to-rank  
+**当前进度**：M0 / M1 / M2 / M3 / M4 / M5 / M6 已完成；下一步进入 M7 月度推荐报告  
 **归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
 ---
@@ -836,6 +836,8 @@ data/results/monthly_selection_baselines_2026-04-29_manifest.json
 
 ### M6：Learning-to-rank 主模型
 
+**状态**：已完成 full-fit 主口径诊断与 M5 对照 gate。
+
 目标：
 
 ```text
@@ -856,6 +858,57 @@ data/results/monthly_selection_baselines_2026-04-29_manifest.json
 3. 每个训练窗只用当时可见数据。
 4. 超参选择只能用训练窗内验证集。
 5. 报告每个 OOS 月份的 Top-K 明细。
+
+已落地脚本：
+
+```text
+scripts/run_monthly_selection_ltr.py
+```
+
+当前产物：
+
+```text
+docs/monthly_selection_m6_ltr_2026-04-29.md
+data/results/monthly_selection_m6_ltr_2026-04-29_summary.json
+data/results/monthly_selection_m6_ltr_2026-04-29_leaderboard.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_monthly_long.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_rank_ic.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_quantile_spread.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_feature_coverage.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_feature_importance.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_topk_holdings.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_industry_exposure.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_year_slice.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_regime_slice.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_vs_m5_gate.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_vs_m5_monthly_delta.csv
+data/results/monthly_selection_m6_ltr_2026-04-29_vs_m5_gate_summary.json
+data/results/monthly_selection_m6_ltr_2026-04-29_manifest.json
+```
+
+当前 M6 运行口径：
+
+| 项 | 当前值 |
+| --- | --- |
+| 输入 dataset | `data/cache/monthly_selection_features.parquet` |
+| 数据库 | `data/market.duckdb` |
+| candidate_pools | `U1_liquid_tradable`, `U2_risk_sane` |
+| top_k | `20`, `30`, `50` |
+| feature spec | `price_volume + industry_breadth + fund_flow + fundamental` |
+| 模型 | `xgboost_rank_ndcg`, `xgboost_rank_pairwise`, `top20_calibrated`, `ranker_top20_ensemble` |
+| walk-forward | 24 个月起训；每个测试月只用历史月训练 |
+| max_fit_rows | `0`，训练窗内不抽样，使用全部历史训练行 |
+| valid_rows / valid_months | `387709` / `62` |
+| OOS months | `38` |
+
+当前 M6 关键结论：
+
+1. M6 runner 已覆盖 XGBoost NDCG 排序、pairwise 排序、top-bucket rank calibration 和固定 ranker/classifier ensemble，并输出 OOS 月度 Top-K 明细。
+2. full-fit 主口径已完成：`max_fit_rows=0`，每个 walk-forward 训练窗使用全部历史训练行。
+3. `U1_liquid_tradable` 下 M6 没有通过 M5 对照 gate：Top20 最强 M6 after-cost 月均超额约 `0.000214`，显著低于 M5 最强约 `0.011436`；Top30 / Top50 也失败。
+4. `U2_risk_sane` 下 `M6_xgboost_rank_ndcg` 通过 Top20 / Top30 watchlist gate：Top20 after-cost 月均超额约 `0.012106`，高于 M5 最强约 `0.009373`；Top30 after-cost 月均超额约 `0.008630`，略高于 M5 最强约 `0.008317`。
+5. `U2` Top50 未通过 M5 对照；`top20_calibrated` 与固定 ensemble 没有稳定改善 Rank IC，不提升为主模型。
+6. M6 不进入生产；仅将 `U2_risk_sane + M6_xgboost_rank_ndcg + Top20/Top30` 标记为下一阶段 watchlist，进入 M7 研究报告和后续 regime-aware 复核。
 
 ### M7：月度推荐报告
 
