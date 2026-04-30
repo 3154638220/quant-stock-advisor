@@ -2,10 +2,10 @@
 
 **文档角色**：当前唯一主计划（canonical）  
 **更新时间**：`2026-04-30`  
-**当前阶段**：M8，行业集中度治理与 regime-aware 复核  
+**当前阶段**：M8，行业约束自然化  
 **研究终点**：每月输出可解释、可回测、PIT-safe、可执行约束清楚的 Top-K 股票推荐名单  
 **生产状态**：无研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前结论**：M7 已能生成研究版 Top20/Top30，但行业集中度过高，不能 promotion  
+**当前结论**：M8 的行业 hard cap 带来收益和集中度改善，但这更像选择层风险规则，不等于模型预测能力提升；M9 数据完整性工程修复已完成并通过报告层 gate，但 M8 自然化和 M10 成本执行压力完成前仍不能 promotion  
 **归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留历史执行记录，不再承担主计划职责
 
 ---
@@ -31,11 +31,12 @@ score(stock, month_end)
 
 当前最重要的判断：
 
-1. **不 promotion M7**。`U2_risk_sane + M6_xgboost_rank_ndcg` 的历史 Top20 after-cost 月均超额约 `0.012106`，但 2026-03-31 M7 Top20/Top30 全部集中在 `非银金融`，组合暴露不可接受。
-2. **M5 是当前更稳的收益底座**。`+industry_breadth+fund_flow+fundamental` 的 ExtraTrees / ElasticNet Rank IC、分桶 spread 和解释性好于 M6 的多数排序模型。
-3. **M6 是 watchlist，不是主模型**。M6 只在 `U2_risk_sane + Top20/Top30` 通过 M5 对照 gate；`U1` 与 Top50 失败。
-4. **下一步不再堆模型**。优先做行业集中度约束、regime-aware calibration、最新信号日可买性修复、真实成本敏感性。
-5. **生产边界不变**。任何研究候选通过完整 gate 前，不写入 `config.yaml.example` 或 promoted registry。
+1. **不 promotion M7/M8/M9 报告**。M8 的 hard cap 版本已把 Top-K 选择层行业集中度降到 gate 范围内，但约束形式仍偏人为；M9 已修复报告层数据完整性，真实成本压力仍未完成。
+2. **M8 当前最强研究候选是 lagged-regime fixed policy + industry cap，但 M8 未完成**。`U1_liquid_tradable + Top20 + indcap3` after-cost 月均超额约 `0.022369`，平均最大行业占比 `0.150000`，集中度月度 pass rate `1.0`；下一步必须验证 soft / learned / optimizer 版本能否替代 hard cap。
+3. **M5 ElasticNet cap 版仍是更可解释底座**。`U1 + M5_plus_industry_breadth+fund_flow+fundamental_elasticnet + Top20 + indcap4` after-cost 月均超额约 `0.017749`，Rank IC 约 `0.103597`。
+4. **M6 仍只作 watchlist / sleeve**。`U2 + M6_xgboost_rank_ndcg + Top20` 在 industry cap 后仍有收益证据，但 Rank IC 很弱，不能单独 promotion。
+5. **下一步不再堆模型**。优先把行业约束从 hard cap 迁移到标签、损失和组合优化目标中，并做 30/50 bps 与买入失败压力测试。
+6. **生产边界不变**。任何研究候选通过完整 gate 前，不写入 `config.yaml.example` 或 promoted registry。
 
 一句话路线：
 
@@ -198,7 +199,7 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 1. M5 ExtraTrees / ElasticNet 作为稳定排序底座。
 2. M6 rank NDCG 只作为 `U2` watchlist 模块，不单独 promotion。
 3. top-bucket classifier 只用于 regime-aware sleeve 或风险提示，不作为全局主模型。
-4. 行业集中度先在选择层治理，再判断是否需要模型层惩罚。
+4. 行业集中度不再只停留在选择层治理；hard cap 只作为诊断 baseline，下一步优先把行业拥挤惩罚、行业中性标签和组合优化目标纳入训练/选择闭环。
 5. 任何 ensemble 权重只能由历史 walk-forward 训练窗确定，不能用测试月调权。
 
 ---
@@ -264,8 +265,8 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 | M5 多源扩展 | 完成 | industry breadth + fundamental 带来稳定增量 |
 | M6 LTR | 完成 | `U2 + M6_xgboost_rank_ndcg + Top20/30` 仅进入 watchlist |
 | M7 推荐报告 | 完成 | 能输出研究名单，但 Top20/30 全为非银金融 |
-| M8 集中度与状态治理 | 进行中 | 当前最高优先级 |
-| M9 数据完整性修复 | 待启动 | 最新信号日、名称、低覆盖字段 |
+| M8 集中度与状态治理 | 未完成 | hard cap 已生成证据，但仍需把行业约束自然化为模型/损失/组合优化偏好；不 promotion |
+| M9 数据完整性修复 | 完成 | 报告层名称、T+1 可买字段、低覆盖特征治理、ST 名称过滤和 M9 gate 已落地 |
 | M10 成本与执行压力 | 待启动 | 真实成本、买入失败、冲击成本 |
 | M11 新数据扩展 | 待启动 | 北向、两融、主题、公告事件 |
 | M12 promotion package | 待启动 | 仅在 M8-M11 gate 通过后进入 |
@@ -274,8 +275,33 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 
 ## 6. M8：行业集中度与 Regime-Aware 治理
 
-**状态**：当前主任务。  
-**目标**：把 M7 watchlist 从“有历史收益”改造成“有可解释暴露和可生产约束”的候选。
+**状态**：未完成。hard cap 诊断已完成（2026-04-30），但行业约束自然化尚未完成。  
+**目标**：把 M7 watchlist 从“有历史收益”改造成“有可解释暴露、可生产约束、且约束尽量由模型/损失/组合优化自然表达”的候选。
+
+### 6.0 M8 已完成诊断
+
+已新增并运行：
+
+```text
+scripts/run_monthly_selection_concentration_regime.py
+```
+
+核心产物：
+
+```text
+data/results/monthly_selection_m8_concentration_regime_2026-04-30_leaderboard.csv
+data/results/monthly_selection_m8_concentration_regime_2026-04-30_gate.csv
+data/results/monthly_selection_m8_concentration_regime_2026-04-30_industry_concentration.csv
+docs/reports/2026-04/monthly_selection_m8_concentration_regime_2026-04-30.md
+```
+
+主要结果：
+
+1. 行业 cap 显著降低集中度：Top20 `indcap3/4/5` 的平均最大行业占比分别约 `0.15/0.19/0.23`，月度集中度 pass rate 为 `1.0`。
+2. `M8_regime_aware_fixed_policy + U1 + Top20 + indcap3` after-cost 月均超额约 `0.022369`，Rank IC 约 `0.097405`，Top-K vs next-K 为正。
+3. `M5 ElasticNet + U1 + Top20 + indcap4` after-cost 月均超额约 `0.017749`，Rank IC 约 `0.103597`，解释性最好。
+4. `U2 + M6_xgboost_rank_ndcg` 的 industry cap 版收益改善了集中度，但 Rank IC 仍弱，只能作为 sleeve / watchlist 证据。
+5. M8 hard-cap gate 有研究候选通过，但这只说明行业集中度是当前系统的关键薄弱点；在行业约束自然化完成前，不允许进入 M9/M10 promotion 路线或 promoted registry。
 
 ### 6.1 行业集中度约束
 
@@ -329,7 +355,7 @@ Top-K vs next-K 和 year/regime slice 不恶化为负。
 2. 禁止按测试月收益回填 regime 规则。
 3. 禁止用 M7 当前非银金融结果直接证明行业集中可接受。
 
-### 6.3 M8 产物
+### 6.3 M8 已有产物
 
 建议新增脚本：
 
@@ -350,20 +376,209 @@ data/results/monthly_selection_m8_concentration_regime_YYYY-MM-DD_gate.csv
 docs/reports/YYYY-MM/monthly_selection_m8_concentration_regime_YYYY-MM-DD.md
 ```
 
+### 6.4 行业约束自然化计划
+
+核心判断：
+
+```text
+hard cap 提升 = 有价值的诊断信号
+hard cap 本身 != 预测模型能力提升
+```
+
+下一步目标不是继续调 `indcap3/4/5`，而是让模型分数、训练目标或组合优化自然地降低行业拥挤，并保持可解释性。
+
+#### 6.4.1 标签层：行业中性收益作为主学习目标
+
+新增或强化以下标签对照：
+
+| label | 定义 | 用途 |
+| --- | --- | --- |
+| `label_forward_1m_industry_neutral_excess` | 个股下月收益减同月同业等权收益 | 让模型优先学习行业内 alpha |
+| `label_forward_1m_market_excess` | 个股下月收益减同月市场等权收益 | 保留行业间配置能力 |
+| `label_forward_1m_blended_excess` | `market_excess` 与 `industry_neutral_excess` 的训练窗内固定 blend | 平衡行业 beta 与行业内选股 |
+
+实验要求：
+
+1. 同一模型、同一特征、同一 walk-forward 切分下比较三类标签。
+2. 同时报告 raw excess、industry-neutral excess、Rank IC、行业暴露和 Top-K vs next-K。
+3. 禁止用测试期收益选择 blend 权重；权重只能由训练窗或固定先验确定。
+
+通过条件：
+
+```text
+industry-neutral 或 blended 标签下，
+Top-K 行业集中度自然下降；
+after-cost 超额不显著低于 hard cap baseline；
+Rank IC / spread 不恶化。
+```
+
+#### 6.4.2 损失层：行业拥挤 soft penalty
+
+在训练或验证选择目标中加入软惩罚，而不是后处理硬卡数量。
+
+候选形式：
+
+```text
+objective = rank_loss
+          - lambda_concentration * concentration_penalty(predicted_topk)
+          - lambda_turnover * turnover_penalty
+```
+
+行业惩罚候选：
+
+| penalty | 说明 |
+| --- | --- |
+| `hhi` | Top-K 行业权重平方和，惩罚行业过度集中 |
+| `max_share_softplus` | 超过目标行业占比后平滑惩罚 |
+| `relative_to_universe` | 惩罚相对候选池行业权重的主动偏离 |
+| `sector_residual_corr` | 惩罚预测分数与行业 dummy 的过高相关 |
+
+实验要求：
+
+1. `lambda` 只在训练窗内选择，采用 walk-forward 固定到测试月。
+2. 每个 penalty 必须和 no-penalty、hard-cap baseline 对照。
+3. 输出收益-集中度 frontier，而不是只报告单个最佳点。
+
+#### 6.4.3 模型层：显式学习行业内排序与行业间配置
+
+把总分拆成两个可解释部分：
+
+```text
+score_total
+= score_within_industry_alpha
++ w_industry * score_industry_allocation
++ w_risk * score_risk_control
+```
+
+候选实现：
+
+1. **行业内 ranker**：每个信号月先在行业内学习/标准化分数，降低大行业或热门行业支配 Top-K 的概率。
+2. **行业 allocation sleeve**：用行业 breadth、资金流、估值、动量预测行业层相对收益，只给总分小权重。
+3. **残差化模型**：训练前对收益或特征做行业残差化，模型预测行业解释不了的部分。
+4. **score calibration**：按行业对预测分数做训练窗内校准，避免某些行业分数系统性偏高。
+
+必须报告：
+
+1. `score_within_industry_alpha` 单独表现。
+2. `score_industry_allocation` 单独表现。
+3. 合成分数表现。
+4. 每月行业暴露变化是否来自真实行业观点，而不是模型偏置。
+
+#### 6.4.4 组合优化层：从 hard cap 改为风险预算
+
+选择层保留约束，但把“每行业最多 N 只”替换为更连续、可解释的风险预算。
+
+候选优化目标：
+
+```text
+maximize sum(w_i * score_i)
+       - gamma_industry * industry_active_risk(w)
+       - gamma_turnover * turnover(w, w_prev)
+       - gamma_size * size_active_risk(w)
+```
+
+约束建议：
+
+| 约束 | 形式 |
+| --- | --- |
+| 单票权重 | `0 <= w_i <= single_name_cap` |
+| 行业主动暴露 | 相对候选池或基准行业权重的偏离上限 |
+| 行业 HHI | 不超过训练窗确定阈值 |
+| 换手 | 半 L1 换手惩罚或上限 |
+| 可买性 | `t+1_open` 不可买直接剔除 |
+
+对照关系：
+
+```text
+unconstrained top score
+hard cap top score
+soft industry-risk optimizer
+```
+
+M8 完成条件不是 soft optimizer 必须超过 hard cap，而是：
+
+```text
+在接近 hard cap 收益的前提下，
+行业集中度由连续风险预算自然控制；
+参数由训练窗确定；
+跨年和 regime slice 不依赖少数月份。
+```
+
+#### 6.4.5 验收产物
+
+新增脚本建议：
+
+```text
+scripts/run_monthly_selection_m8_natural_industry_constraints.py
+```
+
+新增结果建议：
+
+```text
+data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_label_compare.csv
+data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_penalty_frontier.csv
+data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_score_decomposition.csv
+data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_optimizer_compare.csv
+data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_gate.csv
+docs/reports/YYYY-MM/monthly_selection_m8_natural_industry_constraints_YYYY-MM-DD.md
+```
+
+M8 最终完成 gate：
+
+1. hard cap 仍保留为 stress baseline，但主候选不能只靠 hard cap 通过 concentration gate。
+2. 至少一个自然化方案在 `U1 + Top20/30` 上接近或超过 hard-cap baseline。
+3. 行业集中度、收益、Rank IC、spread、year/regime slice 同时可解释。
+4. 参数选择完全来自训练窗或固定先验。
+5. 通过后才进入 M9/M10 的 promotion 前置路线。
+
 ---
 
 ## 7. M9：数据完整性修复
 
-**状态**：待启动。  
+**状态**：完成（2026-04-30）。  
 **目标**：让推荐报告能在最新可买信号日稳定生成，并减少低覆盖字段造成的伪信号。
+
+### 7.0 M9 已完成修复
+
+已新增和修复：
+
+```text
+scripts/fetch_stock_names.py
+scripts/run_monthly_selection_report.py
+```
+
+核心变更：
+
+1. 报告信号日默认选择“最新可执行信号日”：必须存在 `candidate_pool_pass` 且 `next_trade_date` 非空；显式请求无 `next_trade_date` 的日期会报错，不再硬出不可买名单。
+2. 推荐表合并回真实 `is_buyable_tplus1_open` 与 `next_trade_date`，修复报告层把可买标的误写成 `no_next_trade_date` 的问题。
+3. 新增股票名称缓存 `data/cache/a_share_stock_names.csv`，报告默认读取；M9 实跑名称覆盖 0 个 `UNKNOWN`。
+4. 名称可用后，报告目标月剔除 `ST/*ST` 名称标的；本次目标月剔除 129 只，最终推荐 ST 名称数为 0。
+5. 新增 M9 特征覆盖策略：`candidate_pool_pass` 覆盖率低于 `30%` 的字段不作为核心特征，只保留缺失标记；`feature_fundamental_ev_ebitda_z` 由 0 覆盖核心字段降级为 `is_missing_feature_fundamental_ev_ebitda`。
+6. 报告新增 `feature_policy.csv` 与 `m9_integrity.csv`，manifest 写入 `active_feature_cols` 与 `m9_integrity_pass`。
+
+实跑产物：
+
+```text
+data/results/monthly_selection_m9_data_integrity_report_2026-04-30_recommendations.csv
+data/results/monthly_selection_m9_data_integrity_report_2026-04-30_feature_policy.csv
+data/results/monthly_selection_m9_data_integrity_report_2026-04-30_m9_integrity.csv
+data/results/monthly_selection_m9_data_integrity_report_2026-04-30_manifest.json
+docs/monthly_selection_m9_data_integrity_report_2026-04-30.md
+```
+
+实跑结论：
+
+1. 当前本地 dataset 最新日 `2026-04-29` 仍缺少下一交易日行情，因此不能作为“可执行信号日”；报告自动选择最新可执行信号日 `2026-03-31`，下一交易日 `2026-04-01`。
+2. M9 gate 全部通过：`target_candidate_pool_pass_rows=4196`，`target_next_trade_date_present=4196`，`recommendation_buyable=0`，`recommendation_names_readable=0`，`recommendation_excludes_st_names=0`，`zero_coverage_core_features=0`，`low_coverage_core_features_lt_30pct=0`。
+3. 这只解决数据完整性与报告可信度，不改变 M8/M10 未完成导致的 `research_only_not_promoted` 状态。
 
 ### 7.1 必修项
 
-1. 修复 `2026-04-13` 无 `next_trade_date` 导致 M7 回退到 `2026-03-31` 的问题。
-2. 补齐到最新交易日的日线、资金流、候选池可买性。
-3. 接入股票名称表，避免 M7 `name=UNKNOWN`。
-4. 修复或移除 `feature_fundamental_ev_ebitda` 当前 `0` 覆盖字段。
-5. 对覆盖率低于 `30%` 的特征默认只保留缺失标记或进入 ablation，不直接作为主模型核心特征。
+1. 已修复 `next_trade_date` 口径：无下一交易日行情的日期不允许作为可执行报告信号日。
+2. 已保留数据补齐边界：若需使用 `2026-04-29`，必须先补齐 `2026-04-30` 日线和可买性；在补齐前自动退到最新可执行信号日。
+3. 已接入股票名称缓存，避免报告层 `name=UNKNOWN`。
+4. 已移除 `feature_fundamental_ev_ebitda_z` 作为 0 覆盖核心字段的影响，只保留缺失标记。
+5. 已对覆盖率低于 `30%` 的特征执行 missing-marker-only 策略。
 
 ### 7.2 验收
 
@@ -372,6 +587,13 @@ docs/reports/YYYY-MM/monthly_selection_m8_concentration_regime_YYYY-MM-DD.md
 feature_coverage 无零覆盖主字段；
 report 中 name 字段可读；
 manifest 明确数据截止日、信号日、下一交易日。
+```
+
+当前验收结果：
+
+```text
+通过。当前可执行信号日为 2026-03-31，下一交易日为 2026-04-01。
+若要把 2026-04-29 作为报告信号日，必须先补齐 2026-04-30 的全市场日线。
 ```
 
 ---
@@ -591,12 +813,21 @@ config.yaml.example
 - `docs/reports/2026-04/monthly_selection_m5_multisource_full_2026-04-29.md`
 - `docs/reports/2026-04/monthly_selection_m6_ltr_2026-04-29.md`
 - `docs/reports/2026-04/monthly_selection_m7_recommendation_report_2026-04-29.md`
+- `docs/reports/2026-04/monthly_selection_m8_concentration_regime_2026-04-30.md`
+- `docs/monthly_selection_m9_data_integrity_report_2026-04-30.md`
 - `data/cache/monthly_selection_features.parquet`
+- `data/cache/a_share_stock_names.csv`
 - `data/results/monthly_selection_m5_multisource_full_2026-04-29_leaderboard.csv`
 - `data/results/monthly_selection_m5_multisource_full_2026-04-29_incremental_delta.csv`
 - `data/results/monthly_selection_m6_ltr_2026-04-29_leaderboard.csv`
 - `data/results/monthly_selection_m6_ltr_2026-04-29_vs_m5_gate.csv`
 - `data/results/monthly_selection_m7_recommendation_report_2026-04-29_recommendations.csv`
+- `data/results/monthly_selection_m8_concentration_regime_2026-04-30_leaderboard.csv`
+- `data/results/monthly_selection_m8_concentration_regime_2026-04-30_gate.csv`
+- `data/results/monthly_selection_m8_concentration_regime_2026-04-30_industry_concentration.csv`
+- `data/results/monthly_selection_m9_data_integrity_report_2026-04-30_m9_integrity.csv`
+- `data/results/monthly_selection_m9_data_integrity_report_2026-04-30_feature_policy.csv`
+- `data/results/monthly_selection_m9_data_integrity_report_2026-04-30_manifest.json`
 
 ### 数据质量证据
 
@@ -626,6 +857,8 @@ config.yaml.example
 - `scripts/run_monthly_selection_multisource.py`
 - `scripts/run_monthly_selection_ltr.py`
 - `scripts/run_monthly_selection_report.py`
+- `scripts/fetch_stock_names.py`
+- `scripts/run_monthly_selection_concentration_regime.py`
 - `scripts/run_backtest_eval.py`
 - `src/market/tradability.py`
 - `src/features/tensor_base_factors.py`
@@ -639,9 +872,10 @@ config.yaml.example
 - `tests/test_monthly_selection_multisource.py`
 - `tests/test_monthly_selection_ltr.py`
 - `tests/test_monthly_selection_report.py`
+- `tests/test_monthly_selection_concentration_regime.py`
 
 ---
 
 ## 15. 当前一句话路线
 
-**当前项目已经完成 M0-M7 的月度选股研究链路，但 M7 仍是研究报告，不是交易策略；下一步 M8 必须先解决行业集中度和 regime-aware 稳定性，再修最新信号日数据完整性与成本压力测试，最终只有完整通过 M8-M12 gate 的候选才允许进入 promoted registry。**
+**当前项目已经完成 M0-M7、M8 hard-cap 诊断和 M9 数据完整性修复；M8 因行业约束仍需自然化而标记为未完成，M10 成本执行压力也未完成，因此当前仍不是交易策略。下一步先完成 M8 的标签/损失/组合优化自然化验证，再进入 M10 成本执行压力，最终只有完整通过 M8-M12 gate 的候选才允许进入 promoted registry。**

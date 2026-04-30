@@ -60,6 +60,7 @@ class M7RunConfig:
     availability_lag_days: int = 30
     relevance_grades: int = 5
     model_name: str = "M6_xgboost_rank_ndcg"
+    min_core_feature_coverage: float = 0.30
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,6 +81,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--random-seed", type=int, default=42)
     p.add_argument("--availability-lag-days", type=int, default=30)
     p.add_argument("--relevance-grades", type=int, default=5)
+    p.add_argument(
+        "--min-core-feature-coverage",
+        type=float,
+        default=0.30,
+        help="M9: candidate_pool_pass 覆盖率低于该阈值的特征不作为核心特征，只保留缺失标记。",
+    )
+    p.add_argument(
+        "--stock-name-cache",
+        type=str,
+        default="data/cache/a_share_stock_names.csv",
+        help="M9: 股票名称缓存 CSV，需包含 symbol/name 或中文等价列。",
+    )
     p.add_argument(
         "--families",
         type=str,
@@ -122,8 +135,13 @@ def select_report_signal_date(
             raise ValueError(f"报告信号日不存在于 dataset: {target.date()}")
         if not part["candidate_pool_pass"].astype(bool).any():
             raise ValueError(f"报告信号日无 candidate_pool_pass 标的: {target.date()}")
+        passed = part[part["candidate_pool_pass"].astype(bool)]
+        if "next_trade_date" in passed.columns and not passed["next_trade_date"].notna().all():
+            raise ValueError(f"报告信号日存在 candidate_pool_pass 但缺少 next_trade_date: {target.date()}")
         return target
     eligible = df[df["candidate_pool_pass"].astype(bool)].copy()
+    if "next_trade_date" in eligible.columns:
+        eligible = eligible[eligible["next_trade_date"].notna()].copy()
     if eligible.empty:
         raise ValueError("没有可用于 M7 推荐的 candidate_pool_pass 信号月。")
     return pd.Timestamp(eligible["signal_date"].max()).normalize()
@@ -135,9 +153,11 @@ def build_full_fit_report_scores(
     cfg: M7RunConfig,
     *,
     report_signal_date: pd.Timestamp,
+    feature_cols: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    feature_cols = [c for c in spec.feature_cols if c in dataset.columns]
-    if not feature_cols:
+    active_feature_cols = list(feature_cols) if feature_cols is not None else [c for c in spec.feature_cols if c in dataset.columns]
+    active_feature_cols = [c for c in active_feature_cols if c in dataset.columns]
+    if not active_feature_cols:
         return pd.DataFrame(), pd.DataFrame()
     score_frames: list[pd.DataFrame] = []
     importance_frames: list[pd.DataFrame] = []
@@ -152,6 +172,14 @@ def build_full_fit_report_scores(
         test = pool_df[
             pool_df["candidate_pool_pass"].astype(bool) & (pool_df["signal_date"] == report_signal_date)
         ].copy()
+        if "name" in test.columns:
+            st_mask = _is_st_name(_name_column(test))
+            if st_mask.any():
+                warnings.warn(
+                    f"M9 pool={pool} signal_date={report_signal_date.date()} 剔除 ST 名称标的 {int(st_mask.sum())} 只。",
+                    RuntimeWarning,
+                )
+                test = test[~st_mask].copy()
         if test.empty:
             warnings.warn(f"M7 pool={pool} signal_date={report_signal_date.date()} 无可推荐标的。", RuntimeWarning)
             continue
@@ -173,7 +201,7 @@ def build_full_fit_report_scores(
             objective="rank:ndcg",
             train=train_fit,
             test=test,
-            feature_cols=feature_cols,
+            feature_cols=active_feature_cols,
             random_seed=cfg.random_seed,
             relevance_grades=cfg.relevance_grades,
         )
@@ -203,6 +231,51 @@ def _name_column(df: pd.DataFrame) -> pd.Series:
             names = df[col].fillna("").astype(str).str.strip()
             return names.mask(names.eq("") | names.str.lower().eq("nan"), "UNKNOWN")
     return pd.Series(["UNKNOWN"] * len(df), index=df.index, dtype=object)
+
+
+def _is_st_name(names: pd.Series) -> pd.Series:
+    clean = names.fillna("").astype(str).str.strip().str.upper()
+    return clean.str.contains("ST", regex=False)
+
+
+def _normalize_name_cache(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["symbol", "name"])
+    symbol_col = next((c for c in ["symbol", "code", "代码", "证券代码"] if c in df.columns), "")
+    name_col = next((c for c in ["name", "stock_name", "股票名称", "名称", "证券简称"] if c in df.columns), "")
+    if not symbol_col or not name_col:
+        return pd.DataFrame(columns=["symbol", "name"])
+    out = df[[symbol_col, name_col]].rename(columns={symbol_col: "symbol", name_col: "name"}).copy()
+    out["symbol"] = out["symbol"].astype(str).str.extract(r"(\d{1,6})", expand=False).fillna("").str.zfill(6)
+    out["name"] = out["name"].fillna("").astype(str).str.strip()
+    out = out[(out["symbol"].str.len() == 6) & out["name"].ne("") & out["name"].str.lower().ne("nan")]
+    return out.drop_duplicates("symbol", keep="last").reset_index(drop=True)
+
+
+def load_stock_name_cache(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["symbol", "name"])
+    return _normalize_name_cache(pd.read_csv(path, dtype=str))
+
+
+def attach_stock_names(dataset: pd.DataFrame, names: pd.DataFrame) -> pd.DataFrame:
+    out = dataset.copy()
+    if names.empty:
+        if "name" not in out.columns:
+            out["name"] = ""
+        return out
+    names_norm = _normalize_name_cache(names)
+    if names_norm.empty:
+        if "name" not in out.columns:
+            out["name"] = ""
+        return out
+    out["symbol"] = out["symbol"].astype(str).str.extract(r"(\d{1,6})", expand=False).fillna("").str.zfill(6)
+    old_name = _name_column(out) if any(c in out.columns for c in ["name", "stock_name", "股票名称", "名称"]) else None
+    out = out.drop(columns=["name"], errors="ignore").merge(names_norm, on="symbol", how="left")
+    if old_name is not None:
+        out["name"] = out["name"].fillna(old_name).replace({"UNKNOWN": ""})
+    out["name"] = out["name"].fillna("").astype(str).str.strip()
+    return out
 
 
 def summarize_report_feature_coverage(
@@ -251,6 +324,66 @@ def summarize_report_feature_coverage(
     if out.empty and pool_pass.any():
         return out
     return out
+
+
+def apply_m9_feature_coverage_policy(
+    dataset: pd.DataFrame,
+    spec: Any,
+    feature_coverage: pd.DataFrame,
+    *,
+    candidate_pools: tuple[str, ...],
+    min_core_coverage: float = 0.30,
+) -> tuple[list[str], pd.DataFrame]:
+    rows: list[dict[str, Any]] = []
+    active: list[str] = []
+    coverage = feature_coverage.copy()
+    if coverage.empty:
+        active = [c for c in spec.feature_cols if c in dataset.columns]
+        return active, pd.DataFrame()
+    coverage["candidate_pool_pass_coverage_ratio"] = pd.to_numeric(
+        coverage.get("candidate_pool_pass_coverage_ratio"), errors="coerce"
+    )
+    for feature in spec.feature_cols:
+        if feature not in dataset.columns:
+            rows.append(
+                {
+                    "feature": feature,
+                    "raw_feature": feature[:-2] if feature.endswith("_z") else feature,
+                    "candidate_pool_pass_coverage_ratio": np.nan,
+                    "m9_feature_policy": "missing_from_dataset",
+                    "active_feature": "",
+                }
+            )
+            continue
+        raw_feature = feature[:-2] if feature.endswith("_z") else feature
+        part = coverage[
+            (coverage["feature"] == feature)
+            & (coverage["candidate_pool_version"].isin(candidate_pools) if "candidate_pool_version" in coverage.columns else True)
+        ].copy()
+        cov = float(part["candidate_pool_pass_coverage_ratio"].min()) if not part.empty else np.nan
+        missing_flag = f"is_missing_{raw_feature}"
+        if np.isfinite(cov) and cov < float(min_core_coverage):
+            if missing_flag in dataset.columns:
+                active.append(missing_flag)
+                policy = "missing_flag_only_low_coverage"
+                active_feature = missing_flag
+            else:
+                policy = "dropped_low_coverage_no_missing_flag"
+                active_feature = ""
+        else:
+            active.append(feature)
+            policy = "core_feature"
+            active_feature = feature
+        rows.append(
+            {
+                "feature": feature,
+                "raw_feature": raw_feature,
+                "candidate_pool_pass_coverage_ratio": cov,
+                "m9_feature_policy": policy,
+                "active_feature": active_feature,
+            }
+        )
+    return list(dict.fromkeys(active)), pd.DataFrame(rows)
 
 
 def _build_previous_rank_map(
@@ -354,6 +487,8 @@ def build_recommendation_table(
             "candidate_pool_rule",
             "candidate_pool_reject_reason",
             "buyability_reject_reason",
+            "is_buyable_tplus1_open",
+            "next_trade_date",
         ]
         if c in dataset.columns
     ]
@@ -402,6 +537,9 @@ def build_recommendation_table(
                         "last_month_rank": prev_map.get(symbol, pd.NA),
                         "last_month_selected": symbol in prev_map,
                         "buyability": _buyability_text(row),
+                        "next_trade_date": str(pd.Timestamp(row.get("next_trade_date")).date())
+                        if pd.notna(row.get("next_trade_date"))
+                        else "",
                         "candidate_pool_version": str(pool),
                         "candidate_pool_rule": str(row.get("candidate_pool_rule", POOL_RULES.get(str(pool), "")) or ""),
                         "model": str(model),
@@ -473,6 +611,98 @@ def summarize_recommendation_risk(recommendations: pd.DataFrame) -> pd.DataFrame
                 "last_month_selected_count": int(part["last_month_selected"].sum()),
             }
         )
+    return pd.DataFrame(rows)
+
+
+def summarize_m9_integrity(
+    *,
+    dataset: pd.DataFrame,
+    recommendations: pd.DataFrame,
+    feature_coverage: pd.DataFrame,
+    feature_policy: pd.DataFrame,
+    report_signal_date: pd.Timestamp,
+    candidate_pools: tuple[str, ...],
+) -> pd.DataFrame:
+    target = dataset[
+        dataset["candidate_pool_version"].isin(candidate_pools)
+        & (dataset["signal_date"] == report_signal_date)
+    ].copy()
+    pass_part = target[target["candidate_pool_pass"].astype(bool)].copy() if not target.empty else pd.DataFrame()
+    unknown_name_count = (
+        int(recommendations["name"].fillna("").astype(str).str.strip().isin(["", "UNKNOWN"]).sum())
+        if "name" in recommendations.columns and not recommendations.empty
+        else 0
+    )
+    st_name_count = (
+        int(_is_st_name(recommendations["name"]).sum())
+        if "name" in recommendations.columns and not recommendations.empty
+        else 0
+    )
+    not_buyable_count = (
+        int((recommendations["buyability"] != "buyable_tplus1_open").sum())
+        if "buyability" in recommendations.columns and not recommendations.empty
+        else 0
+    )
+    zero_coverage_core = 0
+    if not feature_policy.empty:
+        zero_coverage_core = int(
+            (
+                feature_policy["m9_feature_policy"].eq("core_feature")
+                & (pd.to_numeric(feature_policy["candidate_pool_pass_coverage_ratio"], errors="coerce") <= 0)
+            ).sum()
+        )
+    low_coverage_core = 0
+    if not feature_policy.empty:
+        low_coverage_core = int(
+            (
+                feature_policy["m9_feature_policy"].eq("core_feature")
+                & (pd.to_numeric(feature_policy["candidate_pool_pass_coverage_ratio"], errors="coerce") < 0.30)
+            ).sum()
+        )
+    rows = [
+        {
+            "check": "target_candidate_pool_pass_rows",
+            "value": int(len(pass_part)),
+            "pass": bool(len(pass_part) > 0),
+            "detail": "latest selected signal date must have buyable candidates",
+        },
+        {
+            "check": "target_next_trade_date_present",
+            "value": int(pass_part["next_trade_date"].notna().sum()) if "next_trade_date" in pass_part.columns else 0,
+            "pass": bool((not pass_part.empty) and "next_trade_date" in pass_part.columns and pass_part["next_trade_date"].notna().all()),
+            "detail": "all candidate_pool_pass rows should carry next_trade_date",
+        },
+        {
+            "check": "recommendation_buyable",
+            "value": not_buyable_count,
+            "pass": bool(not_buyable_count == 0 and not recommendations.empty),
+            "detail": "recommendation rows should be buyable at t+1 open",
+        },
+        {
+            "check": "recommendation_names_readable",
+            "value": unknown_name_count,
+            "pass": bool(unknown_name_count == 0 and not recommendations.empty),
+            "detail": "name should not be UNKNOWN or blank",
+        },
+        {
+            "check": "recommendation_excludes_st_names",
+            "value": st_name_count,
+            "pass": bool(st_name_count == 0 and not recommendations.empty),
+            "detail": "name-aware report filter should exclude ST/*ST targets",
+        },
+        {
+            "check": "zero_coverage_core_features",
+            "value": zero_coverage_core,
+            "pass": bool(zero_coverage_core == 0),
+            "detail": "zero coverage fields must not be core model features",
+        },
+        {
+            "check": "low_coverage_core_features_lt_30pct",
+            "value": low_coverage_core,
+            "pass": bool(low_coverage_core == 0),
+            "detail": "low coverage fields should be missing-marker-only or ablation-only",
+        },
+    ]
     return pd.DataFrame(rows)
 
 
@@ -575,6 +805,8 @@ def build_doc(
     risk_summary: pd.DataFrame,
     industry_exposure: pd.DataFrame,
     feature_coverage: pd.DataFrame,
+    feature_policy: pd.DataFrame,
+    m9_integrity: pd.DataFrame,
     artifacts: list[str],
 ) -> str:
     generated_at = pd.Timestamp.utcnow().isoformat()
@@ -616,10 +848,19 @@ def build_doc(
 
 {_format_markdown_table(feature_coverage.head(80), max_rows=80)}
 
+## M9 Integrity
+
+{_format_markdown_table(m9_integrity, max_rows=20)}
+
+## M9 Feature Policy
+
+{_format_markdown_table(feature_policy.head(80), max_rows=80)}
+
 ## 口径与结论
 
 - 本轮新增的是 M7 研究版推荐报告，不新增生产策略；推荐名单不自动生成交易指令。
 - 数据质量沿用 M2/M5/M6 的 PIT 检查，本脚本只使用 `report_signal_date` 当日可观测特征，并只用该日期之前已完成标签的月份训练。
+- M9 数据完整性 gate 要求报告信号日存在 `next_trade_date`、推荐行全部 `buyable_tplus1_open`、名称非 UNKNOWN，且零覆盖/低覆盖字段不作为核心模型特征。
 - 候选池使用 `U2_risk_sane` watchlist 口径，只做准入过滤；alpha 判断来自 `M6_xgboost_rank_ndcg` 排序分数。
 - 历史 baseline 改善证据来自 M6 walk-forward 附件；M6 结论仍是 watchlist，不进入生产。
 - 当前推荐月尚无未来收益标签，因此本报告不声称本月已跑赢市场；稳定性判断以历史 leaderboard / monthly_long / rank_ic / quantile_spread 为准。
@@ -659,6 +900,7 @@ def main() -> int:
         random_seed=int(args.random_seed),
         availability_lag_days=int(args.availability_lag_days),
         relevance_grades=int(args.relevance_grades),
+        min_core_feature_coverage=float(args.min_core_feature_coverage),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
     research_config_id = (
@@ -673,6 +915,9 @@ def main() -> int:
     print(f"[monthly-m7] research_config_id={research_config_id}")
 
     dataset = load_baseline_dataset(dataset_path, candidate_pools=list(pools))
+    stock_name_cache_path = _resolve_project_path(args.stock_name_cache)
+    stock_names = load_stock_name_cache(stock_name_cache_path)
+    dataset = attach_stock_names(dataset, stock_names)
     m5_cfg = M5RunConfig(
         top_ks=cfg.top_ks,
         candidate_pools=cfg.candidate_pools,
@@ -686,6 +931,13 @@ def main() -> int:
     dataset = attach_enabled_families(dataset, db_path, m5_cfg, enabled_families)
     spec = build_m6_feature_spec(enabled_families)
     feature_coverage = summarize_report_feature_coverage(dataset, spec, candidate_pools=cfg.candidate_pools)
+    active_feature_cols, feature_policy = apply_m9_feature_coverage_policy(
+        dataset,
+        spec,
+        feature_coverage,
+        candidate_pools=cfg.candidate_pools,
+        min_core_coverage=cfg.min_core_feature_coverage,
+    )
     report_signal_date = select_report_signal_date(
         dataset,
         candidate_pools=cfg.candidate_pools,
@@ -696,6 +948,7 @@ def main() -> int:
         spec,
         cfg,
         report_signal_date=report_signal_date,
+        feature_cols=active_feature_cols,
     )
     feature_importance = summarize_ltr_feature_importance(raw_importance)
 
@@ -717,6 +970,14 @@ def main() -> int:
     regime_slice = _filter_evidence(_read_evidence(results_dir, evidence_stem, "regime_slice"), cfg)
     industry_exposure = summarize_recommendation_industry_exposure(recommendations)
     risk_summary = summarize_recommendation_risk(recommendations)
+    m9_integrity = summarize_m9_integrity(
+        dataset=dataset,
+        recommendations=recommendations,
+        feature_coverage=feature_coverage,
+        feature_policy=feature_policy,
+        report_signal_date=report_signal_date,
+        candidate_pools=cfg.candidate_pools,
+    )
     candidate_width = summarize_candidate_pool_width(dataset)
     reject_reason = summarize_candidate_pool_reject_reason(dataset)
     quality = build_quality_payload(
@@ -747,6 +1008,8 @@ def main() -> int:
         "feature_importance": results_dir / f"{output_stem}_feature_importance.csv",
         "feature_contrib": results_dir / f"{output_stem}_feature_contrib.csv",
         "feature_coverage": results_dir / f"{output_stem}_feature_coverage.csv",
+        "feature_policy": results_dir / f"{output_stem}_feature_policy.csv",
+        "m9_integrity": results_dir / f"{output_stem}_m9_integrity.csv",
         "risk_summary": results_dir / f"{output_stem}_risk_summary.csv",
         "year_slice": results_dir / f"{output_stem}_year_slice.csv",
         "regime_slice": results_dir / f"{output_stem}_regime_slice.csv",
@@ -766,6 +1029,8 @@ def main() -> int:
     feature_importance.to_csv(paths_out["feature_importance"], index=False)
     feature_contrib.to_csv(paths_out["feature_contrib"], index=False)
     feature_coverage.to_csv(paths_out["feature_coverage"], index=False)
+    feature_policy.to_csv(paths_out["feature_policy"], index=False)
+    m9_integrity.to_csv(paths_out["m9_integrity"], index=False)
     risk_summary.to_csv(paths_out["risk_summary"], index=False)
     year_slice.to_csv(paths_out["year_slice"], index=False)
     regime_slice.to_csv(paths_out["regime_slice"], index=False)
@@ -778,6 +1043,11 @@ def main() -> int:
         if not recommendations.empty
         else [],
         "historical_evidence_stem": evidence_stem,
+        "stock_name_cache": str(stock_name_cache_path.relative_to(ROOT))
+        if stock_name_cache_path.is_relative_to(ROOT)
+        else str(stock_name_cache_path),
+        "active_feature_cols": active_feature_cols,
+        "m9_integrity_pass": bool(m9_integrity["pass"].all()) if not m9_integrity.empty else False,
     }
     paths_out["summary_json"].write_text(
         json.dumps(_json_sanitize(summary_payload), ensure_ascii=False, indent=2),
@@ -792,6 +1062,11 @@ def main() -> int:
         "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
         **quality,
         "artifacts": [*artifact_paths, str(paths_out["doc"].relative_to(ROOT))],
+        "stock_name_cache": str(stock_name_cache_path.relative_to(ROOT))
+        if stock_name_cache_path.is_relative_to(ROOT)
+        else str(stock_name_cache_path),
+        "active_feature_cols": active_feature_cols,
+        "m9_integrity_pass": bool(m9_integrity["pass"].all()) if not m9_integrity.empty else False,
     }
     paths_out["manifest"].write_text(
         json.dumps(_json_sanitize(manifest), ensure_ascii=False, indent=2),
@@ -805,6 +1080,8 @@ def main() -> int:
             risk_summary=risk_summary,
             industry_exposure=industry_exposure,
             feature_coverage=feature_coverage,
+            feature_policy=feature_policy,
+            m9_integrity=m9_integrity,
             artifacts=[*artifact_paths, str(paths_out["manifest"].relative_to(ROOT))],
         ),
         encoding="utf-8",
