@@ -7,9 +7,9 @@
 | 链路 | 入口 | 状态 | 输出 |
 | --- | --- | --- | --- |
 | 日更推荐链路 | `scripts/daily_run.py` | 本地日常运行入口，默认 `composite_extended`；可切换 XGBoost / 深度序列模型 | `data/results/recommend_*.csv`、推荐解释报告、eval 标注 |
-| 月度选股研究链路 | `scripts/run_monthly_selection_*.py` | 当前 canonical 研究主线，M7 研究版报告已完成，仍是 `research_only_not_promoted` | `monthly_selection_*` 数据集、leaderboard、M7 Top-K 研究名单 |
+| 月度选股链路 | `scripts/run_monthly_selection_*.py` | 生产默认方法已定为 `U1_liquid_tradable + Top20 + indcap3 hard-cap baseline` | `monthly_selection_*` 数据集、leaderboard、Top20 月度名单 |
 
-生产准入边界在 `configs/promoted/promoted_registry.json`。截至仓库当前记录 `2026-04-28`，`promoted_configs` 为空，没有任何 P1/R2/R3/R2B 或月度研究候选进入生产配置。研究结果在 promotion gate 通过前，不应写回 `config.yaml.example` 或本地生产 `config.yaml` 的默认主线。
+生产准入边界在 `configs/promoted/promoted_registry.json`。截至仓库当前记录 `2026-04-30`，active promoted 配置为 `monthly_selection_u1_top20_indcap3_hardcap_baseline`；未登记的研究结果在 promotion gate 通过前，不应写回 `config.yaml.example` 或本地生产 `config.yaml` 的默认主线。
 
 算法与统计细节见 [docs/项目算法建模详解.md](docs/项目算法建模详解.md)，荐股流程见 [docs/荐股算法流程说明.md](docs/荐股算法流程说明.md)，当前研究计划见 [docs/plan.md](docs/plan.md)。
 
@@ -209,7 +209,7 @@ python scripts/llm_analysis_report.py --latest
 
 ## 当前研究纪律
 
-月度选股是当前主研究目标：每月从可交易股票池中筛出未来一个月更可能跑赢市场的 Top-K 名单。M7 报告已能输出研究版 Top20/Top30，但它仍是研究产物，不生成交易指令。
+月度选股当前生产默认方法为 `U1_liquid_tradable + Top20 + indcap3 hard-cap baseline`，对应 promoted config `monthly_selection_u1_top20_indcap3_hardcap_baseline`。其他 M5/M6/M8 变体仍按研究产物处理，除非进入 `configs/promoted/promoted_registry.json`。
 
 旧 replacement / sleeve / gray zone 候选已经在 2026-04 的报告中被冻结或拒绝。轻量 `signal_diagnostic`、`light_strategy_proxy`、daily proxy、gray zone 都不是 promotion 终点。只有正式 full backtest、OOS、状态切片、边界诊断、成本、universe 与人工确认完整可追溯后，才允许新增 promoted 配置。
 

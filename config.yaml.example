@@ -55,7 +55,7 @@ features:
   neutralize: true
 
 signals:
-  top_k: 10
+  top_k: 20
   # P4-B 关键差异字段：生产与回测默认排序键应一致；修改该值会直接改变选股逻辑。
   sort_by: composite_extended
   composite:
@@ -166,6 +166,18 @@ signals:
     seq_len: 30
     map_location: cpu
 
+monthly_selection:
+  default_method:
+    config_id: monthly_selection_u1_top20_indcap3_hardcap_baseline
+    config_path: configs/promoted/monthly_selection_u1_top20_indcap3_hardcap_baseline.json
+    candidate_pool_version: U1_liquid_tradable
+    top_k: 20
+    base_model: M8_regime_aware_fixed_policy
+    model: M8_regime_aware_fixed_policy__indcap3
+    selection_policy: industry_names_cap
+    max_industry_names: 3
+    production_status: active_promoted
+
 regime:
   # P4-B 关键差异字段：开启后会对因子权重做状态切换，可能提升适应性也可能增加方差。
   enabled: true
@@ -188,7 +200,7 @@ portfolio:
   # 如需复现低换手实验，可手动改为 0.3。
   max_turnover: 1.0
   # P2-B：行业持仓只数上限（需配合 data/cache/industry_map.csv）
-  industry_cap_count: 5
+  industry_cap_count: 3
   cov_lookback_days: 60
   cov_ridge: 1.0e-6
   cov_shrinkage: ledoit_wolf

@@ -6,16 +6,17 @@
 
 ## 当前状态
 
-截至 `2026-04-28`，当前没有任何 P1/R2/R3 研究候选进入生产：
+截至 `2026-04-30`，月度选股已有一个 active promoted 默认方法：
 
-- `promoted_configs` 为空。
-- `active_promoted_config_id` 为 `null`。
+- `active_promoted_config_id` 为 `monthly_selection_u1_top20_indcap3_hardcap_baseline`。
+- 默认方法为 `U1_liquid_tradable + Top20 + M8_regime_aware_fixed_policy__indcap3`。
+- 选择层执行 hard cap：`selection_policy=industry_names_cap`，`max_industry_names=3`。
 - `U3_A_real_industry_leadership__EDGE_GATED` 仅曾进入 gray zone，已被 Day 8 weight audit 判定不稳，不能作为 production candidate。
 - `U3_B_buyable_leadership_persistence__EDGE_GATED`、`U3_C_pairwise_residual_edge__EDGE_GATED`、旧 R2 sleeve、R2B v1、P1/G0 标签近邻方向均未满足 promotion。
 
 ## 使用规则
 
-1. 日更推荐的生产配置只能来自 `promoted_registry.json` 的 `promoted_configs`。
+1. 日更推荐和月度选股的生产配置只能来自 `promoted_registry.json` 的 `promoted_configs`。
 2. `daily proxy` 不是 promotion 终点。
 3. `gray zone` 不是 production candidate。
 4. `config.yaml.backtest` 与 `configs/backtests/` 只服务研究回测和证据归档。

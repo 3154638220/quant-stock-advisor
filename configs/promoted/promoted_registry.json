@@ -1,9 +1,10 @@
 {
   "registry_version": "r5_config_governance_2026-04-28",
-  "updated_at": "2026-04-28",
-  "purpose": "Production promotion registry for daily recommendation configs. Research configs are not production inputs unless an entry is added here after the full promotion gate passes.",
+  "updated_at": "2026-04-30",
+  "purpose": "Production promotion registry for recommendation configs. Research configs are not production inputs unless an entry is added here after the full promotion gate passes.",
   "production_policy": {
     "daily_recommendation_rule": "Daily recommendation must use only configs recorded in promoted_configs.",
+    "monthly_selection_rule": "Monthly selection must use only configs recorded in promoted_configs.",
     "daily_proxy_is_promotion_endpoint": false,
     "gray_zone_is_production_candidate": false,
     "research_config_roots": [
@@ -28,10 +29,10 @@
     "owner_decision"
   ],
   "current_state": {
-    "has_promoted_research_candidates": false,
-    "active_promoted_config_id": null,
-    "decision": "No P1/R2/R3 research candidate satisfies production promotion as of 2026-04-28.",
-    "default_action": "Do not write any unpromoted research result into config.yaml.example or local production config.yaml."
+    "has_promoted_research_candidates": true,
+    "active_promoted_config_id": "monthly_selection_u1_top20_indcap3_hardcap_baseline",
+    "decision": "Monthly selection default promoted on 2026-04-30: U1_liquid_tradable + Top20 + indcap3 hard-cap baseline.",
+    "default_action": "Use the active promoted config for monthly selection; do not write any other unpromoted research result into config.yaml.example or local production config.yaml."
   },
   "research_candidate_status": [
     {
@@ -69,7 +70,37 @@
       "status": "rejected",
       "production_eligible": false,
       "evidence": "Strong-up switch diagnostics improved, but daily proxy remained below BASELINE_S2_FIXED."
+    },
+    {
+      "candidate_id": "monthly_selection_u1_top20_indcap3_hardcap_baseline",
+      "status": "promoted",
+      "production_eligible": true,
+      "evidence": "Owner decision on 2026-04-30 promotes U1_liquid_tradable + Top20 + M8_regime_aware_fixed_policy__indcap3 hard-cap baseline as the monthly selection default."
     }
   ],
-  "promoted_configs": []
+  "promoted_configs": [
+    {
+      "config_id": "monthly_selection_u1_top20_indcap3_hardcap_baseline",
+      "config_path": "configs/promoted/monthly_selection_u1_top20_indcap3_hardcap_baseline.json",
+      "promotion_date": "2026-04-30",
+      "full_backtest_report": "docs/reports/2026-04/monthly_selection_m8_concentration_regime_2026-04-30.md",
+      "daily_proxy_report": "not_applicable_monthly_selection; see data/results/monthly_selection_m8_concentration_regime_2026-04-30_monthly_long.csv",
+      "oos_report": "data/results/monthly_selection_m8_concentration_regime_2026-04-30_leaderboard.csv",
+      "state_slice_report": "data/results/monthly_selection_m8_concentration_regime_2026-04-30_regime_slice.csv",
+      "boundary_report": "data/results/monthly_selection_m8_concentration_regime_2026-04-30_gate.csv",
+      "owner_decision": "User approved promotion on 2026-04-30: project default method is U1_liquid_tradable + Top20 + indcap3 hard-cap baseline.",
+      "production_method": {
+        "research_topic": "monthly_selection",
+        "candidate_pool_version": "U1_liquid_tradable",
+        "top_k": 20,
+        "base_model": "M8_regime_aware_fixed_policy",
+        "model": "M8_regime_aware_fixed_policy__indcap3",
+        "selection_policy": "industry_names_cap",
+        "max_industry_names": 3,
+        "execution_mode": "tplus1_open",
+        "rebalance_rule": "M",
+        "cost_bps": 10.0
+      }
+    }
+  ]
 }
