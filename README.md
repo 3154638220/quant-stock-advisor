@@ -44,17 +44,20 @@
 ├── config.yaml.backtest     # 当前 canonical 研究回测快照
 ├── configs/
 │   ├── promoted/            # production promotion registry
-│   └── backtests/           # 历史研究配置快照与场景变体
+│   ├── backtests/           # 历史研究配置快照与场景变体
+│   └── experiments/         # 临时/探索性配置，按主题归档
 ├── pyproject.toml           # 包名 quant-system、pytest 配置
 ├── environment.yml          # Conda 环境 quant-system（Python 3.10）
 ├── requirements-base.txt    # 通用 pip 依赖（不含 Jetson 专用 torch）
 ├── requirements.txt         # x86：额外从 PyPI 装 torch
 ├── data/                    # DuckDB、缓存、日志、结果 CSV、模型工件（默认路径）
 ├── docs/                    # 文档与报告
+│   ├── README.md            # 文档目录边界
 │   ├── 项目算法建模详解.md   # 算法与统计细节说明
 │   ├── 荐股算法流程说明.md
 │   ├── backtest_report.md
-│   └── plan.md
+│   ├── plan.md
+│   └── reports/             # 按月份归档的研究报告与证据链
 ├── src/
 │   ├── data_fetcher/        # 拉数、DuckDB、质量检查
 │   │   └── akshare_resilience.py  # 网络超时/重试/快照回退
@@ -98,6 +101,8 @@
 └── notebooks/               # 探索与原型（.gitkeep 占位）
 ```
 
+本地运行产物边界：`data/`、`tmp/`、`.pytest_cache/`、`.ruff_cache/`、`__pycache__/`、`.conda_envs/`、`.conda_pkgs/`、`.miniforge3/` 都是可再生或本机私有内容，默认不进入版本控制和 Docker build context。
+
 ---
 
 ## 环境安装
@@ -120,7 +125,7 @@ cp config.yaml.example config.yaml
 export QUANT_CONFIG=/absolute/path/to/config.yaml
 ```
 
-研究回测默认入口是根目录 `config.yaml.backtest`；历史场景快照统一收纳在 `configs/backtests/`。为了兼容旧报告和旧命令，`--config config.yaml.backtest.r7_s2_prefilter_off_universe_on` 这类旧快照名会自动解析到 `configs/backtests/` 下同名文件。
+研究回测默认入口是根目录 `config.yaml.backtest`；历史场景快照统一收纳在 `configs/backtests/`，主题探索配置放在 `configs/experiments/`。为了兼容旧报告和旧命令，`--config config.yaml.backtest.r7_s2_prefilter_off_universe_on` 这类旧快照名会自动解析到 `configs/backtests/` 下同名文件。
 
 生产 promotion 边界记录在 `configs/promoted/promoted_registry.json`。截至 `2026-04-28`，registry 中 `promoted_configs` 为空，当前没有任何 P1/R2/R3 研究候选进入生产；`daily proxy` 与 `gray zone` 均不能替代正式 promotion。
 

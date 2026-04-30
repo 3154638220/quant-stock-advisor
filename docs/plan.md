@@ -6,7 +6,7 @@
 **研究终点**：每月输出可解释、可回测、PIT-safe 的 Top-K 股票推荐名单  
 **生产状态**：当前无任何研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
 **当前进度**：M0 / M1 / M2 / M3 / M4 / M5 / M6 / M7 已完成；M7 输出研究版 Top-K 推荐名单，不进入生产  
-**归档入口**：`docs/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
+**归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留 `2026-04-20` 当日执行记录，不再承担主计划职责
 
 ---
 
@@ -84,13 +84,13 @@ score(stock, month_end)
 
 主要证据：
 
-- `docs/r1f_fixed_baseline_rerun_2026-04-28.md`
-- `docs/p2_regime_aware_dual_sleeve_v1_2026-04-28.md`
-- `docs/r2b_tradable_upside_replacement_v1_2026-04-28.md`
-- `docs/r2b_oracle_replacement_attribution_2026-04-28.md`
-- `docs/r2b_edge_gated_replacement_v2_2026-04-28.md`
-- `docs/r2b_v2_weight_audit_2026-04-28.md`
-- `docs/r5_config_governance_2026-04-28.md`
+- `docs/reports/2026-04/r1f_fixed_baseline_rerun_2026-04-28.md`
+- `docs/reports/2026-04/p2_regime_aware_dual_sleeve_v1_2026-04-28.md`
+- `docs/reports/2026-04/r2b_tradable_upside_replacement_v1_2026-04-28.md`
+- `docs/reports/2026-04/r2b_oracle_replacement_attribution_2026-04-28.md`
+- `docs/reports/2026-04/r2b_edge_gated_replacement_v2_2026-04-28.md`
+- `docs/reports/2026-04/r2b_v2_weight_audit_2026-04-28.md`
+- `docs/reports/2026-04/r5_config_governance_2026-04-28.md`
 
 ### 1.3 对旧证据的新解释
 
@@ -576,7 +576,7 @@ scripts/run_monthly_selection_dataset.py
 ```text
 data/cache/monthly_selection_features.parquet
 data/results/monthly_selection_dataset_2026-04-28_quality.csv
-docs/monthly_selection_dataset_2026-04-28.md
+docs/reports/2026-04/monthly_selection_dataset_2026-04-28.md
 ```
 
 必须包含：
@@ -651,7 +651,7 @@ scripts/run_monthly_selection_oracle.py
 已落地产物：
 
 ```text
-docs/monthly_selection_oracle_2026-04-28.md
+docs/reports/2026-04/monthly_selection_oracle_2026-04-28.md
 data/results/monthly_selection_oracle_2026-04-28_summary.json
 data/results/monthly_selection_oracle_2026-04-28_oracle_topk_return_by_month.csv
 data/results/monthly_selection_oracle_2026-04-28_oracle_topk_holdings.csv
@@ -730,7 +730,7 @@ docs/monthly_selection_baselines_YYYY-MM-DD.md
 当前产物：
 
 ```text
-docs/monthly_selection_baselines_2026-04-29.md
+docs/reports/2026-04/monthly_selection_baselines_2026-04-29.md
 data/results/monthly_selection_baselines_2026-04-29_summary.json
 data/results/monthly_selection_baselines_2026-04-29_leaderboard.csv
 data/results/monthly_selection_baselines_2026-04-29_monthly_long.csv
@@ -812,7 +812,7 @@ data/results/monthly_selection_baselines_2026-04-29_manifest.json
 
 | 项 | 当前值 |
 | --- | --- |
-| 主报告 | `docs/monthly_selection_m5_multisource_full_2026-04-29.md` |
+| 主报告 | `docs/reports/2026-04/monthly_selection_m5_multisource_full_2026-04-29.md` |
 | 输入 dataset | `data/cache/monthly_selection_features.parquet` |
 | 数据库 | `data/market.duckdb` |
 | candidate_pools | `U1_liquid_tradable`, `U2_risk_sane` |
@@ -868,7 +868,7 @@ scripts/run_monthly_selection_ltr.py
 当前产物：
 
 ```text
-docs/monthly_selection_m6_ltr_2026-04-29.md
+docs/reports/2026-04/monthly_selection_m6_ltr_2026-04-29.md
 data/results/monthly_selection_m6_ltr_2026-04-29_summary.json
 data/results/monthly_selection_m6_ltr_2026-04-29_leaderboard.csv
 data/results/monthly_selection_m6_ltr_2026-04-29_monthly_long.csv
@@ -942,7 +942,7 @@ data/results/monthly_selection_m6_ltr_2026-04-29_manifest.json
 ```text
 scripts/run_monthly_selection_report.py
 tests/test_monthly_selection_report.py
-docs/monthly_selection_m7_recommendation_report_2026-04-29.md
+docs/reports/2026-04/monthly_selection_m7_recommendation_report_2026-04-29.md
 data/results/monthly_selection_m7_recommendation_report_2026-04-29_summary.json
 data/results/monthly_selection_m7_recommendation_report_2026-04-29_recommendations.csv
 data/results/monthly_selection_m7_recommendation_report_2026-04-29_leaderboard.csv
@@ -1113,35 +1113,35 @@ data/results/monthly_selection_m7_recommendation_report_2026-04-29_manifest.json
 ### 主计划与归档
 
 - `docs/plan.md`
-- `docs/plan-04-20.md`
+- `docs/reports/2026-04/plan-04-20.md`
 
 ### 目标切换前的关键证据
 
-- `docs/r0_eval_execution_contract_fix_2026-04-28.md`
-- `docs/r1f_fixed_baseline_rerun_2026-04-28.md`
-- `docs/p2_regime_aware_dual_sleeve_v1_2026-04-28.md`
-- `docs/r2b_tradable_upside_replacement_v1_2026-04-28.md`
-- `docs/r2b_oracle_replacement_attribution_2026-04-28.md`
-- `docs/r2b_edge_gated_replacement_v2_2026-04-28.md`
-- `docs/r2b_v2_weight_audit_2026-04-28.md`
-- `docs/r5_config_governance_2026-04-28.md`
+- `docs/reports/2026-04/r0_eval_execution_contract_fix_2026-04-28.md`
+- `docs/reports/2026-04/r1f_fixed_baseline_rerun_2026-04-28.md`
+- `docs/reports/2026-04/p2_regime_aware_dual_sleeve_v1_2026-04-28.md`
+- `docs/reports/2026-04/r2b_tradable_upside_replacement_v1_2026-04-28.md`
+- `docs/reports/2026-04/r2b_oracle_replacement_attribution_2026-04-28.md`
+- `docs/reports/2026-04/r2b_edge_gated_replacement_v2_2026-04-28.md`
+- `docs/reports/2026-04/r2b_v2_weight_audit_2026-04-28.md`
+- `docs/reports/2026-04/r5_config_governance_2026-04-28.md`
 
 ### 月度选股相关历史基础
 
-- `docs/p1_monthly_investable_label_smoke_2026-04-27.md`
-- `docs/p1_monthly_investable_up_capture_g0_smoke_2026-04-27.md`
-- `docs/p1_top_bucket_rank_fusion_g0_smoke_2026-04-27.md`
-- `docs/p1_rank_fusion_long_horizon_g0_smoke_2026-04-27.md`
-- `docs/p1_daily_bt_like_proxy_calibration_2026-04-27.md`
+- `docs/reports/2026-04/p1_monthly_investable_label_smoke_2026-04-27.md`
+- `docs/reports/2026-04/p1_monthly_investable_up_capture_g0_smoke_2026-04-27.md`
+- `docs/reports/2026-04/p1_top_bucket_rank_fusion_g0_smoke_2026-04-27.md`
+- `docs/reports/2026-04/p1_rank_fusion_long_horizon_g0_smoke_2026-04-27.md`
+- `docs/reports/2026-04/p1_daily_bt_like_proxy_calibration_2026-04-27.md`
 
 ### 月度选股当前主线证据
 
-- `docs/monthly_selection_dataset_2026-04-28.md`
-- `docs/monthly_selection_oracle_2026-04-28.md`
-- `docs/monthly_selection_baselines_2026-04-29.md`
-- `docs/monthly_selection_m5_multisource_full_2026-04-29.md`
-- `docs/monthly_selection_m6_ltr_2026-04-29.md`
-- `docs/monthly_selection_m7_recommendation_report_2026-04-29.md`
+- `docs/reports/2026-04/monthly_selection_dataset_2026-04-28.md`
+- `docs/reports/2026-04/monthly_selection_oracle_2026-04-28.md`
+- `docs/reports/2026-04/monthly_selection_baselines_2026-04-29.md`
+- `docs/reports/2026-04/monthly_selection_m5_multisource_full_2026-04-29.md`
+- `docs/reports/2026-04/monthly_selection_m6_ltr_2026-04-29.md`
+- `docs/reports/2026-04/monthly_selection_m7_recommendation_report_2026-04-29.md`
 - `data/cache/monthly_selection_features.parquet`
 - `data/results/monthly_selection_dataset_2026-04-28_quality.csv`
 - `data/results/monthly_selection_dataset_2026-04-28_candidate_pool_width.csv`
@@ -1175,7 +1175,7 @@ data/results/monthly_selection_m7_recommendation_report_2026-04-29_manifest.json
 
 - `docs/newdata_quality_families_fund_flow-shareholder_flow_a_share_fund_flow_holder_a_share_shareholder_daily_a_share_daily_lag_30_width_100.md`
 - `docs/newdata_quality_current_families_fund_flow-shareholder_flow_a_share_fund_flow_holder_a_share_shareholder_daily_a_share_daily_lag_30_width_100.md`
-- `docs/fundamental_pit_coverage_2026-04-28.md`
+- `docs/reports/2026-04/fundamental_pit_coverage_2026-04-28.md`
 - `scripts/run_newdata_quality_checks.py`
 - `scripts/fetch_fund_flow.py`
 - `scripts/fetch_shareholder.py`
