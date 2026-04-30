@@ -38,6 +38,8 @@ from scripts.run_monthly_selection_baselines import (
     _score_base_columns,
     _train_predict_sklearn,
     _train_predict_xgboost,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
     build_leaderboard,
     build_monthly_long,
     build_quantile_spread,
@@ -100,6 +102,7 @@ class M5RunConfig:
     include_xgboost: bool = True
     availability_lag_days: int = 30
     ml_models: tuple[str, ...] = ("elasticnet", "logistic", "extratrees", "xgboost_excess", "xgboost_top20")
+    model_n_jobs: int = 0
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--cost-bps", type=float, default=10.0)
     p.add_argument("--random-seed", type=int, default=42)
+    p.add_argument(
+        "--model-n-jobs",
+        type=int,
+        default=0,
+        help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
+    )
     p.add_argument("--availability-lag-days", type=int, default=30)
     p.add_argument("--skip-xgboost", action="store_true", help="跳过 XGBoost，便于快速烟雾测试")
     p.add_argument(
@@ -559,6 +568,7 @@ def build_walk_forward_scores_for_spec(
                         test=test,
                         feature_cols=feature_cols,
                         random_seed=cfg.random_seed,
+                        model_n_jobs=cfg.model_n_jobs,
                     )
                 else:
                     scores, imp = _train_predict_sklearn(
@@ -568,6 +578,7 @@ def build_walk_forward_scores_for_spec(
                         test=test,
                         feature_cols=feature_cols,
                         random_seed=cfg.random_seed,
+                        model_n_jobs=cfg.model_n_jobs,
                     )
                 model_name = f"M5_{spec.name}_{base_model_name.replace('M4_', '')}"
                 if scores is not None and not scores.empty:
@@ -730,6 +741,7 @@ def build_quality_payload(
         "hyperparameter_policy": "fixed conservative defaults; no random CV",
         "ml_models": list(cfg.ml_models),
         "max_fit_rows": int(cfg.max_fit_rows),
+        "model_n_jobs": int(normalize_model_n_jobs(cfg.model_n_jobs)),
         "random_seed": int(cfg.random_seed),
         "rows": int(len(dataset)),
         "valid_rows": int(len(valid)),
@@ -848,6 +860,7 @@ def main() -> int:
         include_xgboost=not bool(args.skip_xgboost),
         availability_lag_days=int(args.availability_lag_days),
         ml_models=tuple(_parse_str_list(args.ml_models)),
+        model_n_jobs=int(args.model_n_jobs),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
     research_config_id = (
@@ -857,6 +870,7 @@ def main() -> int:
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
         f"_models_{'-'.join(slugify_token(x) for x in _parse_str_list(args.ml_models))}"
         f"_maxfit_{int(args.max_fit_rows)}"
+        f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
         f"_wf_{int(args.min_train_months)}m"
         f"_costbps_{slugify_token(args.cost_bps)}"
     )

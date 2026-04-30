@@ -91,6 +91,7 @@ class BaselineRunConfig:
     cost_bps: float = 10.0
     random_seed: int = 42
     include_xgboost: bool = True
+    model_n_jobs: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,6 +107,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-train-rows", type=int, default=500)
     p.add_argument("--cost-bps", type=float, default=10.0)
     p.add_argument("--random-seed", type=int, default=42)
+    p.add_argument(
+        "--model-n-jobs",
+        type=int,
+        default=0,
+        help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
+    )
     p.add_argument("--skip-xgboost", action="store_true", help="跳过 XGBoost baseline，便于快速烟雾测试")
     return p.parse_args()
 
@@ -122,6 +129,17 @@ def _parse_int_list(raw: str) -> list[int]:
 
 def _parse_str_list(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
+
+
+def normalize_model_n_jobs(n_jobs: int) -> int:
+    """Normalize CLI/config thread count for sklearn and XGBoost estimators."""
+    n = int(n_jobs)
+    return -1 if n <= 0 else n
+
+
+def model_n_jobs_token(n_jobs: int) -> str:
+    normalized = normalize_model_n_jobs(n_jobs)
+    return "all" if normalized == -1 else str(normalized)
 
 
 def _json_sanitize(obj: Any) -> Any:
@@ -296,6 +314,7 @@ def _train_predict_sklearn(
     test: pd.DataFrame,
     feature_cols: list[str],
     random_seed: int,
+    model_n_jobs: int = 1,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     from sklearn.ensemble import ExtraTreesRegressor
     from sklearn.impute import SimpleImputer
@@ -354,7 +373,7 @@ def _train_predict_sklearn(
                     max_depth=4,
                     min_samples_leaf=50,
                     random_state=random_seed,
-                    n_jobs=1,
+                    n_jobs=normalize_model_n_jobs(model_n_jobs),
                 ),
             )
             m = y_reg.notna()
@@ -383,6 +402,7 @@ def _train_predict_xgboost(
     test: pd.DataFrame,
     feature_cols: list[str],
     random_seed: int,
+    model_n_jobs: int = 1,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     try:
         from xgboost import XGBClassifier, XGBRegressor
@@ -407,7 +427,7 @@ def _train_predict_xgboost(
                 colsample_bytree=0.85,
                 objective="reg:squarederror",
                 random_state=random_seed,
-                n_jobs=1,
+                n_jobs=normalize_model_n_jobs(model_n_jobs),
                 tree_method="hist",
             )
             model.fit(x_train.loc[m], y.loc[m], verbose=False)
@@ -428,7 +448,7 @@ def _train_predict_xgboost(
                 eval_metric="logloss",
                 scale_pos_weight=max(neg / max(pos, 1.0), 1.0),
                 random_state=random_seed,
-                n_jobs=1,
+                n_jobs=normalize_model_n_jobs(model_n_jobs),
                 tree_method="hist",
             )
             model.fit(x_train, y, verbose=False)
@@ -489,6 +509,7 @@ def build_walk_forward_scores(dataset: pd.DataFrame, cfg: BaselineRunConfig) -> 
                         test=test,
                         feature_cols=feature_cols,
                         random_seed=cfg.random_seed,
+                        model_n_jobs=cfg.model_n_jobs,
                     )
                 else:
                     scores, imp = _train_predict_sklearn(
@@ -498,6 +519,7 @@ def build_walk_forward_scores(dataset: pd.DataFrame, cfg: BaselineRunConfig) -> 
                         test=test,
                         feature_cols=feature_cols,
                         random_seed=cfg.random_seed,
+                        model_n_jobs=cfg.model_n_jobs,
                     )
                 if scores is not None and not scores.empty:
                     score_frames.append(scores)
@@ -1044,6 +1066,7 @@ def main() -> int:
         cost_bps=float(args.cost_bps),
         random_seed=int(args.random_seed),
         include_xgboost=not bool(args.skip_xgboost),
+        model_n_jobs=int(args.model_n_jobs),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
     research_topic = "monthly_selection_baselines"
@@ -1052,6 +1075,7 @@ def main() -> int:
         f"_pools_{'-'.join(slugify_token(x) for x in pools)}"
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
         f"_buckets_{int(args.bucket_count)}"
+        f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
         f"_wf_{int(args.min_train_months)}m"
         f"_costbps_{slugify_token(args.cost_bps)}"
     )
@@ -1091,6 +1115,7 @@ def main() -> int:
         "pit_policy": "features are consumed from M2 PIT-safe monthly signal rows; ML uses past months only",
         "cv_policy": "walk_forward_by_signal_month",
         "hyperparameter_policy": "fixed conservative defaults; no random CV",
+        "model_n_jobs": int(normalize_model_n_jobs(run_cfg.model_n_jobs)),
         "random_seed": int(args.random_seed),
         "rows": int(len(dataset)),
         "valid_rows": int(len(valid)),

@@ -32,6 +32,8 @@ from scripts.run_monthly_selection_baselines import (
     POOL_RULES,
     _format_markdown_table,
     _json_sanitize,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
     load_baseline_dataset,
     summarize_candidate_pool_reject_reason,
     summarize_candidate_pool_width,
@@ -61,6 +63,7 @@ class M7RunConfig:
     relevance_grades: int = 5
     model_name: str = "M6_xgboost_rank_ndcg"
     min_core_feature_coverage: float = 0.30
+    model_n_jobs: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--random-seed", type=int, default=42)
     p.add_argument("--availability-lag-days", type=int, default=30)
     p.add_argument("--relevance-grades", type=int, default=5)
+    p.add_argument(
+        "--model-n-jobs",
+        type=int,
+        default=0,
+        help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
+    )
     p.add_argument(
         "--min-core-feature-coverage",
         type=float,
@@ -204,6 +213,7 @@ def build_full_fit_report_scores(
             feature_cols=active_feature_cols,
             random_seed=cfg.random_seed,
             relevance_grades=cfg.relevance_grades,
+            model_n_jobs=cfg.model_n_jobs,
         )
         if scores is not None and not scores.empty:
             scores = scores.copy()
@@ -784,6 +794,7 @@ def build_quality_payload(
         "top_k": list(cfg.top_ks),
         "report_top_k": int(cfg.report_top_k),
         "cost_assumption": f"{float(cfg.cost_bps):.4g} bps per unit half-L1 turnover",
+        "model_n_jobs": int(normalize_model_n_jobs(cfg.model_n_jobs)),
         "buyability_policy": "selected rows must pass candidate_pool_pass; buyability column reports t+1 open status",
         "report_signal_date": str(report_signal_date.date()),
         "next_trade_date": str(target["next_trade_date"].dropna().iloc[0].date())
@@ -901,6 +912,7 @@ def main() -> int:
         availability_lag_days=int(args.availability_lag_days),
         relevance_grades=int(args.relevance_grades),
         min_core_feature_coverage=float(args.min_core_feature_coverage),
+        model_n_jobs=int(args.model_n_jobs),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
     research_config_id = (
@@ -910,6 +922,7 @@ def main() -> int:
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
         f"_model_{slugify_token(cfg.model_name)}"
         f"_maxfit_{int(args.max_fit_rows)}"
+        f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
         f"_wf_{int(args.min_train_months)}m"
     )
     print(f"[monthly-m7] research_config_id={research_config_id}")
@@ -927,6 +940,7 @@ def main() -> int:
         cost_bps=cfg.cost_bps,
         random_seed=cfg.random_seed,
         availability_lag_days=cfg.availability_lag_days,
+        model_n_jobs=cfg.model_n_jobs,
     )
     dataset = attach_enabled_families(dataset, db_path, m5_cfg, enabled_families)
     spec = build_m6_feature_spec(enabled_families)

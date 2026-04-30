@@ -32,6 +32,8 @@ from scripts.run_monthly_selection_baselines import (
     _json_sanitize,
     _rank_pct_score,
     _score_base_columns,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
     build_leaderboard,
     build_monthly_long,
     build_quantile_spread,
@@ -68,6 +70,7 @@ class M6RunConfig:
     random_seed: int = 42
     availability_lag_days: int = 30
     relevance_grades: int = 5
+    model_n_jobs: int = 0
     ltr_models: tuple[str, ...] = (
         "xgboost_rank_ndcg",
         "xgboost_rank_pairwise",
@@ -98,6 +101,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--random-seed", type=int, default=42)
     p.add_argument("--availability-lag-days", type=int, default=30)
     p.add_argument("--relevance-grades", type=int, default=5)
+    p.add_argument(
+        "--model-n-jobs",
+        type=int,
+        default=0,
+        help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
+    )
     p.add_argument(
         "--families",
         type=str,
@@ -173,6 +182,7 @@ def _train_predict_xgboost_ranker(
     feature_cols: list[str],
     random_seed: int,
     relevance_grades: int,
+    model_n_jobs: int = 1,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     try:
         from xgboost import XGBRanker
@@ -195,7 +205,7 @@ def _train_predict_xgboost_ranker(
         objective=objective,
         eval_metric="ndcg@20",
         random_state=random_seed,
-        n_jobs=1,
+        n_jobs=normalize_model_n_jobs(model_n_jobs),
         tree_method="hist",
     )
     try:
@@ -236,6 +246,7 @@ def _train_predict_top20_calibrated(
     test: pd.DataFrame,
     feature_cols: list[str],
     random_seed: int,
+    model_n_jobs: int = 1,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     try:
         from xgboost import XGBClassifier
@@ -262,7 +273,7 @@ def _train_predict_top20_calibrated(
         eval_metric="logloss",
         scale_pos_weight=max(neg / max(pos, 1.0), 1.0),
         random_state=random_seed,
-        n_jobs=1,
+        n_jobs=normalize_model_n_jobs(model_n_jobs),
         tree_method="hist",
     )
     try:
@@ -360,6 +371,7 @@ def build_walk_forward_ltr_scores(
                     feature_cols=feature_cols,
                     random_seed=cfg.random_seed,
                     relevance_grades=cfg.relevance_grades,
+                    model_n_jobs=cfg.model_n_jobs,
                 )
                 if scores is not None and not scores.empty:
                     current_scores.append(scores)
@@ -374,6 +386,7 @@ def build_walk_forward_ltr_scores(
                     feature_cols=feature_cols,
                     random_seed=cfg.random_seed,
                     relevance_grades=cfg.relevance_grades,
+                    model_n_jobs=cfg.model_n_jobs,
                 )
                 if scores is not None and not scores.empty:
                     current_scores.append(scores)
@@ -385,6 +398,7 @@ def build_walk_forward_ltr_scores(
                     test=test,
                     feature_cols=feature_cols,
                     random_seed=cfg.random_seed,
+                    model_n_jobs=cfg.model_n_jobs,
                 )
                 if scores is not None and not scores.empty:
                     current_scores.append(scores)
@@ -464,6 +478,7 @@ def build_quality_payload(
         "ltr_models": list(cfg.ltr_models),
         "relevance_grades": int(cfg.relevance_grades),
         "max_fit_rows": int(cfg.max_fit_rows),
+        "model_n_jobs": int(normalize_model_n_jobs(cfg.model_n_jobs)),
         "random_seed": int(cfg.random_seed),
         "rows": int(len(dataset)),
         "valid_rows": int(len(valid)),
@@ -580,6 +595,7 @@ def main() -> int:
         random_seed=int(args.random_seed),
         availability_lag_days=int(args.availability_lag_days),
         relevance_grades=int(args.relevance_grades),
+        model_n_jobs=int(args.model_n_jobs),
         ltr_models=ltr_models,
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
@@ -591,6 +607,7 @@ def main() -> int:
         f"_models_{'-'.join(slugify_token(x) for x in ltr_models)}"
         f"_grades_{int(args.relevance_grades)}"
         f"_maxfit_{int(args.max_fit_rows)}"
+        f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
         f"_wf_{int(args.min_train_months)}m"
         f"_costbps_{slugify_token(args.cost_bps)}"
     )
@@ -607,6 +624,7 @@ def main() -> int:
         cost_bps=cfg.cost_bps,
         random_seed=cfg.random_seed,
         availability_lag_days=cfg.availability_lag_days,
+        model_n_jobs=cfg.model_n_jobs,
     )
     dataset = attach_enabled_families(dataset, db_path, m5_cfg, enabled_families)
     spec = build_m6_feature_spec(enabled_families)

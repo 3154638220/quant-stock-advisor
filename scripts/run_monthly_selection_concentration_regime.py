@@ -33,6 +33,8 @@ from scripts.run_monthly_selection_baselines import (
     _format_markdown_table,
     _json_sanitize,
     _rank_pct_score,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
     build_quantile_spread,
     build_rank_ic,
     build_realized_market_states,
@@ -81,6 +83,7 @@ class M8RunConfig:
     availability_lag_days: int = 30
     min_state_history_months: int = 24
     cap_grid: dict[int, tuple[int, ...]] | None = None
+    model_n_jobs: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +104,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cost-bps", type=float, default=10.0)
     p.add_argument("--random-seed", type=int, default=42)
     p.add_argument("--availability-lag-days", type=int, default=30)
+    p.add_argument(
+        "--model-n-jobs",
+        type=int,
+        default=0,
+        help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
+    )
     p.add_argument("--min-state-history-months", type=int, default=24)
     p.add_argument("--families", type=str, default="industry_breadth,fund_flow,fundamental")
     p.add_argument("--skip-m6", action="store_true", help="仅运行 M5 稳定底座和行业 cap，跳过 M6 watchlist。")
@@ -649,6 +658,7 @@ def build_quality_payload(
         "regime_policy": "strong_down=80% ElasticNet/20% ExtraTrees; strong_up or wide breadth=60% ExtraTrees/25% rank_ndcg/15% top20; neutral=50/50 stable M5",
         "include_m6": bool(include_m6),
         "max_fit_rows": int(cfg.max_fit_rows),
+        "model_n_jobs": int(normalize_model_n_jobs(cfg.model_n_jobs)),
         "random_seed": int(cfg.random_seed),
         "rows": int(len(dataset)),
         "valid_rows": int(len(valid)),
@@ -766,6 +776,7 @@ def main() -> int:
         availability_lag_days=int(args.availability_lag_days),
         min_state_history_months=int(args.min_state_history_months),
         cap_grid=cap_grid,
+        model_n_jobs=int(args.model_n_jobs),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{as_of}"
     research_config_id = (
@@ -775,6 +786,7 @@ def main() -> int:
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
         f"_capgrid_{slugify_token(args.cap_grid)}"
         f"_maxfit_{int(args.max_fit_rows)}"
+        f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
         f"_wf_{int(args.min_train_months)}m"
         f"_costbps_{slugify_token(args.cost_bps)}"
     )
@@ -793,6 +805,7 @@ def main() -> int:
         include_xgboost=False,
         availability_lag_days=cfg.availability_lag_days,
         ml_models=("elasticnet", "extratrees"),
+        model_n_jobs=cfg.model_n_jobs,
     )
     dataset = attach_enabled_families(dataset, db_path, m5_cfg, enabled_families)
     m5_specs = build_feature_specs(enabled_families)
@@ -815,6 +828,7 @@ def main() -> int:
             random_seed=cfg.random_seed,
             availability_lag_days=cfg.availability_lag_days,
             relevance_grades=5,
+            model_n_jobs=cfg.model_n_jobs,
             ltr_models=("xgboost_rank_ndcg", "top20_calibrated"),
         )
         m6_spec = build_m6_feature_spec(enabled_families)

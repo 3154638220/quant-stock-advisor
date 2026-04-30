@@ -2,10 +2,10 @@
 
 **文档角色**：当前唯一主计划（canonical）  
 **更新时间**：`2026-04-30`  
-**当前阶段**：M8，行业约束自然化  
+**当前阶段**：M10，成本与执行压力  
 **研究终点**：每月输出可解释、可回测、PIT-safe、可执行约束清楚的 Top-K 股票推荐名单  
 **生产状态**：无研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前结论**：M8 的行业 hard cap 带来收益和集中度改善，但这更像选择层风险规则，不等于模型预测能力提升；M9 数据完整性工程修复已完成并通过报告层 gate，但 M8 自然化和 M10 成本执行压力完成前仍不能 promotion  
+**当前结论**：M8 行业约束自然化已完成，soft industry risk-budget 在 Top20/Top30 上产生 3 个通过 M8 natural gate 的研究候选；但 hard-cap baseline 仍是收益上限更强的 stress 对照，且 M10 真实成本/买入失败/冲击成本尚未完成，因此仍不能 promotion  
 **归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留历史执行记录，不再承担主计划职责
 
 ---
@@ -31,11 +31,11 @@ score(stock, month_end)
 
 当前最重要的判断：
 
-1. **不 promotion M7/M8/M9 报告**。M8 的 hard cap 版本已把 Top-K 选择层行业集中度降到 gate 范围内，但约束形式仍偏人为；M9 已修复报告层数据完整性，真实成本压力仍未完成。
-2. **M8 当前最强研究候选是 lagged-regime fixed policy + industry cap，但 M8 未完成**。`U1_liquid_tradable + Top20 + indcap3` after-cost 月均超额约 `0.022369`，平均最大行业占比 `0.150000`，集中度月度 pass rate `1.0`；下一步必须验证 soft / learned / optimizer 版本能否替代 hard cap。
-3. **M5 ElasticNet cap 版仍是更可解释底座**。`U1 + M5_plus_industry_breadth+fund_flow+fundamental_elasticnet + Top20 + indcap4` after-cost 月均超额约 `0.017749`，Rank IC 约 `0.103597`。
+1. **不 promotion M7/M8/M9 报告**。M8 已从 hard cap 诊断推进到自然化约束，但真实成本压力、买入失败和冲击成本仍未完成。
+2. **M8 当前通过候选来自 soft industry risk-budget，而不是 hard cap**。`U1 + M5 ElasticNet market_excess + Top20 + gamma0.20` after-cost 月均超额约 `0.018338`，相对 hard-cap best 差 `-0.004031`，Rank IC 约 `0.103597`，Top-K vs next-K 约 `0.013406`，平均最大行业占比约 `0.103947`，集中度 pass rate `1.0`。
+3. **hard cap 仍是 stress 上限，不是生产形态**。`U1_liquid_tradable + Top20 + indcap3` after-cost 月均超额约 `0.022369`，平均最大行业占比 `0.150000`，集中度 pass rate `1.0`；后续只作为 M10/M12 对照，不作为主候选形态。
 4. **M6 仍只作 watchlist / sleeve**。`U2 + M6_xgboost_rank_ndcg + Top20` 在 industry cap 后仍有收益证据，但 Rank IC 很弱，不能单独 promotion。
-5. **下一步不再堆模型**。优先把行业约束从 hard cap 迁移到标签、损失和组合优化目标中，并做 30/50 bps 与买入失败压力测试。
+5. **下一步不再堆模型**。优先对 M8 natural 候选做 30/50 bps、买入失败、冲击成本、容量和换手压力测试。
 6. **生产边界不变**。任何研究候选通过完整 gate 前，不写入 `config.yaml.example` 或 promoted registry。
 
 一句话路线：
@@ -265,7 +265,7 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 | M5 多源扩展 | 完成 | industry breadth + fundamental 带来稳定增量 |
 | M6 LTR | 完成 | `U2 + M6_xgboost_rank_ndcg + Top20/30` 仅进入 watchlist |
 | M7 推荐报告 | 完成 | 能输出研究名单，但 Top20/30 全为非银金融 |
-| M8 集中度与状态治理 | 未完成 | hard cap 已生成证据，但仍需把行业约束自然化为模型/损失/组合优化偏好；不 promotion |
+| M8 集中度与状态治理 | 完成 | hard cap 诊断与 natural industry soft risk-budget 均已生成；3 个自然化候选通过 M8 natural gate，但仍不 promotion |
 | M9 数据完整性修复 | 完成 | 报告层名称、T+1 可买字段、低覆盖特征治理、ST 名称过滤和 M9 gate 已落地 |
 | M10 成本与执行压力 | 待启动 | 真实成本、买入失败、冲击成本 |
 | M11 新数据扩展 | 待启动 | 北向、两融、主题、公告事件 |
@@ -275,7 +275,7 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 
 ## 6. M8：行业集中度与 Regime-Aware 治理
 
-**状态**：未完成。hard cap 诊断已完成（2026-04-30），但行业约束自然化尚未完成。  
+**状态**：完成（2026-04-30）。hard cap 诊断与行业约束自然化均已完成；进入 M10 成本与执行压力。  
 **目标**：把 M7 watchlist 从“有历史收益”改造成“有可解释暴露、可生产约束、且约束尽量由模型/损失/组合优化自然表达”的候选。
 
 ### 6.0 M8 已完成诊断
@@ -301,7 +301,55 @@ docs/reports/2026-04/monthly_selection_m8_concentration_regime_2026-04-30.md
 2. `M8_regime_aware_fixed_policy + U1 + Top20 + indcap3` after-cost 月均超额约 `0.022369`，Rank IC 约 `0.097405`，Top-K vs next-K 为正。
 3. `M5 ElasticNet + U1 + Top20 + indcap4` after-cost 月均超额约 `0.017749`，Rank IC 约 `0.103597`，解释性最好。
 4. `U2 + M6_xgboost_rank_ndcg` 的 industry cap 版收益改善了集中度，但 Rank IC 仍弱，只能作为 sleeve / watchlist 证据。
-5. M8 hard-cap gate 有研究候选通过，但这只说明行业集中度是当前系统的关键薄弱点；在行业约束自然化完成前，不允许进入 M9/M10 promotion 路线或 promoted registry。
+5. M8 hard-cap gate 有研究候选通过，但这只说明行业集中度是当前系统的关键薄弱点；hard cap 后续只作为 stress baseline，不作为主候选生产形态。
+
+### 6.0.1 M8 自然化验收
+
+已新增并运行：
+
+```text
+scripts/run_monthly_selection_m8_natural_industry_constraints.py
+```
+
+核心产物：
+
+```text
+data/results/monthly_selection_m8_natural_industry_constraints_2026-04-30_leaderboard.csv
+data/results/monthly_selection_m8_natural_industry_constraints_2026-04-30_label_compare.csv
+data/results/monthly_selection_m8_natural_industry_constraints_2026-04-30_penalty_frontier.csv
+data/results/monthly_selection_m8_natural_industry_constraints_2026-04-30_score_decomposition.csv
+data/results/monthly_selection_m8_natural_industry_constraints_2026-04-30_optimizer_compare.csv
+data/results/monthly_selection_m8_natural_industry_constraints_2026-04-30_gate.csv
+docs/reports/2026-04/monthly_selection_m8_natural_industry_constraints_2026-04-30.md
+```
+
+自然化实验覆盖：
+
+1. 标签层：`market_excess`、`industry_neutral_excess`、`blended_excess_50_50` 三套 walk-forward 标签。
+2. 分数层：行业内 alpha、行业 allocation、`within70_industry30`、sector residual 分解。
+3. soft penalty：相对候选池行业拥挤的连续分数惩罚 frontier。
+4. 组合层：`soft_industry_risk_budget` 连续行业风险预算选择，不使用每行业最多 N 只 hard cap。
+
+通过 M8 natural gate 的候选：
+
+| pool | 候选 | Top-K | after-cost 月均超额 | hard-cap 差值 | Rank IC | Top-K vs next-K | 平均最大行业占比 | 集中度 pass |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `U1` | ElasticNet `market_excess` + soft risk `gamma0.20` | 20 | `0.018338` | `-0.004031` | `0.103597` | `0.013406` | `0.103947` | `1.0` |
+| `U2` | ElasticNet `industry_neutral_excess` + soft risk `gamma0.20` | 20 | `0.010460` | `-0.004677` | `0.091521` | `0.004255` | `0.101316` | `1.0` |
+| `U1` | ElasticNet `blended_excess_50_50` + soft risk `gamma0.20` | 30 | `0.016142` | `-0.003473` | `0.108379` | `0.010827` | `0.100000` | `1.0` |
+
+结论：
+
+```text
+M8 完成：至少一个自然化方案在 U1 + Top20/30 上接近 hard-cap baseline，
+且集中度、收益、Rank IC、spread、year/regime gate 同时通过。
+```
+
+但：
+
+```text
+仍不 promotion。M10 真实成本、买入失败、冲击成本和容量压力尚未完成。
+```
 
 ### 6.1 行业集中度约束
 
@@ -376,7 +424,7 @@ data/results/monthly_selection_m8_concentration_regime_YYYY-MM-DD_gate.csv
 docs/reports/YYYY-MM/monthly_selection_m8_concentration_regime_YYYY-MM-DD.md
 ```
 
-### 6.4 行业约束自然化计划
+### 6.4 行业约束自然化结果
 
 核心判断：
 
@@ -385,7 +433,7 @@ hard cap 提升 = 有价值的诊断信号
 hard cap 本身 != 预测模型能力提升
 ```
 
-下一步目标不是继续调 `indcap3/4/5`，而是让模型分数、训练目标或组合优化自然地降低行业拥挤，并保持可解释性。
+本轮目标不是继续调 `indcap3/4/5`，而是让模型分数、训练目标或组合优化自然地降低行业拥挤，并保持可解释性。该目标已由 `soft_industry_risk_budget` 候选完成验收。
 
 #### 6.4.1 标签层：行业中性收益作为主学习目标
 
@@ -506,13 +554,13 @@ M8 完成条件不是 soft optimizer 必须超过 hard cap，而是：
 
 #### 6.4.5 验收产物
 
-新增脚本建议：
+新增脚本：
 
 ```text
 scripts/run_monthly_selection_m8_natural_industry_constraints.py
 ```
 
-新增结果建议：
+新增结果：
 
 ```text
 data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_label_compare.csv
@@ -523,13 +571,13 @@ data/results/monthly_selection_m8_natural_industry_YYYY-MM-DD_gate.csv
 docs/reports/YYYY-MM/monthly_selection_m8_natural_industry_constraints_YYYY-MM-DD.md
 ```
 
-M8 最终完成 gate：
+M8 最终完成 gate 结果：
 
-1. hard cap 仍保留为 stress baseline，但主候选不能只靠 hard cap 通过 concentration gate。
-2. 至少一个自然化方案在 `U1 + Top20/30` 上接近或超过 hard-cap baseline。
-3. 行业集中度、收益、Rank IC、spread、year/regime slice 同时可解释。
-4. 参数选择完全来自训练窗或固定先验。
-5. 通过后才进入 M9/M10 的 promotion 前置路线。
+1. 通过。hard cap 仍保留为 stress baseline，但主候选不靠 hard cap 通过 concentration gate。
+2. 通过。`U1 + Top20` 与 `U1 + Top30` 均有自然化候选接近 hard-cap baseline。
+3. 通过。行业集中度、收益、Rank IC、spread、year/regime slice 同时可解释。
+4. 通过。参数选择来自固定先验网格，未按测试月收益回填。
+5. 通过。M8 进入完成状态；下一步是 M10 成本与执行压力，不是 promotion。
 
 ---
 
@@ -570,7 +618,7 @@ docs/monthly_selection_m9_data_integrity_report_2026-04-30.md
 
 1. 当前本地 dataset 最新日 `2026-04-29` 仍缺少下一交易日行情，因此不能作为“可执行信号日”；报告自动选择最新可执行信号日 `2026-03-31`，下一交易日 `2026-04-01`。
 2. M9 gate 全部通过：`target_candidate_pool_pass_rows=4196`，`target_next_trade_date_present=4196`，`recommendation_buyable=0`，`recommendation_names_readable=0`，`recommendation_excludes_st_names=0`，`zero_coverage_core_features=0`，`low_coverage_core_features_lt_30pct=0`。
-3. 这只解决数据完整性与报告可信度，不改变 M8/M10 未完成导致的 `research_only_not_promoted` 状态。
+3. 这只解决数据完整性与报告可信度；M8 后续已完成自然化验收，但 M10 未完成，因此仍保持 `research_only_not_promoted` 状态。
 
 ### 7.1 必修项
 
@@ -859,6 +907,7 @@ config.yaml.example
 - `scripts/run_monthly_selection_report.py`
 - `scripts/fetch_stock_names.py`
 - `scripts/run_monthly_selection_concentration_regime.py`
+- `scripts/run_monthly_selection_m8_natural_industry_constraints.py`
 - `scripts/run_backtest_eval.py`
 - `src/market/tradability.py`
 - `src/features/tensor_base_factors.py`
@@ -873,9 +922,10 @@ config.yaml.example
 - `tests/test_monthly_selection_ltr.py`
 - `tests/test_monthly_selection_report.py`
 - `tests/test_monthly_selection_concentration_regime.py`
+- `tests/test_monthly_selection_m8_natural_industry_constraints.py`
 
 ---
 
 ## 15. 当前一句话路线
 
-**当前项目已经完成 M0-M7、M8 hard-cap 诊断和 M9 数据完整性修复；M8 因行业约束仍需自然化而标记为未完成，M10 成本执行压力也未完成，因此当前仍不是交易策略。下一步先完成 M8 的标签/损失/组合优化自然化验证，再进入 M10 成本执行压力，最终只有完整通过 M8-M12 gate 的候选才允许进入 promoted registry。**
+**当前项目已经完成 M0-M9，其中 M8 已从 hard-cap 诊断推进到 soft industry risk-budget 自然化验收；但 M10 成本执行压力、M11 新数据稳定性和 M12 promotion package 尚未完成，因此当前仍不是交易策略。下一步进入 M10，对 M8 natural 候选做 30/50 bps、买入失败、冲击成本、容量和换手压力测试，最终只有完整通过 M10-M12 gate 的候选才允许进入 promoted registry。**
