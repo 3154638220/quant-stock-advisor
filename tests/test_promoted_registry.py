@@ -43,7 +43,6 @@ def test_promoted_registry_required_entry_fields_cover_r5_gate() -> None:
         "config_path",
         "promotion_date",
         "full_backtest_report",
-        "daily_proxy_report",
         "oos_report",
         "state_slice_report",
         "boundary_report",

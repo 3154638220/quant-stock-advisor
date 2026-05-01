@@ -153,7 +153,7 @@ def composite_extended_linear_score(
     """
     多因子截面 z-score 线性组合：键为 ``df`` 列名，含 ``momentum``、``rsi`` 及阶段一扩展列
     （如 ``atr``、``realized_vol``、``turnover_roll_mean``、``vol_ret_corr``、``short_reversal``），
-    以及 P1 扩展列（如 ``pe_ttm``、``roe_ttm``、``llm_sentiment_z``）。
+    以及 P1 扩展列（如 ``pe_ttm``、``roe_ttm``、资金流与股东户数因子）。
     """
     effective_weights = dict(weights)
     if weights_override:

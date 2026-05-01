@@ -44,7 +44,7 @@ def main() -> int:
         "--time-val-split",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="是否按时间切分验证集（生产推荐开启，避免未来泄漏）",
+        help="是否按时间切分验证集（生产候选应开启，避免未来泄漏）",
     )
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=64)

@@ -735,7 +735,6 @@ PREPARED_FACTORS_REQUIRED_COLUMNS: tuple[str, ...] = (
     "holder_change_rate_z",
     "holder_count_log_z",
     "holder_concentration_proxy",
-    "llm_sentiment_z",
     "_universe_eligible",
 )
 
@@ -878,7 +877,6 @@ def prepare_factors_for_backtest(
     factors = _attach_pit_fundamentals(factors, db_path)
     factors = attach_fund_flow(factors, db_path)
     factors = attach_shareholder_factors(factors, db_path)
-    factors = _attach_llm_sentiment(factors, results_dir)
     factors = attach_universe_filter(
         factors,
         daily_df,
@@ -994,62 +992,6 @@ def _attach_pit_fundamentals(factors: pd.DataFrame, db_path: str) -> pd.DataFram
     if not chunked:
         return out
     return pd.concat(chunked, ignore_index=True)
-
-
-def _attach_llm_sentiment(factors: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
-    """
-    读取 ``llm_attention_*.csv`` 历史结果，构造按日截面的 ``llm_sentiment_z``。
-    历史不足时保留空列，回测自动降级。
-    """
-    out = factors.copy()
-    files = sorted(results_dir.glob("llm_attention_*.csv"))
-    if not files:
-        out["llm_sentiment_z"] = np.nan
-        return out
-
-    rows: list[pd.DataFrame] = []
-    for p in files:
-        ds = p.stem.replace("llm_attention_", "")
-        dt = pd.to_datetime(ds, errors="coerce")
-        if pd.isna(dt):
-            continue
-        try:
-            tab = pd.read_csv(p, encoding="utf-8-sig")
-        except Exception:  # noqa: BLE001
-            continue
-        if tab.empty:
-            continue
-        sym_col = "symbol" if "symbol" in tab.columns else ("代码" if "代码" in tab.columns else None)
-        if sym_col is None:
-            continue
-        sig_col = "significance" if "significance" in tab.columns else None
-        rank_col = "attention_rank_change" if "attention_rank_change" in tab.columns else None
-        score = pd.Series(0.0, index=tab.index, dtype=float)
-        if sig_col is not None:
-            score = score + pd.to_numeric(tab[sig_col], errors="coerce").fillna(0.0)
-        if rank_col is not None:
-            score = score + pd.to_numeric(tab[rank_col], errors="coerce").fillna(0.0) * 0.5
-        sd = float(score.std(ddof=0))
-        z = pd.Series(0.0, index=score.index, dtype=float) if abs(sd) < 1e-12 else (score - float(score.mean())) / sd
-        rows.append(
-            pd.DataFrame(
-                {
-                    "trade_date": pd.Timestamp(dt).normalize(),
-                    "symbol": tab[sym_col].astype(str).str.extract(r"(\d{6})", expand=False).fillna("").str.zfill(6),
-                    "llm_sentiment_z": z.astype(float),
-                }
-            )
-        )
-    if not rows:
-        out["llm_sentiment_z"] = np.nan
-        return out
-
-    llm = pd.concat(rows, ignore_index=True)
-    llm = llm[(llm["symbol"].str.len() == 6)].drop_duplicates(["trade_date", "symbol"], keep="last")
-    out["trade_date"] = pd.to_datetime(out["trade_date"]).dt.normalize()
-    out["symbol"] = out["symbol"].astype(str).str.zfill(6)
-    out = out.merge(llm, on=["trade_date", "symbol"], how="left")
-    return out
 
 
 def attach_universe_filter(
@@ -1848,7 +1790,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--prepared-factors-cache",
         default="",
-        help="prepared factors parquet 缓存路径；命中后跳过 compute_factors/PIT/LLM/universe 预处理",
+        help="prepared factors parquet 缓存路径；命中后跳过 compute_factors/PIT/multisource/universe 预处理",
     )
     p.add_argument(
         "--refresh-prepared-factors-cache",

@@ -4,7 +4,7 @@
 #
 # 用法（在项目根目录）::
 #   bash scripts/with_conda.sh python scripts/env_check.py
-#   bash scripts/with_conda.sh python scripts/daily_run.py --max-symbols 50
+#   bash scripts/with_conda.sh python scripts/run_monthly_selection_dataset.py --config config.yaml.backtest
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

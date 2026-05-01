@@ -2,7 +2,7 @@
 """
 阶段二：用 DuckDB 历史日线构建 (symbol, date) 面板，截面 Z-score 特征 + 前瞻收益标签，训练 XGBoost。
 
-默认使用 ``XGBRanker``（pairwise 排序，与 Top-K 荐股一致）；``--objective regression`` 可切回 ``XGBRegressor``。
+默认使用 ``XGBRanker``（pairwise 排序，与 Top-K 选股一致）；``--objective regression`` 可切回 ``XGBRegressor``。
 
 用法（项目根目录，conda activate quant-system）::
 

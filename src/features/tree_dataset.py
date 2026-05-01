@@ -1,5 +1,5 @@
 """
-历史面板：与 daily_run 一致的因子张量 + 前瞻收益，供树模型（XGBoost）训练。
+历史面板：因子张量 + 前瞻收益，供树模型（XGBoost）训练。
 
 默认前瞻收益与 A 股 T+1 及「次日开盘买入」对齐：``open(t+1+h)/open(t+1)-1``（见 ``forward_returns_tplus1_open``）。
 可选 ``forward_settlement="close_to_close"`` 保留旧标签 ``close(t+h)/close(t)-1``。
@@ -497,7 +497,7 @@ def long_ohlcv_last_window_table(
     """
     从与 ``pivot_close_wide`` 对齐的 OHLCV 宽表截取**最近** ``seq_len`` 个交易日，展开为长表。
 
-    供 ``predict_timeseries_bundle_last`` 与 daily_run 阶段三推理使用。
+    供 ``predict_timeseries_bundle_last`` 等序列模型推理工具使用。
     """
     if seq_len < 1:
         raise ValueError("seq_len 须 >= 1")

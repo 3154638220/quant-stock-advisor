@@ -1,12 +1,12 @@
 """
 A 股可交易性：涨跌停比例、次日开盘一字涨停（难以买入）、停牌近似。
 
-荐股列表仅做「可买性」过滤，不实现 T+1 仓位状态机；回测与标签对齐见 T+1 开盘价序列。
+月度选股链路只在候选池和回测标签中使用这些规则，不在这里维护真实 T+1 仓位状态机。
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -180,93 +180,3 @@ def prefilter_stock_pool(
             stats["total_before"],
         )
     return kept, stats
-
-
-def _sorted_dates(daily_df: pd.DataFrame, date_col: str) -> np.ndarray:
-    d = pd.to_datetime(daily_df[date_col]).dt.normalize().unique()
-    return np.sort(d)
-
-
-def _next_trading_date(
-    dates_sorted: np.ndarray,
-    asof: pd.Timestamp,
-) -> Optional[pd.Timestamp]:
-    asof_n = pd.Timestamp(asof).normalize()
-    for i, d in enumerate(dates_sorted):
-        if pd.Timestamp(d).normalize() != asof_n:
-            continue
-        if i + 1 < len(dates_sorted):
-            return pd.Timestamp(dates_sorted[i + 1]).normalize()
-        return None
-    return None
-
-
-def filter_recommend_tradable_next_day(
-    rec_df: pd.DataFrame,
-    daily_df: pd.DataFrame,
-    *,
-    asof_date,
-    symbol_col: str = "symbol",
-    date_col: str = "trade_date",
-    log=None,
-) -> Tuple[pd.DataFrame, int]:
-    """
-    剔除次日停牌、次日开盘一字涨停（难以买入）的标的。
-
-    若次日尚未产生行情（例如尚未产生 T+1），则**不剔除**该标的，并打日志（可选）。
-
-    Returns
-    -------
-    filtered_df, n_dropped
-    """
-    if rec_df.empty or daily_df.empty:
-        return rec_df.copy(), 0
-
-    dates_sorted = _sorted_dates(daily_df, date_col)
-    asof_ts = pd.Timestamp(asof_date).normalize()
-    next_day = _next_trading_date(dates_sorted, asof_ts)
-    if next_day is None:
-        if log:
-            log.warning(
-                "asof=%s 后无下一交易日行情，跳过「次日可买性」过滤。",
-                asof_ts.date(),
-            )
-        return rec_df.copy(), 0
-
-    df = daily_df.copy()
-    df[date_col] = pd.to_datetime(df[date_col]).dt.normalize()
-    sym_col_db = "symbol" if "symbol" in df.columns else "代码"
-
-    # 预取 (symbol, date) -> row
-    keep_mask: list[bool] = []
-    dropped = 0
-    for _, row in rec_df.iterrows():
-        sym = str(row[symbol_col]).zfill(6)
-        sub = df[(df[sym_col_db].astype(str).str.zfill(6) == sym)]
-        if sub.empty:
-            keep_mask.append(True)
-            continue
-        r0 = sub[sub[date_col] == asof_ts]
-        r1 = sub[sub[date_col] == next_day]
-        if r0.empty or r1.empty:
-            keep_mask.append(True)
-            continue
-        r0 = r0.iloc[0]
-        r1 = r1.iloc[0]
-        prev_close = float(r0.get("close", np.nan))
-        o1 = float(r1.get("open", np.nan))
-        c1 = float(r1.get("close", np.nan))
-        v1 = float(r1.get("volume", np.nan))
-
-        if is_row_suspended_like(v1, o1, c1):
-            keep_mask.append(False)
-            dropped += 1
-            continue
-        if is_open_limit_up_unbuyable(o1, prev_close, sym):
-            keep_mask.append(False)
-            dropped += 1
-            continue
-        keep_mask.append(True)
-
-    out = rec_df.loc[keep_mask].reset_index(drop=True)
-    return out, dropped

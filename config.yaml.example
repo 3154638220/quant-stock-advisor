@@ -20,7 +20,7 @@ database:
   table_shareholder: a_share_shareholder
 
 fundamental:
-  # 在 daily_run 中先增量写入基本面，再做 PIT 读取（估值/质量因子依赖）
+  # 基本面刷新入口写入后，月度链路按 PIT 口径读取估值/质量因子。
   auto_update: true
   # 0 表示不限制；可设置为正数用于调试加速
   auto_update_max_symbols: 0
@@ -95,8 +95,6 @@ signals:
     # P1-B 资金流（可选）
     northbound_net_inflow: 0.03
     margin_buy_ratio: -0.02
-    # P1-C LLM 情绪闭环（需先跑 llm_daily_analysis.py 生成当日 CSV）
-    llm_sentiment_z: 0.03
   # P1-B：根据 diagnose_factor_ic 报告自动删减/翻转无效因子
   p1_factor_filter:
     enabled: false
@@ -272,17 +270,3 @@ akshare:
   universe_merge_duckdb_and_cache: true
   universe_target_min_symbols: 4500
   min_cached_universe_symbols: 1000
-
-llm:
-  model: qwen2.5:32b
-  timeout_sec: 400
-  base_url: http://localhost:11434
-  max_retries: 2
-  retry_delay_sec: 3
-  ollama_options:
-    num_gpu: -1
-    num_ctx: 8192
-  attention:
-    max_surge_stocks: 50
-    max_news_per_stock: 20
-    news_lookback_hours: 48

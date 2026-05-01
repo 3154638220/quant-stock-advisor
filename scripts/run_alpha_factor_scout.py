@@ -142,8 +142,6 @@ def classify_factor_family(factor_name: str, *, baseline_factor: str = DEFAULT_B
         "margin_buy_ratio",
     }:
         return "fundamental"
-    if name in {"llm_sentiment", "llm_sentiment_score"} or name.startswith("llm_"):
-        return "llm"
     return "price_volume"
 
 

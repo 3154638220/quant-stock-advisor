@@ -275,7 +275,7 @@ def build_portfolio_weights(
         cov = np.asarray(cov_matrix, dtype=np.float64)
         if cov.shape != (n, n):
             raise ValueError(
-                f"cov_matrix 形状 {cov.shape} 与推荐表行数 {n} 不一致"
+                f"cov_matrix 形状 {cov.shape} 与候选表行数 {n} 不一致"
             )
         from src.portfolio.optimizer import solve_weights_from_cov_method, weight_diagnostics
 
@@ -285,7 +285,7 @@ def build_portfolio_weights(
                 raise ValueError("weight_method=mean_variance 需要 expected_returns (mu)")
             mu = np.asarray(expected_returns, dtype=np.float64).ravel()
             if mu.size != n:
-                raise ValueError("expected_returns 长度须与推荐表行数一致")
+                raise ValueError("expected_returns 长度须与候选表行数一致")
         w, opt_diag = solve_weights_from_cov_method(
             method,
             cov,

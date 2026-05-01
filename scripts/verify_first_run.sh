@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 首跑烟测：固定两只标的（不依赖全市场 spot 接口），验证 DuckDB 增量与推荐 CSV。
+# 首跑烟测：固定两只标的（不依赖全市场 spot 接口），验证 DuckDB 增量与月度选股入口。
 # 用法：在项目根目录；优先使用 conda 环境 quant-system（与 environment.yml 一致）：
 #   cd "$(dirname "$0")/.." && bash scripts/verify_first_run.sh
 set -euo pipefail
@@ -17,12 +17,6 @@ fi
 SYMS="${VERIFY_SYMBOLS:-600519,000001}"
 
 "${RUN[@]}" scripts/fetch_only.py --symbols "${SYMS}"
-"${RUN[@]}" scripts/daily_run.py --symbols "${SYMS}" --skip-fetch --top-k 10
+"${RUN[@]}" scripts/run_monthly_selection_dataset.py --config config.yaml.backtest --dry-run
 
-LATEST="$(ls -1t "${ROOT}/data/results"/recommend_*.csv 2>/dev/null | head -1)"
-if [[ -z "${LATEST}" ]]; then
-  echo "未找到 data/results/recommend_*.csv" >&2
-  exit 1
-fi
-echo "OK: ${LATEST}"
-wc -l "${LATEST}"
+echo "OK: DuckDB 增量写入与月度选股 dataset 入口可用"

@@ -59,7 +59,7 @@ def main() -> int:
         "--walk-forward-oos",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="训练后执行 walk-forward OOS 校验（生产推荐开启）",
+        help="训练后执行 walk-forward OOS 校验（生产候选应开启）",
     )
     p.add_argument("--wf-train-days", type=int, default=252)
     p.add_argument("--wf-test-days", type=int, default=63)

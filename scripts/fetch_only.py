@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-仅增量更新 DuckDB 日线表，不跑因子与推荐（适合网络不稳定时先拉数）。
+仅增量更新 DuckDB 日线表，不跑因子与月度选股报告（适合网络不稳定时先拉数）。
 
 主入口（项目根目录，须使用 conda 环境 quant-system）::
 
@@ -50,7 +50,7 @@ EPILOG = """
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="仅 AkShare → DuckDB 增量日线（不计算因子）",
+        description="仅 AkShare → DuckDB 增量日线（不计算月度因子）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG,
     )

@@ -16,11 +16,10 @@
 
 ## 使用规则
 
-1. 日更推荐和月度选股的生产配置只能来自 `promoted_registry.json` 的 `promoted_configs`。
-2. `daily proxy` 不是 promotion 终点。
-3. `gray zone` 不是 production candidate。
-4. `config.yaml.backtest` 与 `configs/backtests/` 只服务研究回测和证据归档。
-5. `config.yaml.example` 是生产模板，不得承载未 promotion 的研究候选主线。
+1. 月度选股的生产配置只能来自 `promoted_registry.json` 的 `promoted_configs`。
+2. `gray zone` 不是 production candidate。
+3. `config.yaml.backtest` 与 `configs/backtests/` 只服务研究回测和证据归档。
+4. `config.yaml.example` 是生产模板，不得承载未 promotion 的研究候选主线。
 
 ## 新增 promoted 记录的最低字段
 
@@ -32,7 +31,6 @@
 | `config_path` | promoted 配置快照路径 |
 | `promotion_date` | promotion 日期 |
 | `full_backtest_report` | 正式回测报告 |
-| `daily_proxy_report` | daily proxy 报告 |
 | `oos_report` | rolling/slice OOS 报告 |
 | `state_slice_report` | strong-up/strong-down 等状态切片 |
 | `boundary_report` | switch/topk boundary 诊断 |

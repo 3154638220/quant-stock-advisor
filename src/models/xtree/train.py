@@ -1,7 +1,7 @@
 """
 XGBoost 截面学习：特征为逐日截面 Z-score 后的因子；标签为前瞻收益。
 
-默认使用 ``XGBRanker``（pairwise 排序），与荐股 Top-K 目标一致；可选 ``XGBRegressor`` 回归。
+默认使用 ``XGBRanker``（pairwise 排序），与 Top-K 选股目标一致；可选 ``XGBRegressor`` 回归。
 
 工件格式与 ``src.models.baseline.train`` 对齐：``bundle.json``、``inference_config.json``、``model.joblib``。
 """

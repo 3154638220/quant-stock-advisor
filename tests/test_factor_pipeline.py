@@ -28,7 +28,6 @@ from src.features.tensor_base_factors import (
 )
 from src.features.tensor_alpha import weekly_kdj_from_daily
 from src.models.rank_score import sort_key_for_dataframe
-from src.models.recommend_explain import build_recommend_reason
 
 
 def test_true_range_and_atr():
@@ -75,12 +74,6 @@ def test_momentum_sort_has_z_momentum():
     out = sort_key_for_dataframe(df, sort_by="momentum")
     assert "z_momentum" in out.columns
     assert out.iloc[0]["momentum"] == 0.3
-
-
-def test_recommend_reason_momentum():
-    row = pd.Series({"momentum": 0.5, "z_momentum": 1.2})
-    s = build_recommend_reason(row, sort_by="momentum")
-    assert "动量" in s and "z" in s
 
 
 def test_daily_returns_and_forward():
