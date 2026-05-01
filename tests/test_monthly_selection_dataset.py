@@ -86,12 +86,13 @@ def test_monthly_selection_dataset_aligns_tplus1_open_label_and_candidate_pools(
     feb1_open = daily[(daily["symbol"] == "000001") & (daily["trade_date"] == pd.Timestamp("2024-02-01"))][
         "open"
     ].iloc[0]
-    mar1_open = daily[(daily["symbol"] == "000001") & (daily["trade_date"] == pd.Timestamp("2024-03-01"))][
+    feb29_open = daily[(daily["symbol"] == "000001") & (daily["trade_date"] == pd.Timestamp("2024-02-29"))][
         "open"
     ].iloc[0]
     assert jan_u1["candidate_pool_pass"] is np.True_ or bool(jan_u1["candidate_pool_pass"])
-    assert jan_u1["label_forward_1m_o2o_return"] == pytest.approx(mar1_open / feb1_open - 1.0)
+    assert jan_u1["label_forward_1m_o2o_return"] == pytest.approx(feb29_open / feb1_open - 1.0)
     assert jan_u1["label_future_top_20pct"] == 1
+    assert jan_u1["sell_timing"] == "holding_month_last_trading_day_open"
     assert "feature_ret_20d_z" in out.columns
     assert "is_missing_feature_ret_20d" in out.columns
 
@@ -114,6 +115,6 @@ def test_build_research_config_id_records_core_dataset_contract():
         daily_table="a_share_daily",
     )
 
-    assert "rb_m_exec_tplus1_open_label_o2o" in out
+    assert "rb_m_exec_tplus1_open_sell_mend_open_label_o2o" in out
     assert "hist_120" in out
     assert "amt20m_50" in out

@@ -15,6 +15,9 @@
     "weighting": "equal_weight_within_selected_top_k",
     "rebalance_rule": "M",
     "execution_mode": "tplus1_open",
+    "buy_timing": "next_month_first_trading_day_open",
+    "sell_timing": "holding_month_last_trading_day_open",
+    "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day",
     "cost_bps": 10.0
   },
   "evidence": {
@@ -38,6 +41,8 @@
   "operating_policy": {
     "only_promoted_config_may_drive_monthly_selection": true,
     "research_variants_remain_watchlist_until_registered": true,
+    "sell_existing_top20_on_holding_month_last_trading_day": true,
+    "buy_next_top20_on_next_month_first_trading_day": true,
     "promotion_registry": "configs/promoted/promoted_registry.json"
   }
 }

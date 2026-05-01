@@ -183,12 +183,52 @@ def _weighted_turnover(prev: set[str] | None, cur: set[str]) -> float:
     return float(0.5 * sum(abs(cur_w.get(s, 0.0) - prev_w.get(s, 0.0)) for s in all_symbols))
 
 
+def _date_iso(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    return str(pd.Timestamp(value).date())
+
+
+def _first_date_iso(values: Any) -> str:
+    if values is None:
+        return ""
+    s = pd.Series(values).dropna()
+    if s.empty:
+        return ""
+    return _date_iso(s.iloc[0])
+
+
+def _next_signal_date_map(signal_calendar: list[Any] | tuple[Any, ...] | pd.Series | np.ndarray | None) -> dict[pd.Timestamp, pd.Timestamp]:
+    if signal_calendar is None:
+        return {}
+    dates = pd.Series(pd.to_datetime(pd.Series(signal_calendar), errors="coerce")).dropna().dt.normalize()
+    dates = sorted(pd.Timestamp(x).normalize() for x in dates.unique())
+    return {dates[i]: dates[i + 1] for i in range(len(dates) - 1)}
+
+
+def attach_trade_dates_to_scores(scores: pd.DataFrame, dataset: pd.DataFrame) -> pd.DataFrame:
+    if scores.empty or dataset.empty or "next_trade_date" not in dataset.columns:
+        return scores.copy()
+    keys = ["signal_date", "candidate_pool_version", "symbol"]
+    if not set(keys).issubset(scores.columns) or not set(keys).issubset(dataset.columns):
+        return scores.copy()
+    dates = dataset[keys + ["next_trade_date"]].copy()
+    dates["signal_date"] = pd.to_datetime(dates["signal_date"], errors="coerce").dt.normalize()
+    dates["symbol"] = dates["symbol"].astype(str).str.zfill(6)
+    dates = dates.drop_duplicates(keys, keep="last")
+    out = scores.drop(columns=["next_trade_date"], errors="ignore").copy()
+    out["signal_date"] = pd.to_datetime(out["signal_date"], errors="coerce").dt.normalize()
+    out["symbol"] = out["symbol"].astype(str).str.zfill(6)
+    return out.merge(dates, on=keys, how="left")
+
+
 def build_constrained_monthly(
     scores: pd.DataFrame,
     *,
     top_ks: list[int],
     cap_grid: dict[int, tuple[int, ...]],
     cost_bps: float,
+    signal_calendar: list[Any] | tuple[Any, ...] | pd.Series | np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if scores.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -196,6 +236,7 @@ def build_constrained_monthly(
     rows: list[dict[str, Any]] = []
     holdings: list[pd.DataFrame] = []
     prev_by_key: dict[tuple[str, str, int, int], set[str]] = {}
+    next_signal_by_date = _next_signal_date_map(signal_calendar if signal_calendar is not None else scores["signal_date"])
     ordered = scores.sort_values(
         ["candidate_pool_version", "model", "signal_date", "score", "symbol"],
         ascending=[True, True, True, False, True],
@@ -228,6 +269,8 @@ def build_constrained_monthly(
                     if INDUSTRY_EXCESS_COL in selected.columns
                     else np.nan
                 )
+                buy_trade_date = _first_date_iso(selected["next_trade_date"]) if "next_trade_date" in selected.columns else ""
+                sell_trade_date = _date_iso(next_signal_by_date.get(pd.Timestamp(signal_date).normalize()))
                 h = selected.copy()
                 h["base_model"] = base_model
                 h["model"] = variant_model
@@ -237,6 +280,8 @@ def build_constrained_monthly(
                 h["selected_rank"] = np.arange(1, len(h) + 1)
                 h["selection_policy"] = "uncapped" if int(cap) <= 0 else "industry_names_cap"
                 h["max_industry_names"] = int(cap)
+                h["buy_trade_date"] = buy_trade_date
+                h["sell_trade_date"] = sell_trade_date
                 keep_cols = [
                     "signal_date",
                     "candidate_pool_version",
@@ -253,6 +298,9 @@ def build_constrained_monthly(
                     LABEL_COL,
                     "industry_level1",
                     "risk_flags",
+                    "next_trade_date",
+                    "buy_trade_date",
+                    "sell_trade_date",
                 ]
                 holdings.append(h[[c for c in keep_cols if c in h.columns]].copy())
                 rows.append(
@@ -266,6 +314,8 @@ def build_constrained_monthly(
                         "selection_policy": "uncapped" if int(cap) <= 0 else "industry_names_cap",
                         "max_industry_names": int(cap),
                         "top_k": int(k),
+                        "buy_trade_date": buy_trade_date,
+                        "sell_trade_date": sell_trade_date,
                         "candidate_pool_width": candidate_width,
                         "selected_count": int(len(selected)),
                         "topk_return": top_ret,
@@ -509,6 +559,7 @@ def build_regime_policy_scores(scores: pd.DataFrame, states: pd.DataFrame) -> pd
         "log_market_cap",
         "risk_flags",
         "is_buyable_tplus1_open",
+        "next_trade_date",
     ]
     frames: list[pd.DataFrame] = []
     for model, score_col in wanted.items():
@@ -651,6 +702,8 @@ def build_quality_payload(
         "cost_assumption": f"{float(cfg.cost_bps):.4g} bps per unit half-L1 turnover",
         "feature_families": ["price_volume", *enabled_families],
         "label_spec": "forward_1m_open_to_open_return + market-relative excess + industry-neutral excess",
+        "sell_timing": "holding_month_last_trading_day_open",
+        "trade_timing_policy": "sell existing monthly Top-K on the holding month's last trading day open; buy the next monthly Top-K on the following trading day's open",
         "pit_policy": "walk-forward ML uses only past signal months; M8 regime policy uses lagged realized market state and signal-date breadth with expanding historical thresholds",
         "cv_policy": "walk_forward_by_signal_month",
         "hyperparameter_policy": "fixed conservative defaults inherited from M5/M6; M8 selection cap grid is predeclared in plan",
@@ -709,6 +762,7 @@ def build_doc(
 - 数据集：`{quality.get('dataset_path', '')}`
 - 训练/评估：M5/M6 walk-forward score；M8 在选择层做行业 cap 和 lagged-regime fixed policy。
 - 有效标签月份：`{quality.get('valid_signal_months', 0)}`
+- 交易时点：`{quality.get('trade_timing_policy', '')}`
 - 行业集中度策略：`{quality.get('concentration_policy', '')}`
 - Regime 策略：`{quality.get('regime_policy', '')}`
 
@@ -841,18 +895,22 @@ def main() -> int:
     base_scores = pd.concat(score_frames, ignore_index=True) if score_frames else pd.DataFrame()
     if base_scores.empty:
         warnings.warn("M8 未生成任何 score；请检查训练窗、候选池或特征覆盖。", RuntimeWarning)
+    base_scores = attach_trade_dates_to_scores(base_scores, dataset)
     lagged_states = build_lagged_state_frame(dataset, min_history_months=cfg.min_state_history_months)
     policy_scores = build_regime_policy_scores(base_scores, lagged_states)
     if not policy_scores.empty:
         base_scores = pd.concat([base_scores, policy_scores], ignore_index=True, sort=False)
+    base_scores = attach_trade_dates_to_scores(base_scores, dataset)
 
     rank_ic = build_rank_ic(base_scores)
     quantile_spread = build_quantile_spread(base_scores, bucket_count=cfg.bucket_count)
+    signal_calendar = sorted(pd.to_datetime(dataset["signal_date"], errors="coerce").dropna().dt.normalize().unique())
     monthly_long, topk_holdings = build_constrained_monthly(
         base_scores,
         top_ks=top_ks,
         cap_grid=cap_grid,
         cost_bps=cfg.cost_bps,
+        signal_calendar=signal_calendar,
     )
     market_states = build_realized_market_states(dataset)
     year_slice = summarize_year_slice(monthly_long)

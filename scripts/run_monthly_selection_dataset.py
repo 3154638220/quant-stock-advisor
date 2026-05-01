@@ -129,7 +129,7 @@ def build_research_config_id(
 ) -> str:
     amount_m = float(min_amount_20d) / 1_000_000.0
     return (
-        f"rb_m_exec_tplus1_open_label_o2o"
+        f"rb_m_exec_tplus1_open_sell_mend_open_label_o2o"
         f"_start_{slugify_token(start_date)}"
         f"_end_{slugify_token(end_date or 'latest')}"
         f"_hist_{int(min_history_days)}"
@@ -300,10 +300,10 @@ def build_monthly_labels(
     for signal_date, next_signal_date in zip(signal_dates[:-1], signal_dates[1:]):
         if next_signal_date not in returns.index:
             continue
-        exit_row = pd.to_numeric(returns.loc[next_signal_date], errors="coerce").replace([np.inf, -np.inf], np.nan)
-        if not np.isfinite(exit_row).any():
-            continue
-        window = returns[(returns.index > signal_date) & (returns.index <= next_signal_date)]
+        # Buy at the first open after signal_date and exit at the next
+        # month-end signal date's open.  Do not include the next_signal_date
+        # open-to-open bar, which would hold through the next month's first open.
+        window = returns[(returns.index > signal_date) & (returns.index < next_signal_date)]
         if window.empty:
             continue
         window = window.replace([np.inf, -np.inf], np.nan)
@@ -516,6 +516,7 @@ def build_monthly_selection_dataset(
     out["rebalance_rule"] = "M"
     out["execution_mode"] = "tplus1_open"
     out["label_return_mode"] = "open_to_open"
+    out["sell_timing"] = "holding_month_last_trading_day_open"
     return out.sort_values(["signal_date", "candidate_pool_version", "symbol"]).reset_index(drop=True)
 
 
@@ -634,6 +635,7 @@ def build_quality_summary(
                 "rebalance_rule": "M",
                 "execution_mode": "tplus1_open",
                 "benchmark_return_mode": "market_ew_open_to_open",
+                "sell_timing": "holding_month_last_trading_day_open",
                 "candidate_pool_versions": ",".join(POOL_RULES),
                 "industry_map_source_status": industry_map_source_status,
                 "rows": n_rows,
@@ -713,7 +715,7 @@ def build_doc(
 
 - 信号日：每月最后一个交易日。
 - 执行口径：`tplus1_open`。
-- 标签：从信号日后第一个 open-to-open 日收益开始，复利持有到下一月信号日生效前后，对齐 `build_open_to_open_returns`。
+- 标签：从信号日后第一个 open-to-open 日收益开始，复利持有到下一次月末信号日开盘；不再包含下一信号日到下一月首个交易日开盘的隔夜区间。
 - 候选池：`U0/U1/U2` 只做可交易、数据有效和极端风险过滤，不做 alpha 判断。
 - 特征处理：按 `signal_date` 截面 winsorize 1%/99% 后 z-score，并保留缺失标记。
 

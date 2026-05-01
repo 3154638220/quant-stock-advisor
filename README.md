@@ -209,7 +209,7 @@ python scripts/llm_analysis_report.py --latest
 
 ## 当前研究纪律
 
-月度选股当前生产默认方法为 `U1_liquid_tradable + Top20 + indcap3 hard-cap baseline`，对应 promoted config `monthly_selection_u1_top20_indcap3_hardcap_baseline`。其他 M5/M6/M8 变体仍按研究产物处理，除非进入 `configs/promoted/promoted_registry.json`。
+月度选股当前生产默认方法为 `U1_liquid_tradable + Top20 + indcap3 hard-cap baseline`，对应 promoted config `monthly_selection_u1_top20_indcap3_hardcap_baseline`。交易时点为：持有月最后一个交易日卖出当月 Top20，下一交易日开盘买入下一月 Top20。其他 M5/M6/M8 变体仍按研究产物处理，除非进入 `configs/promoted/promoted_registry.json`。
 
 旧 replacement / sleeve / gray zone 候选已经在 2026-04 的报告中被冻结或拒绝。轻量 `signal_diagnostic`、`light_strategy_proxy`、daily proxy、gray zone 都不是 promotion 终点。只有正式 full backtest、OOS、状态切片、边界诊断、成本、universe 与人工确认完整可追溯后，才允许新增 promoted 配置。
 

@@ -25,6 +25,8 @@ def test_promoted_registry_records_active_monthly_selection_default() -> None:
     assert promoted["production_method"]["top_k"] == 20
     assert promoted["production_method"]["selection_policy"] == "industry_names_cap"
     assert promoted["production_method"]["max_industry_names"] == 3
+    assert promoted["production_method"]["buy_timing"] == "next_month_first_trading_day_open"
+    assert promoted["production_method"]["sell_timing"] == "holding_month_last_trading_day_open"
 
     candidate_status = registry["research_candidate_status"]
     assert candidate_status
@@ -83,6 +85,8 @@ def test_production_template_points_to_active_monthly_selection_config() -> None
     assert default_method["top_k"] == 20
     assert default_method["selection_policy"] == "industry_names_cap"
     assert default_method["max_industry_names"] == 3
+    assert default_method["buy_timing"] == "next_month_first_trading_day_open"
+    assert default_method["sell_timing"] == "holding_month_last_trading_day_open"
     assert cfg["signals"]["top_k"] == 20
     assert cfg["portfolio"]["industry_cap_count"] == 3
 
@@ -99,4 +103,6 @@ def test_active_promoted_config_snapshot_matches_registry_method() -> None:
     assert snapshot["method"]["top_k"] == promoted["production_method"]["top_k"]
     assert snapshot["method"]["model"] == promoted["production_method"]["model"]
     assert snapshot["method"]["max_industry_names"] == promoted["production_method"]["max_industry_names"]
+    assert snapshot["method"]["buy_timing"] == promoted["production_method"]["buy_timing"]
+    assert snapshot["method"]["sell_timing"] == promoted["production_method"]["sell_timing"]
     assert snapshot["promotion_metrics"]["m8_gate_pass"] is True

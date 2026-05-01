@@ -176,6 +176,9 @@ monthly_selection:
     model: M8_regime_aware_fixed_policy__indcap3
     selection_policy: industry_names_cap
     max_industry_names: 3
+    buy_timing: next_month_first_trading_day_open
+    sell_timing: holding_month_last_trading_day_open
+    transition_policy: sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day
     production_status: active_promoted
 
 regime:

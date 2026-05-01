@@ -98,7 +98,7 @@ def test_requested_signal_date_requires_next_trade_date_for_passed_rows():
 
 
 def test_build_recommendation_table_includes_m7_required_fields_and_previous_rank():
-    df = _m7_sample(months=2, symbols=5)
+    df = _m7_sample(months=3, symbols=5)
     signal_date = pd.Timestamp("2024-02-29")
     scores = df[(df["signal_date"] == signal_date) & df["candidate_pool_pass"]].copy()
     scores["model"] = "M6_xgboost_rank_ndcg"
@@ -149,6 +149,8 @@ def test_build_recommendation_table_includes_m7_required_fields_and_previous_ran
         "risk_flags",
         "last_month_rank",
         "buyability",
+        "buy_trade_date",
+        "sell_trade_date",
     }
     assert required.issubset(rec.columns)
     assert rec.iloc[0]["symbol"] == "000005"
@@ -157,6 +159,8 @@ def test_build_recommendation_table_includes_m7_required_fields_and_previous_ran
     assert rec.iloc[0]["risk_flags"] == "extreme_turnover"
     assert rec.iloc[0]["buyability"] == "buyable_tplus1_open"
     assert rec.iloc[0]["next_trade_date"] == "2024-03-01"
+    assert rec.iloc[0]["buy_trade_date"] == "2024-03-01"
+    assert rec.iloc[0]["sell_trade_date"] == "2024-03-31"
     assert not contrib.empty
 
 

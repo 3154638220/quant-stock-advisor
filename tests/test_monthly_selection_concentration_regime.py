@@ -57,6 +57,7 @@ def _score_sample(months: int = 4) -> pd.DataFrame:
                         "industry_level2": "L2",
                         "risk_flags": "",
                         "feature_ret_20d": 1.0 if i >= 4 else -1.0,
+                        "next_trade_date": date + pd.offsets.BDay(1),
                     }
                 )
     return pd.DataFrame(rows)
@@ -101,6 +102,9 @@ def test_constrained_monthly_and_leaderboard_report_concentration_drop():
     assert uncapped["max_industry_share_mean"] > capped["max_industry_share_mean"]
     assert capped["max_industry_share_mean"] <= 0.4
     assert capped["topk_minus_nextk_mean"] > 0
+    first_holding = holdings.sort_values(["signal_date", "selected_rank"]).iloc[0]
+    assert first_holding["buy_trade_date"] == "2024-02-01"
+    assert first_holding["sell_trade_date"] == "2024-02-29"
 
 
 def test_lagged_state_uses_only_prior_history_and_policy_scores_rank():

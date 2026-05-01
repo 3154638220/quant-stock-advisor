@@ -458,6 +458,26 @@ def _buyability_text(row: pd.Series) -> str:
     return reason or "not_buyable_tplus1_open"
 
 
+def _date_iso(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    return str(pd.Timestamp(value).date())
+
+
+def _next_signal_date_by_pool(dataset: pd.DataFrame) -> dict[tuple[str, pd.Timestamp], pd.Timestamp]:
+    if dataset.empty or not {"candidate_pool_version", "signal_date"}.issubset(dataset.columns):
+        return {}
+    signal_dates = dataset[["candidate_pool_version", "signal_date"]].copy()
+    signal_dates["candidate_pool_version"] = signal_dates["candidate_pool_version"].astype(str)
+    signal_dates["signal_date"] = pd.to_datetime(signal_dates["signal_date"], errors="coerce").dt.normalize()
+    signal_dates = signal_dates.dropna(subset=["signal_date"]).drop_duplicates()
+    out: dict[tuple[str, pd.Timestamp], pd.Timestamp] = {}
+    for pool, part in signal_dates.groupby("candidate_pool_version", sort=True):
+        dates = sorted(pd.Timestamp(x).normalize() for x in part["signal_date"].unique())
+        out.update({(str(pool), dates[i]): dates[i + 1] for i in range(len(dates) - 1)})
+    return out
+
+
 def _risk_flags_text(row: pd.Series) -> str:
     flags: list[str] = []
     for col in ["risk_flags", "candidate_pool_reject_reason"]:
@@ -508,6 +528,7 @@ def build_recommendation_table(
     if "industry_level2_dataset" in enriched.columns:
         enriched["industry_level2"] = enriched["industry_level2"].fillna(enriched["industry_level2_dataset"])
     enriched["name"] = _name_column(enriched)
+    next_signal_by_pool = _next_signal_date_by_pool(dataset)
 
     rec_frames: list[pd.DataFrame] = []
     contrib_rows: list[dict[str, Any]] = []
@@ -529,6 +550,10 @@ def build_recommendation_table(
             for i, (_, row) in enumerate(top.iterrows(), start=1):
                 symbol = _display_symbol(row["symbol"])
                 contrib = _feature_contrib_text(row, feature_importance, feature_cols)
+                buy_trade_date = _date_iso(row.get("next_trade_date"))
+                sell_trade_date = _date_iso(
+                    next_signal_by_pool.get((str(pool), pd.Timestamp(signal_date).normalize()))
+                )
                 rows.append(
                     {
                         "signal_date": pd.Timestamp(signal_date).date().isoformat(),
@@ -547,9 +572,9 @@ def build_recommendation_table(
                         "last_month_rank": prev_map.get(symbol, pd.NA),
                         "last_month_selected": symbol in prev_map,
                         "buyability": _buyability_text(row),
-                        "next_trade_date": str(pd.Timestamp(row.get("next_trade_date")).date())
-                        if pd.notna(row.get("next_trade_date"))
-                        else "",
+                        "next_trade_date": buy_trade_date,
+                        "buy_trade_date": buy_trade_date,
+                        "sell_trade_date": sell_trade_date,
                         "candidate_pool_version": str(pool),
                         "candidate_pool_rule": str(row.get("candidate_pool_rule", POOL_RULES.get(str(pool), "")) or ""),
                         "model": str(model),
@@ -763,6 +788,12 @@ def build_quality_payload(
         dataset["candidate_pool_version"].isin(cfg.candidate_pools)
         & (dataset["signal_date"] == report_signal_date)
     ].copy()
+    next_signal_by_pool = _next_signal_date_by_pool(dataset)
+    sell_dates = [
+        next_signal_by_pool.get((pool, pd.Timestamp(report_signal_date).normalize()))
+        for pool in cfg.candidate_pools
+        if next_signal_by_pool.get((pool, pd.Timestamp(report_signal_date).normalize())) is not None
+    ]
     return {
         "result_type": "monthly_selection_m7_recommendation_report",
         "research_topic": "monthly_selection_m7_recommendation_report",
@@ -791,6 +822,7 @@ def build_quality_payload(
         "rebalance_rule": "M",
         "execution_mode": "tplus1_open",
         "benchmark_return_mode": "market_ew_open_to_open",
+        "sell_timing": "holding_month_last_trading_day_open",
         "top_k": list(cfg.top_ks),
         "report_top_k": int(cfg.report_top_k),
         "cost_assumption": f"{float(cfg.cost_bps):.4g} bps per unit half-L1 turnover",
@@ -800,6 +832,10 @@ def build_quality_payload(
         "next_trade_date": str(target["next_trade_date"].dropna().iloc[0].date())
         if "next_trade_date" in target.columns and target["next_trade_date"].notna().any()
         else "",
+        "buy_trade_date": str(target["next_trade_date"].dropna().iloc[0].date())
+        if "next_trade_date" in target.columns and target["next_trade_date"].notna().any()
+        else "",
+        "sell_trade_date": str(min(sell_dates).date()) if sell_dates else "",
         "target_candidate_rows": int(len(target)),
         "target_candidate_pass_rows": int(target["candidate_pool_pass"].astype(bool).sum()) if not target.empty else 0,
         "recommendation_rows": int(len(recommendations)),
@@ -834,7 +870,8 @@ def build_doc(
 - 结果类型：`monthly_selection_m7_recommendation_report`
 - 研究配置：`{quality.get('research_config_id', '')}`
 - 报告信号日：`{quality.get('report_signal_date', '')}`
-- 下一交易日：`{quality.get('next_trade_date', '')}`
+- 买入交易日：`{quality.get('buy_trade_date', '')}`
+- 卖出交易日：`{quality.get('sell_trade_date', '')}`
 - 候选池：`{quality.get('candidate_pool_version', '')}`
 - 模型：`{quality.get('model', '')}`
 - 生产状态：`research_only_not_promoted`
@@ -872,6 +909,7 @@ def build_doc(
 - 本轮新增的是 M7 研究版推荐报告，不新增生产策略；推荐名单不自动生成交易指令。
 - 数据质量沿用 M2/M5/M6 的 PIT 检查，本脚本只使用 `report_signal_date` 当日可观测特征，并只用该日期之前已完成标签的月份训练。
 - M9 数据完整性 gate 要求报告信号日存在 `next_trade_date`、推荐行全部 `buyable_tplus1_open`、名称非 UNKNOWN，且零覆盖/低覆盖字段不作为核心模型特征。
+- 月度交易时点按“本持有月最后一个交易日卖出、下一持有月首个交易日买入”展示；`sell_trade_date` 为下一次月末信号日。
 - 候选池使用 `U2_risk_sane` watchlist 口径，只做准入过滤；alpha 判断来自 `M6_xgboost_rank_ndcg` 排序分数。
 - 历史 baseline 改善证据来自 M6 walk-forward 附件；M6 结论仍是 watchlist，不进入生产。
 - 当前推荐月尚无未来收益标签，因此本报告不声称本月已跑赢市场；稳定性判断以历史 leaderboard / monthly_long / rank_ic / quantile_spread 为准。
