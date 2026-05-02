@@ -11,8 +11,9 @@ as daily OHLC CSV files.
 from __future__ import annotations
 
 import argparse
-import json
+import shlex
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,8 +25,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.run_monthly_selection_baselines import _format_markdown_table, _json_sanitize
-
+from scripts.research_identity import make_research_identity, slugify_token
+from scripts.run_monthly_selection_baselines import _format_markdown_table
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    utc_now_iso,
+    write_research_manifest,
+)
 
 DEFAULT_MODEL = "M8_regime_aware_fixed_policy__indcap3"
 DEFAULT_POOL = "U1_liquid_tradable"
@@ -63,6 +73,14 @@ def parse_args() -> argparse.Namespace:
 def _resolve_project_path(raw: str | Path) -> Path:
     p = Path(raw)
     return p if p.is_absolute() else ROOT / p
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(ROOT.resolve()))
+    except ValueError:
+        return str(p)
 
 
 def _to_float_series(values: Any) -> pd.Series:
@@ -365,6 +383,7 @@ def build_doc(
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
     monthly_path = _resolve_project_path(args.monthly_long)
     as_of = args.as_of_date.strip() or pd.Timestamp.now().strftime("%Y-%m-%d")
@@ -388,33 +407,12 @@ def main() -> int:
     summary.to_csv(paths["summary"], index=False)
     relative.to_csv(paths["relative"], index=False)
     series.to_csv(paths["series"], index=False)
-    manifest = {
-        "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
-        "result_type": "monthly_selection_benchmark_suite",
-        "monthly_long": str(monthly_path.relative_to(ROOT)) if monthly_path.is_relative_to(ROOT) else str(monthly_path),
-        "model": args.model,
-        "candidate_pool": args.candidate_pool,
-        "top_k": int(args.top_k),
-        "benchmark_policy": {
-            "primary": "csi1000 when index input is supplied",
-            "secondary": ["csi2000", "u1_candidate_pool_ew", "all_a_market_ew"],
-            "internal_alpha_benchmark": "u1_candidate_pool_ew",
-        },
-        "index_inputs": index_meta,
-        "artifacts": [
-            str(paths["summary"].relative_to(ROOT)),
-            str(paths["relative"].relative_to(ROOT)),
-            str(paths["series"].relative_to(ROOT)),
-            str(paths["doc"].relative_to(ROOT)),
-        ],
-    }
-    paths["manifest"].write_text(json.dumps(_json_sanitize(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
     artifact_paths = [
-        str(paths["summary"].relative_to(ROOT)),
-        str(paths["relative"].relative_to(ROOT)),
-        str(paths["series"].relative_to(ROOT)),
-        str(paths["manifest"].relative_to(ROOT)),
-        str(paths["doc"].relative_to(ROOT)),
+        _project_relative(paths["summary"]),
+        _project_relative(paths["relative"]),
+        _project_relative(paths["series"]),
+        _project_relative(paths["manifest"]),
+        _project_relative(paths["doc"]),
     ]
     paths["doc"].write_text(
         build_doc(
@@ -429,9 +427,127 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
+
+    # --- standard research contract ---
+    identity = make_research_identity(
+        result_type="monthly_selection_benchmark_suite",
+        research_topic="monthly_selection_benchmark_suite",
+        research_config_id=(
+            f"model_{slugify_token(args.model)}_pool_{slugify_token(args.candidate_pool)}"
+            f"_topk_{int(args.top_k)}"
+        ),
+        output_stem=output_stem,
+        parent_result_id="",
+    )
+    signal_dates = pd.to_datetime(monthly["signal_date"], errors="coerce").dropna()
+    data_slice = DataSlice(
+        dataset_name="monthly_selection_monthly_long",
+        source_tables=("monthly_selection_monthly_long",),
+        date_start=str(signal_dates.min().date()) if not signal_dates.empty else "",
+        date_end=str(signal_dates.max().date()) if not signal_dates.empty else "",
+        asof_trade_date=as_of,
+        signal_date_col="signal_date",
+        symbol_col="symbol",
+        candidate_pool_version=args.candidate_pool,
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id=args.model,
+        feature_columns=(),
+        label_columns=("topk_return", "market_ew_return", "candidate_pool_mean_return"),
+        pit_policy="derived_from_monthly_selection_research_outputs",
+        config_path=None,
+        extra={
+            "monthly_long_path": _project_relative(monthly_path),
+            "top_k": int(args.top_k),
+            "index_input_count": len(index_specs),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(paths["summary"]), "csv", False, "基准收益汇总"),
+        ArtifactRef("relative_csv", _project_relative(paths["relative"]), "csv", False, "相对基准表现"),
+        ArtifactRef("monthly_series_csv", _project_relative(paths["series"]), "csv", False, "月度收益序列"),
+        ArtifactRef("report_md", _project_relative(paths["doc"]), "md", False, "基准对比报告"),
+        ArtifactRef("manifest_json", _project_relative(paths["manifest"]), "json", False, "标准研究 manifest"),
+    )
+    strategy_summary = summary[summary["benchmark"].astype(str).eq("model_top20_net")]
+    strategy_row = strategy_summary.iloc[0].to_dict() if not strategy_summary.empty else {}
+    relative_u1 = relative[relative["benchmark"].astype(str).eq("u1_candidate_pool_ew")]
+    relative_u1_row = relative_u1.iloc[0].to_dict() if not relative_u1.empty else {}
+    metrics = {
+        "months": int(series["model_top20_net"].notna().sum()) if "model_top20_net" in series.columns else 0,
+        "benchmark_count": int(len(summary)),
+        "relative_benchmark_count": int(len(relative)),
+        "model_top20_net_total_return": strategy_row.get("total_return"),
+        "model_top20_net_annualized_return": strategy_row.get("annualized_return"),
+        "excess_vs_u1_total_return": relative_u1_row.get("excess_total_return"),
+        "information_ratio_vs_u1": relative_u1_row.get("information_ratio"),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(len(monthly) > 0 and signal_dates.notna().any()),
+            "monthly_rows": int(len(monthly)),
+            "date_start": data_slice.date_start,
+            "date_end": data_slice.date_end,
+        },
+        "benchmark_gate": {
+            "passed": bool({"u1_candidate_pool_ew", "all_a_market_ew"}.issubset(set(summary["benchmark"].astype(str)))),
+            "index_input_count": len(index_specs),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config={"config_path": "", "config_hash": None},
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "benchmark_policy": {
+                "primary": "csi1000 when index input is supplied",
+                "secondary": ["csi2000", "u1_candidate_pool_ew", "all_a_market_ew"],
+                "internal_alpha_benchmark": "u1_candidate_pool_ew",
+            },
+            "index_inputs": index_meta,
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["benchmark_suite_is_diagnostic_research_only"],
+        },
+        notes="Monthly selection benchmark comparison; does not change promoted config.",
+    )
+    write_research_manifest(
+        paths["manifest"],
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_result_type": "monthly_selection_benchmark_suite",
+            "legacy_artifacts": artifact_paths,
+            "monthly_long": _project_relative(monthly_path),
+            "model": args.model,
+            "candidate_pool": args.candidate_pool,
+            "top_k": int(args.top_k),
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(f"[benchmark-suite] summary={paths['summary']}")
     print(f"[benchmark-suite] relative={paths['relative']}")
     print(f"[benchmark-suite] series={paths['series']}")
+    print(f"[benchmark-suite] manifest={paths['manifest']}")
     print(f"[benchmark-suite] doc={paths['doc']}")
     return 0
 

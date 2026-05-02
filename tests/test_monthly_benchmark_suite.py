@@ -1,6 +1,10 @@
+import json
+import sys
+
 import pandas as pd
 import pytest
 
+import scripts.run_monthly_benchmark_suite as suite
 from scripts.run_monthly_benchmark_suite import (
     BenchmarkSpec,
     annualized_return,
@@ -78,3 +82,46 @@ def test_build_benchmark_suite_includes_internal_alpha_and_broad_ew():
     assert set(relative["benchmark"]) == {"u1_candidate_pool_ew", "all_a_market_ew"}
     assert "model_top20_net" in series.columns
     assert meta == []
+
+
+def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
+    monthly_path = tmp_path / "monthly.csv"
+    pd.DataFrame(
+        {
+            "signal_date": ["2024-01-31", "2024-02-29"],
+            "buy_trade_date": ["2024-02-01", "2024-03-01"],
+            "sell_trade_date": ["2024-02-29", "2024-03-29"],
+            "candidate_pool_version": ["U1_liquid_tradable", "U1_liquid_tradable"],
+            "model": ["M8_regime_aware_fixed_policy__indcap3", "M8_regime_aware_fixed_policy__indcap3"],
+            "top_k": [20, 20],
+            "topk_return": [0.05, -0.01],
+            "market_ew_return": [0.01, -0.03],
+            "candidate_pool_mean_return": [0.02, -0.02],
+            "cost_drag": [None, 0.001],
+        }
+    ).to_csv(monthly_path, index=False)
+    monkeypatch.setattr(suite, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_monthly_benchmark_suite.py",
+            "--monthly-long",
+            "monthly.csv",
+            "--results-dir",
+            "data/results",
+            "--as-of-date",
+            "2026-05-02",
+        ],
+    )
+
+    assert suite.main() == 0
+
+    manifest_path = tmp_path / "data/results/monthly_selection_benchmark_suite_2026-05-02_manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "research_result_v1"
+    assert payload["identity"]["research_topic"] == "monthly_selection_benchmark_suite"
+    assert payload["data_slices"][0]["date_start"] == "2024-01-31"
+    assert payload["metrics"]["months"] == 2
+    assert {item["name"] for item in payload["artifacts"]} >= {"summary_csv", "relative_csv", "report_md"}
+    assert (tmp_path / "data/experiments/research_results.jsonl").exists()

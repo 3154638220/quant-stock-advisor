@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.research_identity import make_research_identity
 from scripts.run_backtest_eval import (  # noqa: E402
     BacktestConfig,
     build_market_ew_benchmark,
@@ -35,7 +38,16 @@ from scripts.run_benchmark_gap_diagnostics import (  # noqa: E402
     summarize_monthly_excess,
 )
 from src.backtest.engine import run_backtest  # noqa: E402
-
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (  # noqa: E402
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 
 EXPOSURE_FEATURES: tuple[str, ...] = (
     "log_market_cap",
@@ -78,6 +90,14 @@ def parse_args() -> argparse.Namespace:
 def _resolve_path(path_like: str | Path) -> Path:
     p = Path(path_like).expanduser()
     return p if p.is_absolute() else PROJECT_ROOT / p
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(p)
 
 
 def _read_payload(path_like: str | Path) -> dict[str, Any]:
@@ -380,6 +400,7 @@ def _build_doc(
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     args = parse_args()
     g0_payload = _read_payload(args.g0_json)
     params = _params_from_payload(g0_payload)
@@ -525,6 +546,7 @@ def main() -> None:
     overlap_path = results_dir / f"{prefix}_selection_overlap.csv"
     delta_path = results_dir / f"{prefix}_monthly_delta.csv"
     summary_path = results_dir / f"{prefix}_summary.json"
+    manifest_path = results_dir / f"{prefix}_manifest.json"
     doc_path = docs_dir / f"{prefix}.md"
 
     monthly_all.to_csv(monthly_path, index=False)
@@ -575,6 +597,134 @@ def main() -> None:
         overlap=overlap,
     )
     doc_path.write_text(doc, encoding="utf-8")
+
+    # --- standard research contract ---
+    identity = make_research_identity(
+        result_type="p1_failure_diagnostics",
+        research_topic="p1_tree_groups",
+        research_config_id=str(g0_payload.get("research_config_id") or "p1_failure_diagnostics"),
+        output_stem=prefix,
+    )
+    data_slice = DataSlice(
+        dataset_name="p1_failure_diagnostics_backtest",
+        source_tables=("a_share_daily", "prepared_factors_cache", "p1_tree_bundle"),
+        date_start=str(params["start"]),
+        date_end=str(params["end"]),
+        asof_trade_date=str(params["end"]),
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="historical_p1_groups",
+        rebalance_rule=str(params["rebalance_rule"]),
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id="p1_tree_group_features",
+        feature_columns=tuple(sorted(set(EXPOSURE_FEATURES).union(*(set(spec.tree_features) for spec in specs)))),
+        label_columns=("strategy_return", "benchmark_return", "excess_return"),
+        pit_policy="uses_prepared_factor_cache_and_tree_bundle_from_source_results",
+        config_path=str(params["config"]),
+        extra={
+            "g0_json": _project_relative(_resolve_path(args.g0_json)),
+            "g1_json": _project_relative(_resolve_path(args.g1_json)),
+            "prepared_factors_cache": _project_relative(cache_path),
+            "group_count": len(specs),
+            "top_k": int(params["top_k"]),
+            "max_turnover": float(params["max_turnover"]),
+        },
+    )
+    artifacts = (
+        ArtifactRef("monthly_csv", _project_relative(monthly_path), "csv", False, "G0/G1 月度超额"),
+        ArtifactRef("yearly_csv", _project_relative(yearly_path), "csv", False, "年度失效汇总"),
+        ArtifactRef("capture_csv", _project_relative(capture_path), "csv", False, "上涨月捕获率"),
+        ArtifactRef("exposure_summary_csv", _project_relative(exposure_path), "csv", False, "持仓暴露汇总"),
+        ArtifactRef("rank_bucket_summary_csv", _project_relative(rank_path), "csv", False, "Top-K 与排名桶汇总"),
+        ArtifactRef("selection_overlap_csv", _project_relative(overlap_path), "csv", False, "G0/G1 换股收益"),
+        ArtifactRef("monthly_delta_csv", _project_relative(delta_path), "csv", False, "G1-G0 月度差异"),
+        ArtifactRef("summary_json", _project_relative(summary_path), "json", False, "legacy 诊断摘要"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "P1 失效诊断报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False, "标准研究 manifest"),
+    )
+    metrics = {
+        "monthly_rows": int(len(monthly_all)),
+        "yearly_rows": int(len(yearly_all)),
+        "capture_rows": int(len(capture_all)),
+        "exposure_rows": int(len(exposure_all)),
+        "rank_rows": int(len(rank_all)),
+        "overlap_rows": int(len(overlap)),
+        "monthly_delta_rows": int(len(monthly_delta)),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(not daily_df.empty and not factors.empty),
+            "daily_rows": int(len(daily_df)),
+            "factor_rows": int(len(factors)),
+        },
+        "execution_gate": {
+            "passed": bool(set(weights_by_group) == {"G0", "G1"} and not monthly_all.empty),
+            "groups": sorted(weights_by_group),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(
+            config_path=str(params["config"]),
+            resolved_config=cfg,
+            sections=("paths", "signals", "portfolio", "backtest", "transaction_costs", "prefilter"),
+        ),
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "source_params": params,
+            "groups": [
+                {
+                    "group": spec.group,
+                    "source_json": _project_relative(spec.result_json),
+                    "bundle_dir": spec.bundle_dir,
+                    "feature_count": len(spec.tree_features),
+                }
+                for spec in specs
+            ],
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifacts,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p1_failure_diagnostics_is_historical_research_only"],
+        },
+        notes="Historical P1 G0/G1 failure diagnostics; not a promotion candidate.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_artifacts": [
+                _project_relative(monthly_path),
+                _project_relative(yearly_path),
+                _project_relative(capture_path),
+                _project_relative(exposure_path),
+                _project_relative(rank_path),
+                _project_relative(overlap_path),
+                _project_relative(delta_path),
+                _project_relative(summary_path),
+                _project_relative(doc_path),
+            ],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print("[5/5] done", flush=True)
     print(json.dumps(_json_sanitize(payload), ensure_ascii=False, indent=2))
 

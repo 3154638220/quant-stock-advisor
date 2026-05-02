@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import shlex
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-import re
 
 import numpy as np
 import pandas as pd
@@ -33,8 +35,8 @@ try:
         _attach_pit_fundamentals,
         _rebalance_dates,
         attach_universe_filter,
-        build_market_ew_benchmark,
         build_asset_returns,
+        build_market_ew_benchmark,
         build_open_to_open_returns,
         build_regime_weight_overrides,
         build_score,
@@ -73,7 +75,17 @@ except ModuleNotFoundError as exc:
     run_backtest = _missing_runtime_dependency("run_backtest", exc)
     transaction_cost_params_from_mapping = _missing_runtime_dependency("transaction_cost_params_from_mapping", exc)
     walk_forward_backtest = _missing_runtime_dependency("walk_forward_backtest", exc)
+from scripts.research_identity import make_research_identity, slugify_token
 from src.features.factor_eval import rank_ic
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    utc_now_iso,
+    write_research_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -519,6 +531,7 @@ def _build_doc(
 
 def main() -> None:
     args = parse_args()
+    started_at = time.perf_counter()
     end_date = args.end or pd.Timestamp.today().strftime("%Y-%m-%d")
     output_prefix = str(args.output_prefix).strip()
     selected_families = [item.strip() for item in str(args.families).split(",") if item.strip()]
@@ -806,24 +819,126 @@ def main() -> None:
     print(f"[3/4] admission: {admission_path.relative_to(PROJECT_ROOT)}", flush=True)
     print(f"[3/4] doc: {doc_path.relative_to(PROJECT_ROOT)}", flush=True)
 
+    # --- standard research contract ---
+    duration_sec = round(time.perf_counter() - started_at, 6)
+
+    def _project_relative(p: str | Path) -> str:
+        return str(Path(p).resolve().relative_to(PROJECT_ROOT.resolve()))
+
     manifest_path = results_dir / f"{output_prefix}_manifest.json"
-    manifest = {
-        "generated_at": pd.Timestamp.utcnow().isoformat(),
-        "research_topic": research_topic,
-        "research_config_id": research_config_id,
-        "output_stem": output_stem,
-        "result_type": "factor_admission_manifest",
+    identity = make_research_identity(
+        result_type="factor_admission_validation",
+        research_topic=research_topic,
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+    )
+    data_slice = DataSlice(
+        dataset_name="factor_admission_validation_backtest",
+        source_tables=("a_share_daily",),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="universe_filtered",
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id=None,
+        feature_columns=tuple(candidate_factors),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=str(selected_scenarios[0].config_path) if selected_scenarios else "",
+        extra={
+            "selected_families": selected_families,
+            "lookback_days": int(args.lookback_days),
+            "min_hist_days": int(args.min_hist_days),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "准入验证汇总"),
+        ArtifactRef("gate_csv", _project_relative(gate_path), "csv", False, "准入 gate 表"),
+        ArtifactRef("admission_csv", _project_relative(admission_path), "csv", False, "准入判定表"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "准入验证报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    ) + tuple(
+        ArtifactRef(
+            f"scenario_{slugify_token(s.key)}_json",
+            _project_relative(results_dir / f"{output_prefix}_{s.key}.json"),
+            "json",
+            False,
+            f"场景 {s.label} 回测详情",
+        )
+        for s in selected_scenarios
+    )
+    pass_count = int((admission_df["admission_status"] == "pass").sum()) if "admission_status" in admission_df.columns else 0
+    metrics = {
+        "scenario_count": len(selected_scenarios),
+        "candidate_count": len(candidate_factors),
+        "admission_pass_count": pass_count,
         "selected_families": selected_families,
-        "scenarios": [s.__dict__ for s in selected_scenarios],
-        "artifacts": [
-            str(summary_path.relative_to(PROJECT_ROOT)),
-            str(gate_path.relative_to(PROJECT_ROOT)),
-            str(admission_path.relative_to(PROJECT_ROOT)),
-            str(doc_path.relative_to(PROJECT_ROOT)),
-        ]
-        + [str((results_dir / f"{output_prefix}_{s.key}.json").relative_to(PROJECT_ROOT)) for s in selected_scenarios],
     }
-    manifest_path.write_text(json.dumps(_json_sanitize(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
+    gates = {
+        "data_gate": {
+            "passed": bool(daily_df is not None and len(daily_df) > 0),
+            "daily_rows": int(len(daily_df)) if daily_df is not None else 0,
+        },
+        "execution_gate": {
+            "passed": bool(len(summary_rows) == len(selected_scenarios)),
+            "expected": len(selected_scenarios),
+            "completed": len(summary_rows),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=duration_sec,
+        seed=None,
+        data_slices=(data_slice,),
+        config={"config_path": str(selected_scenarios[0].config_path) if selected_scenarios else ""},
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "scenarios": [s.__dict__ for s in selected_scenarios],
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["factor_admission_validation_is_diagnostic_research_only"],
+        },
+        notes=f"Factor admission validation: {len(selected_scenarios)} scenarios, {len(candidate_factors)} candidates.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "research_topic": research_topic,
+            "research_config_id": research_config_id,
+            "output_stem": output_stem,
+            "selected_families": selected_families,
+            "scenarios": [s.__dict__ for s in selected_scenarios],
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(gate_path),
+                _project_relative(admission_path),
+                _project_relative(doc_path),
+            ]
+            + [_project_relative(results_dir / f"{output_prefix}_{s.key}.json") for s in selected_scenarios],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(f"[4/4] manifest: {manifest_path.relative_to(PROJECT_ROOT)}", flush=True)
 
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +19,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.research_identity import make_research_identity, slugify_token
 from scripts.run_backtest_eval import (
     BacktestConfig,
     _attach_pit_fundamentals,
@@ -33,7 +36,16 @@ from scripts.run_backtest_eval import (
     run_backtest,
     transaction_cost_params_from_mapping,
 )
-
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 
 FEATURE_SPECS: tuple[tuple[str, str], ...] = (
     ("log_market_cap", "log_market_cap"),
@@ -581,6 +593,7 @@ def _build_doc(
 
 def main() -> None:
     args = parse_args()
+    started_at = time.perf_counter()
     end_date = args.end or pd.Timestamp.today().strftime("%Y-%m-%d")
     output_prefix = str(args.output_prefix).strip()
     results_dir = PROJECT_ROOT / "data/results"
@@ -757,6 +770,118 @@ def main() -> None:
         output_prefix=output_prefix,
     )
     doc_path.write_text(doc_text, encoding="utf-8")
+
+    # --- standard research contract ---
+    duration_sec = round(time.perf_counter() - started_at, 6)
+
+    def _project_relative(p: str | Path) -> str:
+        return str(Path(p).resolve().relative_to(PROJECT_ROOT.resolve()))
+
+    identity = make_research_identity(
+        result_type="benchmark_gap_diagnostics",
+        research_topic="benchmark_gap_diagnostics",
+        research_config_id=f"v3_gap_topk_{top_k}_rb_{slugify_token(rebalance_rule)}",
+        output_stem=slugify_token(output_prefix),
+    )
+    data_slice = DataSlice(
+        dataset_name="benchmark_gap_diagnostics",
+        source_tables=("a_share_daily",),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="universe_filtered",
+        rebalance_rule=rebalance_rule,
+        execution_mode=execution_mode,
+        label_return_mode="open_to_open",
+        feature_set_id=None,
+        feature_columns=tuple(dict(FEATURE_SPECS).values()),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=config_source,
+        extra={
+            "top_k": top_k,
+            "max_turnover": max_turnover,
+            "lookback_days": int(args.lookback_days),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_json", _project_relative(summary_path), "json", False, "归因汇总"),
+        ArtifactRef("monthly_csv", _project_relative(monthly_path), "csv", False, "月度分解"),
+        ArtifactRef("capture_csv", _project_relative(capture_path), "csv", False, "捕获率"),
+        ArtifactRef("exposure_detail_csv", _project_relative(exposure_detail_path), "csv", False, "暴露明细"),
+        ArtifactRef("exposure_summary_csv", _project_relative(exposure_summary_path), "csv", False, "暴露汇总"),
+        ArtifactRef("rank_detail_csv", _project_relative(rank_detail_path), "csv", False, "排名明细"),
+        ArtifactRef("rank_bucket_summary_csv", _project_relative(rank_summary_path), "csv", False, "排名桶汇总"),
+        ArtifactRef("threshold_csv", _project_relative(threshold_path), "csv", False, "阈值分析"),
+        ArtifactRef("yearly_csv", _project_relative(yearly_path), "csv", False, "年度切片"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "归因报告"),
+        ArtifactRef("manifest_json", _project_relative(results_dir / f"{output_prefix}_manifest.json"), "json", False),
+    )
+    metrics = {
+        "monthly_rows": int(len(monthly_df)),
+        "capture_rows": int(len(capture_df)),
+        "annualized_return": float(res.panel.annualized_return),
+        "sharpe_ratio": float(res.panel.sharpe_ratio),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(daily_df is not None and len(daily_df) > 0),
+        },
+        "execution_gate": {
+            "passed": bool(not monthly_df.empty),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    manifest_path = results_dir / f"{output_prefix}_manifest.json"
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=duration_sec,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(
+            config_path=Path(config_source) if config_source and not config_source.startswith("/") else None,
+            resolved_config=cfg,
+            sections=("paths", "database", "portfolio", "backtest", "prefilter"),
+        ),
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["benchmark_gap_diagnostics_is_diagnostic_research_only"],
+        },
+        notes="V3 benchmark gap attribution diagnostics.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(monthly_path),
+                _project_relative(capture_path),
+                _project_relative(exposure_summary_path),
+                _project_relative(rank_summary_path),
+                _project_relative(doc_path),
+            ],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
 
     print(f"  summary -> {summary_path}", flush=True)
     print(f"  doc     -> {doc_path}", flush=True)

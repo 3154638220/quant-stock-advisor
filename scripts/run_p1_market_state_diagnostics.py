@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.run_backtest_eval import build_market_ew_benchmark, build_open_to_open_returns, load_daily_from_duckdb  # noqa: E402
+from scripts.research_identity import make_research_identity
+from scripts.run_backtest_eval import (  # noqa: E402
+    build_market_ew_benchmark,
+    build_open_to_open_returns,
+    load_daily_from_duckdb,
+)
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (  # noqa: E402
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.settings import load_config  # noqa: E402
 
 
@@ -38,6 +55,14 @@ def parse_args() -> argparse.Namespace:
 def _resolve(path_like: str | Path) -> Path:
     p = Path(path_like).expanduser()
     return p if p.is_absolute() else ROOT / p
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(ROOT.resolve()))
+    except ValueError:
+        return str(p)
 
 
 def _json_sanitize(obj: Any) -> Any:
@@ -287,6 +312,7 @@ def _build_doc(
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
@@ -346,6 +372,7 @@ def main() -> int:
     key_year_state_path = results_dir / f"{prefix}_key_year_state.csv"
     worst_path = results_dir / f"{prefix}_worst_months.csv"
     json_path = results_dir / f"{prefix}.json"
+    manifest_path = results_dir / f"{prefix}_manifest.json"
     doc_path = docs_dir / f"{prefix}.md"
 
     merged.to_csv(monthly_state_path, index=False)
@@ -396,6 +423,121 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
+
+    # --- standard research contract ---
+    identity = make_research_identity(
+        result_type="p1_market_state_diagnostics",
+        research_topic="p1_tree_groups",
+        research_config_id="market_relative_state_diagnostics",
+        output_stem=prefix,
+        parent_result_id="",
+    )
+    data_slice = DataSlice(
+        dataset_name="p1_market_state_diagnostics",
+        source_tables=("a_share_daily", "p1_marketrel_monthly", "p1_marketrel_monthly_delta"),
+        date_start=start,
+        date_end=end,
+        asof_trade_date=end,
+        signal_date_col="month_end",
+        symbol_col="symbol",
+        candidate_pool_version="historical_p1_groups",
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id="market_state_return_vol_breadth",
+        feature_columns=("benchmark_return", "benchmark_daily_vol", "benchmark_up_day_share", "breadth_positive_share"),
+        label_columns=("strategy_return", "benchmark_return", "excess_return", "g1_minus_g0_excess_return"),
+        pit_policy="diagnostic_join_on_existing_monthly_outputs",
+        config_path=args.config,
+        extra={
+            "monthly_csv": _project_relative(_resolve(args.monthly_csv)),
+            "monthly_delta_csv": _project_relative(_resolve(args.monthly_delta_csv)),
+            "benchmark_min_history_days": int(args.benchmark_min_history_days),
+            "key_years": sorted(key_years),
+        },
+    )
+    artifacts = (
+        ArtifactRef("monthly_state_csv", _project_relative(monthly_state_path), "csv", False, "月度市场状态合并表"),
+        ArtifactRef("state_summary_csv", _project_relative(state_summary_path), "csv", False, "市场状态分层汇总"),
+        ArtifactRef("delta_state_summary_csv", _project_relative(delta_summary_path), "csv", False, "G1-G0 状态分层汇总"),
+        ArtifactRef("key_year_state_csv", _project_relative(key_year_state_path), "csv", False, "关键年份状态切片"),
+        ArtifactRef("worst_months_csv", _project_relative(worst_path), "csv", False, "G1 相对 G0 最差月份"),
+        ArtifactRef("summary_json", _project_relative(json_path), "json", False, "legacy 诊断摘要"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "市场状态诊断报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False, "标准研究 manifest"),
+    )
+    metrics = {
+        "monthly_rows": int(len(merged)),
+        "state_summary_rows": int(len(state_summary)),
+        "delta_state_summary_rows": int(len(delta_summary)),
+        "key_year_state_rows": int(len(key_year_state)),
+        "worst_month_rows": int(len(worst_months)),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(not daily.empty and not state.empty and not merged.empty),
+            "daily_rows": int(len(daily)),
+            "state_rows": int(len(state)),
+            "monthly_rows": int(len(monthly)),
+        },
+        "execution_gate": {
+            "passed": bool(not delta_summary.empty),
+            "delta_rows": int(len(delta)),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(
+            config_path=args.config,
+            resolved_config=cfg,
+            sections=("paths", "signals", "portfolio", "backtest", "transaction_costs"),
+        ),
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "start": start,
+            "end": end,
+            "key_years": sorted(key_years),
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifacts,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p1_market_state_diagnostics_is_historical_research_only"],
+        },
+        notes="Historical P1 market-relative state diagnostics; does not change defaults.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_artifacts": [
+                _project_relative(monthly_state_path),
+                _project_relative(state_summary_path),
+                _project_relative(delta_summary_path),
+                _project_relative(key_year_state_path),
+                _project_relative(worst_path),
+                _project_relative(json_path),
+                _project_relative(doc_path),
+            ],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(json.dumps(_json_sanitize(payload), ensure_ascii=False, indent=2), flush=True)
     return 0
 

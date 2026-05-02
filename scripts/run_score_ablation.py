@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +19,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.research_identity import make_research_identity, slugify_token
 from scripts.run_backtest_eval import (
     BacktestConfig,
     _attach_pit_fundamentals,
@@ -31,6 +34,7 @@ from scripts.run_backtest_eval import (
     build_topk_weights,
     compare_full_vs_slices,
     compute_factors,
+    contiguous_time_splits,
     load_config,
     load_daily_from_duckdb,
     load_factor_ic_summary,
@@ -41,7 +45,15 @@ from scripts.run_backtest_eval import (
     run_backtest,
     transaction_cost_params_from_mapping,
     walk_forward_backtest,
-    contiguous_time_splits,
+)
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    utc_now_iso,
+    write_research_manifest,
 )
 
 
@@ -266,6 +278,7 @@ def _build_report_payload(
 
 def main() -> None:
     args = parse_args()
+    started_at = time.perf_counter()
     end_date = args.end or pd.Timestamp.today().strftime("%Y-%m-%d")
     output_prefix = str(args.output_prefix).strip()
     results_dir = PROJECT_ROOT / "data/results"
@@ -589,6 +602,121 @@ def main() -> None:
     ]
     doc_path = docs_dir / f"{output_prefix}.md"
     doc_path.write_text("\n".join(doc_lines), encoding="utf-8")
+
+    # --- standard research contract ---
+    duration_sec = round(time.perf_counter() - started_at, 6)
+
+    def _project_relative(p: str | Path) -> str:
+        return str(Path(p).resolve().relative_to(PROJECT_ROOT.resolve()))
+
+    scenario_keys = [s.key for s in scenarios]
+    identity = make_research_identity(
+        result_type="score_ablation",
+        research_topic="score_ablation",
+        research_config_id=f"scenarios_{slugify_token('-'.join(scenario_keys[:4]))}_topk_20",
+        output_stem=slugify_token(output_prefix),
+    )
+    data_slice = DataSlice(
+        dataset_name="score_ablation_backtest",
+        source_tables=("a_share_daily",),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="universe_filtered",
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id=None,
+        feature_columns=(),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path="config.yaml.backtest.s3_dual_7030",
+        extra={
+            "scenario_keys": scenario_keys,
+            "lookback_days": int(args.lookback_days),
+            "min_hist_days": int(args.min_hist_days),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "消融汇总"),
+        ArtifactRef("coverage_summary_csv", _project_relative(coverage_summary_path), "csv", False, "覆盖汇总"),
+        ArtifactRef("score_corr_csv", _project_relative(score_corr_path), "csv", False, "分数相关性"),
+        ArtifactRef("overlap_summary_csv", _project_relative(overlap_summary_path), "csv", False, "重合度汇总"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "消融报告"),
+        ArtifactRef("manifest_json", _project_relative(results_dir / f"{output_prefix}_manifest.json"), "json", False),
+    ) + tuple(
+        ArtifactRef(
+            f"scenario_{slugify_token(s.key)}_json",
+            _project_relative(results_dir / f"{output_prefix}_{s.key}.json"),
+            "json",
+            False,
+            f"场景 {s.label} 回测详情",
+        )
+        for s in scenarios
+    )
+    metrics = {
+        "scenario_count": len(scenarios),
+        "summary_rows": int(len(summary_df)),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(daily_df is not None and len(daily_df) > 0),
+        },
+        "execution_gate": {
+            "passed": bool(len(summary_rows) >= len(scenarios)),
+            "expected": len(scenarios),
+            "completed": len(summary_rows),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    manifest_path = results_dir / f"{output_prefix}_manifest.json"
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=duration_sec,
+        seed=None,
+        data_slices=(data_slice,),
+        config={"config_path": "config.yaml.backtest.s3_dual_7030"},
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "scenarios": [s.key for s in scenarios],
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["score_ablation_is_diagnostic_research_only"],
+        },
+        notes=f"Score ablation: {len(scenarios)} scenarios.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(coverage_summary_path),
+                _project_relative(score_corr_path),
+                _project_relative(overlap_summary_path),
+                _project_relative(doc_path),
+            ]
+            + [_project_relative(results_dir / f"{output_prefix}_{s.key}.json") for s in scenarios],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(f"[ok] summary: {summary_path.relative_to(PROJECT_ROOT)}")
     print(f"[ok] doc: {doc_path.relative_to(PROJECT_ROOT)}")
 

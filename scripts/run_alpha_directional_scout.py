@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +16,13 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.run_alpha_factor_scout import DEFAULT_BASELINE_FACTOR, infer_candidate_factors
 from scripts.light_strategy_proxy import (
     build_light_proxy_period_detail,
     infer_periods_per_year,
     summarize_light_strategy_proxy,
 )
-from scripts.research_identity import build_light_research_identity
+from scripts.research_identity import build_light_research_identity, make_research_identity, slugify_token
+from scripts.run_alpha_factor_scout import DEFAULT_BASELINE_FACTOR, infer_candidate_factors
 from scripts.run_backtest_eval import (
     BacktestConfig,
     _prepared_factors_cache_expected_meta,
@@ -49,6 +51,16 @@ from scripts.run_factor_admission_validation import (
     _summarize_relative_to_benchmark,
     build_admission_table,
     compute_factor_gate_table,
+)
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
 )
 
 
@@ -264,6 +276,7 @@ def _build_doc(
 
 def main() -> None:
     args = parse_args()
+    started_at = time.perf_counter()
     end_date = args.end or pd.Timestamp.today().strftime("%Y-%m-%d")
     output_prefix = str(args.output_prefix).strip()
     baseline_factor = str(args.baseline_factor).strip()
@@ -622,31 +635,144 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    manifest_path = results_dir / f"{output_prefix}_manifest.json"
-    manifest = {
-        "generated_at": pd.Timestamp.utcnow().isoformat(),
-        "result_type": "research_manifest",
-        **research_identity,
+    # --- standard research contract ---
+    duration_sec = round(time.perf_counter() - started_at, 6)
+
+    def _project_relative(p: str | Path) -> str:
+        return str(Path(p).resolve().relative_to(PROJECT_ROOT.resolve()))
+
+    identity = make_research_identity(
+        result_type="alpha_directional_scout",
+        research_topic=research_identity["research_topic"],
+        research_config_id=research_identity["research_config_id"],
+        output_stem=research_identity["output_stem"],
+    )
+    data_slice = DataSlice(
+        dataset_name="alpha_directional_scout_backtest",
+        source_tables=("a_share_daily",),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="universe_filtered",
+        rebalance_rule=rebalance_rule,
+        execution_mode=execution_mode,
+        label_return_mode="open_to_open",
+        feature_set_id=None,
+        feature_columns=tuple(flip_candidates),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=config_source,
+        extra={
+            "baseline_factor": baseline_factor,
+            "blend_weights": blend_weights,
+            "close21_max_ic": float(args.close21_max_ic),
+            "open1_max_ic": float(args.open1_max_ic),
+            "candidate_source_desc": candidate_source_desc,
+            "lookback_days": int(args.lookback_days),
+            "factors_cache_hit": factors_cache_hit if prepared_factors_cache is not None else None,
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "directional 汇总表"),
+        ArtifactRef("factor_gate_csv", _project_relative(gate_path), "csv", False, "directional gate 表"),
+        ArtifactRef("scout_csv", _project_relative(scout_path), "csv", False, "directional scout 准入表"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "directional scout 报告"),
+        ArtifactRef("manifest_json", _project_relative(results_dir / f"{output_prefix}_manifest.json"), "json", False),
+    ) + tuple(
+        ArtifactRef(
+            f"scenario_{slugify_token(scenario['scenario'])}_json",
+            _project_relative(results_dir / f"{output_prefix}_{scenario['scenario']}.json"),
+            "json",
+            False,
+            f"场景 {scenario['scenario']} 回测详情",
+        )
+        for scenario in scenario_defs
+    )
+
+    baseline_row = summary_df[summary_df["is_baseline"]].head(1)
+    scout_pass_count = int((scout_df["scout_status"] == "pass").sum()) if "scout_status" in scout_df.columns else 0
+    metrics = {
+        "flip_candidate_count": len(flip_candidates),
+        "scenario_count": len(scenario_defs),
+        "scout_pass_count": scout_pass_count,
         "baseline_factor": baseline_factor,
-        "candidate_source_desc": candidate_source_desc,
-        "flip_candidates": flip_candidates,
-        "artifacts": [
-            str(summary_path.relative_to(PROJECT_ROOT)),
-            str(gate_path.relative_to(PROJECT_ROOT)),
-            str(scout_path.relative_to(PROJECT_ROOT)),
-            str(doc_path.relative_to(PROJECT_ROOT)),
-        ]
-        + [
-            str((results_dir / f"{output_prefix}_{scenario['scenario']}.json").relative_to(PROJECT_ROOT))
-            for scenario in scenario_defs
-        ],
+        "baseline_annualized_excess_vs_market": float(baseline_row["annualized_excess_vs_market"].iloc[0])
+        if not baseline_row.empty
+        else None,
     }
-    manifest_path.write_text(json.dumps(_json_sanitize(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
+    gates = {
+        "data_gate": {
+            "passed": bool(daily_df is not None and len(daily_df) > 0),
+            "daily_rows": int(len(daily_df)),
+            "factors_rows": int(len(scenario_factors)),
+        },
+        "execution_gate": {
+            "passed": bool(len(summary_rows) == len(scenario_defs)),
+            "expected": len(scenario_defs),
+            "completed": len(summary_rows),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    config_info = config_snapshot(
+        config_path=PROJECT_ROOT / config_source if config_source and not config_source.startswith("/") else Path(config_source) if config_source else None,
+        resolved_config=cfg,
+        sections=("paths", "database", "portfolio", "backtest", "transaction_costs", "prefilter"),
+    )
+    config_info["config_path"] = config_source or ""
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=duration_sec,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_info,
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["alpha_directional_scout_is_diagnostic_research_only"],
+        },
+        notes=f"Alpha directional scout: {len(flip_candidates)} flip candidates from {candidate_source_desc}.",
+    )
+    manifest_path_resolved = results_dir / f"{output_prefix}_manifest.json"
+    write_research_manifest(
+        manifest_path_resolved,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "baseline_factor": baseline_factor,
+            "candidate_source_desc": candidate_source_desc,
+            "flip_candidates": flip_candidates,
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(gate_path),
+                _project_relative(scout_path),
+                _project_relative(doc_path),
+            ]
+            + [_project_relative(results_dir / f"{output_prefix}_{scenario['scenario']}.json") for scenario in scenario_defs],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(f"[3/4] summary: {summary_path.relative_to(PROJECT_ROOT)}", flush=True)
     print(f"[3/4] gate: {gate_path.relative_to(PROJECT_ROOT)}", flush=True)
     print(f"[3/4] scout: {scout_path.relative_to(PROJECT_ROOT)}", flush=True)
     print(f"[3/4] doc: {doc_path.relative_to(PROJECT_ROOT)}", flush=True)
-    print(f"[4/4] manifest: {manifest_path.relative_to(PROJECT_ROOT)}", flush=True)
+    print(f"[4/4] manifest: {manifest_path_resolved.relative_to(PROJECT_ROOT)}", flush=True)
 
 
 if __name__ == "__main__":

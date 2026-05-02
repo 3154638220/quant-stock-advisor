@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +18,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.research_identity import make_research_identity, slugify_token
 from scripts.run_backtest_eval import (
     BacktestConfig,
     _attach_pit_fundamentals,
@@ -48,6 +51,24 @@ from scripts.run_score_ablation import (
     _weights_to_membership,
     summarize_overlap,
 )
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(p)
 
 
 @dataclass(frozen=True)
@@ -207,6 +228,7 @@ def build_doc(summary_df: pd.DataFrame, overlap_summary_df: pd.DataFrame, output
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     args = parse_args()
     end_date = args.end or pd.Timestamp.today().strftime("%Y-%m-%d")
     output_prefix = str(args.output_prefix).strip()
@@ -475,17 +497,127 @@ def main() -> None:
     print(f"[3/4] doc: {doc_path.relative_to(PROJECT_ROOT)}", flush=True)
 
     manifest_path = results_dir / f"{output_prefix}_manifest.json"
-    manifest = {
-        "generated_at": pd.Timestamp.utcnow().isoformat(),
-        "scenarios": [s.__dict__ for s in scenarios],
-        "artifacts": [
-            str(summary_path.relative_to(PROJECT_ROOT)),
-            str(overlap_path.relative_to(PROJECT_ROOT)),
-            str(doc_path.relative_to(PROJECT_ROOT)),
-        ]
-        + [str((results_dir / f"{output_prefix}_{s.key}.json").relative_to(PROJECT_ROOT)) for s in scenarios],
+
+    # --- standard research contract ---
+    scenario_keys = [s.key for s in scenarios]
+    identity = make_research_identity(
+        result_type="p1_residual_diagnostics",
+        research_topic="p1_residual_diagnostics",
+        research_config_id=f"scenarios_{slugify_token('-'.join(scenario_keys))}_topk_scenario_defined",
+        output_stem=output_prefix,
+    )
+    data_slice = DataSlice(
+        dataset_name="p1_residual_diagnostics_backtest",
+        source_tables=("a_share_daily", "pit_fundamental"),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="scenario_defined",
+        rebalance_rule="M",
+        execution_mode="scenario_defined",
+        label_return_mode="open_to_open_or_configured_close_to_close",
+        feature_set_id="p1_residual_core_factors",
+        feature_columns=tuple(str(c) for c in factors.columns if c not in {"symbol", "trade_date"}),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only_with_pit_fundamental_attach",
+        config_path=",".join(s.config_path for s in scenarios),
+        extra={
+            "scenario_keys": scenario_keys,
+            "lookback_days": int(args.lookback_days),
+            "min_hist_days": int(args.min_hist_days),
+            "wf_train_window": int(args.wf_train_window),
+            "wf_test_window": int(args.wf_test_window),
+            "wf_step_window": int(args.wf_step_window),
+        },
+    )
+    scenario_json_paths = [results_dir / f"{output_prefix}_{s.key}.json" for s in scenarios]
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "P1 残余诊断汇总"),
+        ArtifactRef("topk_overlap_summary_csv", _project_relative(overlap_path), "csv", False, "TopK 持仓重合度汇总"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "P1 残余优势诊断报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False, "标准研究 manifest"),
+    ) + tuple(
+        ArtifactRef(
+            f"scenario_{slugify_token(s.key)}_json",
+            _project_relative(path),
+            "json",
+            False,
+            f"场景 {s.label} 回测详情",
+        )
+        for s, path in zip(scenarios, scenario_json_paths)
+    )
+    metrics = {
+        "scenario_count": int(len(scenarios)),
+        "summary_rows": int(len(summary_df)),
+        "overlap_summary_rows": int(len(overlap_summary_df)),
     }
-    manifest_path.write_text(json.dumps(_json_sanitize(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
+    if "scenario" in summary_df.columns and "annualized_return" in summary_df.columns:
+        reference = next((s for s in scenarios if s.is_reference), None)
+        if reference is not None:
+            ref_rows = summary_df[summary_df["scenario"].astype(str).eq(reference.label)]
+            if not ref_rows.empty:
+                metrics["reference_annualized_return"] = ref_rows.iloc[0].get("annualized_return")
+    gates = {
+        "data_gate": {
+            "passed": bool(not daily_df.empty and not factors.empty),
+            "daily_rows": int(len(daily_df)),
+            "factor_rows": int(len(factors)),
+        },
+        "execution_gate": {
+            "passed": bool(len(summary_df) >= len(scenarios)),
+            "expected_scenarios": int(len(scenarios)),
+            "completed_scenarios": int(len(summary_df)),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config={
+            "base_config": config_snapshot(config_path="config.yaml.backtest.r1_s2_baseline", resolved_config=base_cfg, sections=("paths",)),
+            "scenario_configs": {s.key: config_snapshot(config_path=s.config_path) for s in scenarios},
+        },
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "scenarios": [s.__dict__ for s in scenarios],
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p1_residual_diagnostics_is_historical_research_only"],
+        },
+        notes="Historical P1 residual diagnostics; not a promotion candidate.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(overlap_path),
+                _project_relative(doc_path),
+            ]
+            + [_project_relative(path) for path in scenario_json_paths],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(f"[4/4] manifest: {manifest_path.relative_to(PROJECT_ROOT)}", flush=True)
 
 

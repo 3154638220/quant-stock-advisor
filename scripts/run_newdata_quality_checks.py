@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 from pathlib import Path
 
 import duckdb
@@ -15,11 +17,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.research_identity import make_research_identity, slugify_token
 from src.data_fetcher.data_quality import (
     run_fund_flow_quality_checks,
     run_shareholder_quality_checks,
 )
-from scripts.research_identity import slugify_token
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.settings import load_config, resolve_config_path
 
 
@@ -209,6 +221,7 @@ def _build_doc(
 
 def main() -> int:
     args = parse_args()
+    started_at = time.perf_counter()
     config_source = str(resolve_config_path(args.config)) if args.config is not None else "default_config_lookup"
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
@@ -338,21 +351,114 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
-    manifest = {
-        "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
-        "result_type": "newdata_quality_manifest",
-        "research_topic": research_topic,
-        "research_config_id": research_config_id,
-        "output_stem": output_stem,
-        "config_source": config_source,
+
+    # --- standard research contract ---
+    duration_sec = round(time.perf_counter() - started_at, 6)
+
+    def _project_relative(p: str | Path) -> str:
+        return str(Path(p).resolve().relative_to(ROOT.resolve()))
+
+    identity = make_research_identity(
+        result_type="newdata_quality_checks",
+        research_topic=research_topic,
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+    )
+    data_slice = DataSlice(
+        dataset_name="newdata_quality_checks",
+        source_tables=tuple(args.families.split(",")),
+        date_start="",
+        date_end="",
+        asof_trade_date=None,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version=None,
+        rebalance_rule="",
+        execution_mode="",
+        label_return_mode=None,
+        feature_set_id=None,
+        feature_columns=(),
+        label_columns=(),
+        pit_policy="unknown",
+        config_path=config_source,
+        extra={
+            "db_path": db_path,
+            "flow_table": args.flow_table,
+            "shareholder_table": args.shareholder_table,
+            "daily_table": args.daily_table,
+            "shareholder_fallback_lag_days": int(args.shareholder_fallback_lag_days),
+            "min_effective_width": int(args.min_effective_width),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "质量检查汇总"),
+        ArtifactRef("report_json", _project_relative(json_path), "json", False, "质量检查 JSON"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "质量检查报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    )
+    ok_count = sum(1 for row in report_rows if row.get("ok"))
+    total_rows_sum = sum(int(row.get("total_rows") or 0) for row in report_rows)
+    metrics = {
         "families": families,
-        "artifacts": [
-            str(summary_path.relative_to(ROOT)),
-            str(json_path.relative_to(ROOT)),
-            str(doc_path.relative_to(ROOT)),
-        ],
+        "family_count": len(families),
+        "ok_family_count": ok_count,
+        "total_rows_sum": total_rows_sum,
     }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    gates = {
+        "data_gate": {
+            "passed": bool(ok_count == len(families)),
+            "ok_count": ok_count,
+            "expected": len(families),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    config_info = config_snapshot(
+        config_path=Path(config_source) if config_source and config_source != "default_config_lookup" else None,
+        resolved_config=cfg,
+        sections=("paths", "database"),
+    )
+    config_info["config_path"] = config_source
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=duration_sec,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_info,
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["newdata_quality_is_diagnostic_only"],
+        },
+        notes=f"New data quality checks: {len(families)} families, {ok_count}/{len(families)} OK.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "families": families,
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(json_path),
+                _project_relative(doc_path),
+            ],
+        },
+    )
+    append_experiment_result(Path(results_dir).parent / "experiments", result)
+    # --- end standard research contract ---
 
     print(f"[quality] summary_csv={summary_path}")
     print(f"[quality] json={json_path}")

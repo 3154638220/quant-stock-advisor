@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -14,9 +16,28 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.research_identity import build_light_research_identity
+from scripts.research_identity import build_light_research_identity, make_research_identity, slugify_token
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 
 DEFAULT_BASELINE_FACTOR = "vol_to_turnover"
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(p)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="运行 benchmark-first signal diagnostic")
@@ -135,6 +156,7 @@ def _build_doc(
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     from scripts.light_strategy_proxy import (
         build_light_proxy_period_detail,
         infer_periods_per_year,
@@ -264,6 +286,7 @@ def main() -> None:
 
     summary_rows: list[dict[str, Any]] = []
     period_detail_rows: list[dict[str, Any]] = []
+    factor_json_paths: list[Path] = []
     print("[2/3] run signal diagnostic", flush=True)
     for idx, factor_name in enumerate(candidate_factors, start=1):
         print(f"  factor {idx}/{len(candidate_factors)}: {factor_name}", flush=True)
@@ -347,6 +370,7 @@ def main() -> None:
         }
         out_json = results_dir / f"{research_identity['output_stem']}_{factor_name}.json"
         out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        factor_json_paths.append(out_json)
 
     summary_df = pd.DataFrame(summary_rows)
     detail_df = pd.DataFrame(period_detail_rows)
@@ -360,6 +384,7 @@ def main() -> None:
     output_stem = research_identity["output_stem"]
     summary_path = results_dir / f"{output_stem}_summary.csv"
     detail_path = results_dir / f"{output_stem}_period_detail.csv"
+    manifest_path = results_dir / f"{output_stem}_manifest.json"
     doc_path = docs_dir / f"{output_stem}.md"
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
     detail_df.to_csv(detail_path, index=False, encoding="utf-8-sig")
@@ -371,8 +396,133 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
+
+    # --- standard research contract ---
+    identity = make_research_identity(
+        result_type="signal_diagnostic",
+        research_topic=research_identity["research_topic"],
+        research_config_id=research_identity["research_config_id"],
+        output_stem=research_identity["output_stem"],
+    )
+    data_slice = DataSlice(
+        dataset_name="signal_diagnostic_factors",
+        source_tables=("a_share_daily",),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="universe_filtered" if bool((cfg.get("universe_filter", {}) or {}).get("enabled", False)) else "all_loaded",
+        rebalance_rule=rebalance_rule,
+        execution_mode=execution_mode,
+        label_return_mode="open_to_open",
+        feature_set_id=f"single_factor_candidates_{len(candidate_factors)}",
+        feature_columns=tuple(candidate_factors),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=args.config,
+        extra={
+            "baseline_factor": baseline_factor,
+            "top_k": int(args.top_k),
+            "lookback_days": int(args.lookback_days),
+            "min_hist_days": int(args.min_hist_days),
+            "prepared_factors_cache": str(prepared_factors_cache) if prepared_factors_cache else "",
+            "prepared_factors_cache_hit": bool(factors_cache_hit),
+            "include": include,
+            "exclude": exclude,
+        },
+    )
+    baseline_rows = summary_df[summary_df["signal_name"].astype(str).eq(baseline_factor)] if "signal_name" in summary_df else pd.DataFrame()
+    baseline_metrics = baseline_rows.iloc[0].to_dict() if not baseline_rows.empty else {}
+    metrics = {
+        "factor_count": int(len(candidate_factors)),
+        "summary_rows": int(len(summary_df)),
+        "period_detail_rows": int(len(detail_df)),
+        "baseline_factor": baseline_factor,
+        "baseline_annualized_excess_vs_market": baseline_metrics.get("annualized_excess_vs_market"),
+        "baseline_period_beat_rate": baseline_metrics.get("period_beat_rate"),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(not daily_df.empty and not factors.empty),
+            "daily_rows": int(len(daily_df)),
+            "factor_rows": int(len(factors)),
+            "candidate_factor_count": int(len(candidate_factors)),
+        },
+        "execution_gate": {
+            "passed": bool(len(summary_df) > 0),
+            "completed_factor_count": int(len(summary_df)),
+            "expected_factor_count": int(len(candidate_factors)),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "信号诊断汇总"),
+        ArtifactRef("period_detail_csv", _project_relative(detail_path), "csv", False, "分期诊断明细"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "信号诊断报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False, "标准研究 manifest"),
+    ) + tuple(
+        ArtifactRef(
+            f"factor_{slugify_token(path.stem.replace(output_stem, '').strip('_'))}_json",
+            _project_relative(path),
+            "json",
+            False,
+            "单因子诊断详情",
+        )
+        for path in factor_json_paths
+    )
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(
+            config_path=args.config,
+            resolved_config=cfg,
+            sections=("paths", "signals", "portfolio", "backtest", "transaction_costs", "prefilter", "universe_filter"),
+        ),
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+            "config_source": config_source,
+            "rebalance_rule": rebalance_rule,
+            "periods_per_year": float(periods_per_year),
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["signal_diagnostic_is_lightweight_research_only"],
+        },
+        notes="Lightweight single-factor diagnostic before scout/admission/full backtest.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "legacy_artifacts": [
+                _project_relative(summary_path),
+                _project_relative(detail_path),
+                _project_relative(doc_path),
+            ]
+            + [_project_relative(path) for path in factor_json_paths],
+        },
+    )
+    append_experiment_result(results_dir.parent / "experiments", result)
+    # --- end standard research contract ---
+
     print(f"  summary -> {summary_path}", flush=True)
     print(f"  period detail -> {detail_path}", flush=True)
+    print(f"  manifest -> {manifest_path}", flush=True)
     print(f"  doc -> {doc_path}", flush=True)
 
 
