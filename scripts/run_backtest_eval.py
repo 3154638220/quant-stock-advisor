@@ -28,14 +28,19 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.research_identity import (
+    build_full_backtest_research_identity,
+    canonical_research_config,
+    research_identity_from_mapping,
+    slugify_token,
+)
 from scripts.update_ic_weights import build_weights_by_date
-from scripts.research_identity import build_full_backtest_research_identity, canonical_research_config, slugify_token
-from src.settings import config_path_candidates
-from src.features.fund_flow_factors import attach_fund_flow
-from src.features.fundamental_factors import preprocess_fundamental_cross_section
-from src.features.ic_monitor import ICMonitor
-from src.features.shareholder_factors import attach_shareholder_factors
-from src.backtest.engine import BacktestConfig, build_limit_up_open_mask, build_open_to_open_returns, run_backtest
+from src.backtest.engine import (
+    BacktestConfig,
+    build_limit_up_open_mask,
+    build_open_to_open_returns,
+    run_backtest,
+)
 from src.backtest.performance_panel import compute_performance_panel
 from src.backtest.transaction_costs import transaction_cost_params_from_mapping
 from src.backtest.walk_forward import (
@@ -45,17 +50,31 @@ from src.backtest.walk_forward import (
     summarize_oos_excess_returns,
     walk_forward_backtest,
 )
+from src.features.fund_flow_factors import attach_fund_flow
+from src.features.fundamental_factors import preprocess_fundamental_cross_section
+from src.features.ic_monitor import ICMonitor
+from src.features.shareholder_factors import attach_shareholder_factors
 from src.market.regime import (
     MARKET_EW_PROXY,
     classify_regime,
     get_regime_weights,
     regime_config_from_mapping,
 )
-from src.models.experiment import append_backtest_result
 from src.models.artifacts import load_bundle_metadata
+from src.models.experiment import append_backtest_result, append_experiment_result
 from src.models.rank_score import sort_key_for_dataframe
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.portfolio.covariance import mean_cov_returns_from_daily_long
 from src.portfolio.weights import build_portfolio_weights
+from src.settings import config_path_candidates
 
 DEFAULT_CONFIG: dict = {
     "paths": {
@@ -2073,6 +2092,7 @@ def main() -> None:
         research_identity["research_config_id"] = slugify_token(args.research_config_id)
     if str(args.output_stem).strip() and str(args.research_config_id).strip():
         research_identity["output_stem"] = slugify_token(args.output_stem)
+    identity_obj = research_identity_from_mapping(research_identity)
     canonical_config_snapshot: dict[str, Any] = {}
     if str(args.canonical_config).strip():
         canonical_config_snapshot = canonical_research_config(args.canonical_config)
@@ -2505,6 +2525,7 @@ def main() -> None:
             print(f"  网格结果已写入: {out_csv}")
 
     # P4-C：每次回测运行统一记录实验参数与关键指标（JSONL + CSV）。
+    rec_paths: dict[str, Path] = {}
     try:
         experiments_dir = cfg.get("paths", {}).get("experiments_dir", "data/experiments")
         if not Path(experiments_dir).is_absolute():
@@ -2596,6 +2617,117 @@ def main() -> None:
         print(f"实验记录已写入: {rec_paths['jsonl']} | {rec_paths['csv']}")
     except Exception as e_exp:  # noqa: BLE001
         print(f"[提示] 写入 experiments 失败（不影响主流程）: {e_exp}")
+
+    # --- research contract ---
+    try:
+        data_slice = DataSlice(
+            dataset_name="full_backtest_daily",
+            source_tables=("a_share_daily",),
+            date_start=start_date,
+            date_end=end_date,
+            asof_trade_date=end_date,
+            signal_date_col="trade_date",
+            symbol_col="symbol",
+            candidate_pool_version=None,
+            rebalance_rule=rebalance_rule,
+            execution_mode=str(backtest_cfg.get("execution_mode", "close_to_close")),
+            label_return_mode=None,
+            feature_set_id=None,
+            pit_policy="daily_close_visible; factors computed from rolling windows without lookahead",
+            config_path=config_source,
+            extra={
+                "sort_by": sort_by,
+                "top_k": int(top_k),
+                "max_turnover": float(max_turnover),
+                "portfolio_method": portfolio_method,
+                "regime_enabled": regime_enabled,
+                "prefilter_enabled": bool(prefilter_cfg.get("enabled", False)),
+                "daily_rows": int(len(daily_df)) if daily_df is not None else 0,
+            },
+        )
+
+        artifact_refs: list[ArtifactRef] = []
+        json_report_path = None
+        if args.json_report:
+            json_report_path = Path(args.json_report).expanduser()
+            artifact_refs.append(ArtifactRef("json_report", str(json_report_path), "json"))
+        if args.grid_search_out:
+            grid_path = Path(args.grid_search_out)
+            if not grid_path.is_absolute():
+                grid_path = PROJECT_ROOT / grid_path
+            artifact_refs.append(ArtifactRef("grid_search_csv", str(grid_path), "csv"))
+        if rec_paths:
+            artifact_refs.extend([
+                ArtifactRef("experiment_jsonl", str(rec_paths["jsonl"]), "jsonl"),
+                ArtifactRef("experiment_csv", str(rec_paths["csv"]), "csv"),
+            ])
+        artifact_refs = tuple(artifact_refs)
+
+        gates = {
+            "data_gate": {
+                "passed": bool(daily_df is not None and len(daily_df) > 0),
+                "checks": {"daily_data_loaded": daily_df is not None and len(daily_df) > 0},
+            },
+            "execution_gate": {
+                "passed": bool(res_wc is not None and res_wc.panel.n_periods > 0),
+                "n_periods": int(getattr(getattr(res_wc, "panel", None), "n_periods", 0)),
+                "n_rebalances": int(res_wc.meta.get("n_rebalances", 0) if res_wc is not None else 0),
+            },
+            "cost_gate": {
+                "passed": bool(res_wc is not None),
+                "annualized_return_with_cost": float(getattr(getattr(res_wc, "panel", None), "annualized_return", np.nan)),
+                "annualized_return_no_cost": float(getattr(getattr(res_nc, "panel", None), "annualized_return", np.nan)),
+            },
+            "governance_gate": {
+                "passed": True,
+                "manifest_schema": "research_result_v1",
+            },
+        }
+
+        config_info = config_snapshot(
+            config_path=None,
+            resolved_config=cfg,
+            sections=(
+                "paths",
+                "database",
+                "signals",
+                "portfolio",
+                "backtest",
+                "transaction_costs",
+                "prefilter",
+            ),
+        )
+        config_info["config_path"] = config_source
+
+        result = ExperimentResult(
+            result_id=build_result_id(identity_obj, [data_slice], exp_metrics),
+            identity=identity_obj,
+            script_name=str(Path(__file__).resolve().relative_to(PROJECT_ROOT)),
+            command=" ".join(sys.argv),
+            created_at=utc_now_iso(),
+            duration_sec=round(time.perf_counter() - t0, 6),
+            seed=None,
+            data_slices=(data_slice,),
+            config=config_info,
+            params=exp_params,
+            metrics=exp_metrics,
+            gates=gates,
+            artifacts=artifact_refs,
+            promotion={
+                "production_eligible": False,
+                "registry_status": "not_registered",
+                "blocking_reasons": ["full_backtest_research_only"],
+            },
+            notes=f"Full backtest evaluation: {sort_by} top-{top_k} {rebalance_rule} rebalance; execution_mode={execution_mode}.",
+        )
+
+        manifest_path = Path(experiments_dir) / f"{identity_obj.output_stem}_manifest.json"
+        write_research_manifest(manifest_path, result)
+        append_experiment_result(experiments_dir, result)
+        print(f"[contract] manifest={manifest_path}")
+        print(f"[contract] research_index={Path(experiments_dir) / 'research_results.jsonl'}")
+    except Exception as e_contract:  # noqa: BLE001
+        print(f"[提示] 写入 research contract 失败（不影响主流程）: {e_contract}")
 
     if args.json_report:
         cost_drag_ann = float(res_wc.panel.annualized_return) - float(res_nc.panel.annualized_return)

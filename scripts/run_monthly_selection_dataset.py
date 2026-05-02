@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import argparse
-import json
+import os
+import shlex
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,11 +24,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.research_identity import slugify_token
+from scripts.research_identity import make_research_identity, slugify_token
 from src.backtest.engine import build_open_to_open_returns
 from src.market.tradability import is_open_limit_up_unbuyable, is_row_suspended_like, limit_up_ratio
-from src.settings import load_config, resolve_config_path
-
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+from src.settings import config_path_candidates, load_config, resolve_config_path
 
 POOL_RULES: dict[str, str] = {
     "U0_all_tradable": "valid current OHLCV + buyable at next trading day's open",
@@ -90,6 +101,28 @@ def parse_args() -> argparse.Namespace:
 def _resolve_project_path(raw: str | Path, *, base: Path = ROOT) -> Path:
     p = Path(raw)
     return p if p.is_absolute() else base / p
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path)
+    try:
+        return str(p.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def _resolve_loaded_config_path(config_arg: Path | None) -> Path | None:
+    if config_arg is not None:
+        return resolve_config_path(config_arg)
+    candidates: list[Path] = []
+    env_path = os.environ.get("QUANT_CONFIG", "").strip()
+    if env_path:
+        candidates.extend(config_path_candidates(env_path))
+    candidates.extend([ROOT / "config.yaml", ROOT / "config.yaml.example"])
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0] if candidates else None
 
 
 def _markdown_cell(value: object) -> str:
@@ -726,14 +759,17 @@ def build_doc(
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
+    loaded_config_path = _resolve_loaded_config_path(args.config)
     cfg_raw = load_config(args.config)
     paths = cfg_raw.get("paths", {}) or {}
-    config_source = str(resolve_config_path(args.config)) if args.config is not None else "default_config_lookup"
+    config_source = _project_relative(loaded_config_path) if loaded_config_path is not None else "default_config_lookup"
     db_path = args.duckdb_path.strip() or str(paths.get("duckdb_path") or "data/market.duckdb")
     db_path = str(_resolve_project_path(db_path))
     results_dir_raw = args.results_dir.strip() or str(paths.get("results_dir") or "data/results")
     results_dir = _resolve_project_path(results_dir_raw)
+    experiments_dir = _resolve_project_path(str(paths.get("experiments_dir") or "data/experiments"))
     cache_out = _resolve_project_path(args.cache_out)
     industry_path = _resolve_project_path(args.industry_map)
     end_date = args.end_date.strip() or ""
@@ -747,6 +783,15 @@ def main() -> int:
         daily_table=args.daily_table,
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
+    identity = make_research_identity(
+        result_type="monthly_selection_dataset",
+        research_topic=research_topic,
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+    )
+    research_topic = identity.research_topic
+    research_config_id = identity.research_config_id
+    output_stem = identity.output_stem
 
     print(f"[monthly-dataset] research_config_id={research_config_id}")
     print(f"[monthly-dataset] db_path={db_path}")
@@ -818,23 +863,6 @@ def main() -> int:
         str(label_path.relative_to(ROOT)),
         str(doc_path.relative_to(ROOT)),
     ]
-    manifest = {
-        "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
-        "result_type": "monthly_selection_dataset_manifest",
-        "research_topic": research_topic,
-        "research_config_id": research_config_id,
-        "output_stem": output_stem,
-        "config_source": config_source,
-        "dataset_version": "monthly_selection_features_v1",
-        "candidate_pool_versions": list(POOL_RULES),
-        "feature_spec": FEATURE_COLS,
-        "label_spec": LABEL_COLS,
-        "pit_policy": "features use signal-date close-or-earlier daily bars; labels are output only for train/eval",
-        "industry_map_source": str(industry_path.relative_to(ROOT)) if industry_path.exists() else str(industry_path),
-        "industry_map_source_status": industry_status,
-        "artifacts": artifacts,
-    }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     doc_path.write_text(
         build_doc(
             quality=quality,
@@ -847,9 +875,161 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    quality_row = quality.iloc[0].to_dict() if not quality.empty else {}
+    min_signal_date = str(quality_row.get("min_signal_date") or "")
+    max_signal_date = str(quality_row.get("max_signal_date") or "")
+    actual_date_end = end_date or (
+        str(pd.to_datetime(daily["trade_date"]).max().date()) if not daily.empty else args.start_date
+    )
+    data_slice = DataSlice(
+        dataset_name="monthly_selection_features",
+        source_tables=(args.daily_table,),
+        date_start=args.start_date,
+        date_end=actual_date_end,
+        asof_trade_date=max_signal_date or actual_date_end,
+        signal_date_col="signal_date",
+        symbol_col="symbol",
+        candidate_pool_version=",".join(POOL_RULES),
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id="monthly_selection_features_v1",
+        feature_columns=tuple(FEATURE_COLS),
+        label_columns=tuple(LABEL_COLS),
+        pit_policy="features use signal-date close-or-earlier daily bars; labels are output only for train/eval",
+        config_path=config_source,
+        extra={
+            "candidate_pool_rules": POOL_RULES,
+            "industry_map_source": _project_relative(industry_path) if industry_path.exists() else str(industry_path),
+            "industry_map_source_status": industry_status,
+            "min_signal_date": min_signal_date,
+            "max_signal_date": max_signal_date,
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("dataset_parquet", _project_relative(cache_out), "parquet"),
+        ArtifactRef("quality_csv", _project_relative(quality_path), "csv"),
+        ArtifactRef("candidate_pool_width_csv", _project_relative(width_path), "csv"),
+        ArtifactRef("candidate_pool_reject_reason_csv", _project_relative(reject_path), "csv"),
+        ArtifactRef("feature_coverage_csv", _project_relative(feature_path), "csv"),
+        ArtifactRef("label_distribution_csv", _project_relative(label_path), "csv"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json"),
+    )
+    metrics = {
+        "rows": int(quality_row.get("rows") or 0),
+        "symbols": int(quality_row.get("symbols") or 0),
+        "signal_months": int(quality_row.get("signal_months") or 0),
+        "label_valid_rows": int(quality_row.get("label_valid_rows") or 0),
+        "min_signal_date": min_signal_date,
+        "max_signal_date": max_signal_date,
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(
+                metrics["rows"] > 0
+                and metrics["symbols"] > 0
+                and metrics["signal_months"] > 0
+                and metrics["label_valid_rows"] > 0
+            ),
+            "checks": {
+                "has_rows": metrics["rows"] > 0,
+                "has_symbols": metrics["symbols"] > 0,
+                "has_signal_months": metrics["signal_months"] > 0,
+                "has_train_eval_labels": metrics["label_valid_rows"] > 0,
+            },
+        },
+        "execution_gate": {
+            "passed": True,
+            "execution_mode": "tplus1_open",
+            "sell_timing": "holding_month_last_trading_day_open",
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    config_info = config_snapshot(
+        config_path=loaded_config_path,
+        resolved_config=cfg_raw,
+        sections=(
+            "paths",
+            "database",
+            "signals",
+            "portfolio",
+            "backtest",
+            "transaction_costs",
+            "prefilter",
+            "monthly_selection",
+        ),
+    )
+    config_info["config_path"] = config_source
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=str(Path(__file__).resolve().relative_to(ROOT)),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_info,
+        params={
+            "cli": vars(args),
+            "dataset_config": {
+                "min_history_days": cfg.min_history_days,
+                "min_amount_20d": cfg.min_amount_20d,
+                "limit_move_max": cfg.limit_move_max,
+                "limit_move_lookback": cfg.limit_move_lookback,
+                "price_position_lookback": cfg.price_position_lookback,
+            },
+            "overrides": {
+                key: value
+                for key, value in {
+                    "duckdb_path": args.duckdb_path.strip(),
+                    "results_dir": args.results_dir.strip(),
+                    "end_date": end_date,
+                }.items()
+                if value
+            },
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["dataset_contract_only_not_promotion_candidate"],
+        },
+        notes="Monthly selection dataset contract; business outputs are unchanged.",
+    )
+    write_research_manifest(
+        manifest_path,
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "result_type": "monthly_selection_dataset_manifest",
+            "research_topic": research_topic,
+            "research_config_id": research_config_id,
+            "output_stem": output_stem,
+            "config_source": config_source,
+            "dataset_version": "monthly_selection_features_v1",
+            "candidate_pool_versions": list(POOL_RULES),
+            "feature_spec": FEATURE_COLS,
+            "label_spec": LABEL_COLS,
+            "pit_policy": data_slice.pit_policy,
+            "industry_map_source": _project_relative(industry_path) if industry_path.exists() else str(industry_path),
+            "industry_map_source_status": industry_status,
+            "legacy_artifacts": artifacts,
+        },
+    )
+    append_experiment_result(experiments_dir, result)
+
     print(f"[monthly-dataset] rows={len(dataset)} symbols={dataset['symbol'].nunique() if not dataset.empty else 0}")
     print(f"[monthly-dataset] parquet={cache_out}")
     print(f"[monthly-dataset] quality={quality_path}")
+    print(f"[monthly-dataset] manifest={manifest_path}")
+    print(f"[monthly-dataset] research_index={experiments_dir / 'research_results.jsonl'}")
     print(f"[monthly-dataset] doc={doc_path}")
     return 0
 

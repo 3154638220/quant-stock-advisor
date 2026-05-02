@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +25,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.research_identity import slugify_token
+from scripts.research_identity import make_research_identity, slugify_token
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.settings import load_config, resolve_config_path
-
 
 LABEL_COL = "label_forward_1m_o2o_return"
 MARKET_COL = "label_market_ew_o2o_return"
@@ -57,6 +68,14 @@ def parse_args() -> argparse.Namespace:
 def _resolve_project_path(raw: str | Path) -> Path:
     p = Path(raw)
     return p if p.is_absolute() else ROOT / p
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path)
+    try:
+        return str(p.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(p)
 
 
 def _parse_int_list(raw: str) -> list[int]:
@@ -569,6 +588,7 @@ def build_doc(
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
     cfg = load_config(args.config)
     paths = cfg.get("paths", {}) or {}
@@ -579,6 +599,10 @@ def main() -> int:
     docs_dir = ROOT / "docs"
     results_dir.mkdir(parents=True, exist_ok=True)
     docs_dir.mkdir(parents=True, exist_ok=True)
+    experiments_dir = _resolve_project_path(
+        str(paths.get("experiments_dir") or "data/experiments")
+    )
+    experiments_dir.mkdir(parents=True, exist_ok=True)
 
     top_ks = _parse_int_list(args.top_k)
     pools = _parse_str_list(args.candidate_pools)
@@ -590,6 +614,15 @@ def main() -> int:
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
         f"_buckets_{int(args.bucket_count)}"
     )
+
+    identity = make_research_identity(
+        result_type="monthly_selection_oracle",
+        research_topic=research_topic,
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+        canonical_config_name="monthly_selection_oracle_v1",
+    )
+    loaded_config_path = resolve_config_path(args.config) if args.config is not None else None
 
     dataset = load_oracle_dataset(dataset_path, candidate_pools=pools)
     valid = valid_pool_frame(dataset)
@@ -681,9 +714,130 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    # --- research contract ---
+    min_signal_date = str(dataset["signal_date"].min().date()) if not dataset.empty else ""
+    max_signal_date = str(dataset["signal_date"].max().date()) if not dataset.empty else ""
+    data_slice = DataSlice(
+        dataset_name="monthly_selection_oracle",
+        source_tables=(_project_relative(dataset_path),),
+        date_start=min_signal_date,
+        date_end=max_signal_date,
+        asof_trade_date=max_signal_date or None,
+        signal_date_col="signal_date",
+        symbol_col="symbol",
+        candidate_pool_version=",".join(pools),
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id=None,
+        feature_columns=tuple(col for _, col, _ in FEATURE_SPECS),
+        label_columns=(LABEL_COL, MARKET_COL),
+        pit_policy="oracle uses ex-post label_forward_1m_o2o_return for upper-bound diagnosis only",
+        config_path=config_source,
+        extra={
+            "dataset_path": _project_relative(dataset_path),
+            "top_ks": top_ks,
+            "bucket_count": int(args.bucket_count),
+        },
+    )
+
+    artifact_refs: list[ArtifactRef] = []
+    for key, p in paths_out.items():
+        if key == "manifest":
+            artifact_refs.append(ArtifactRef("manifest_json", _project_relative(p), "json"))
+        elif key == "doc":
+            artifact_refs.append(ArtifactRef("report_md", _project_relative(p), "md"))
+        else:
+            artifact_refs.append(ArtifactRef(f"{key}_csv", _project_relative(p), "csv"))
+    artifact_refs = tuple(artifact_refs)
+
+    metrics = {
+        "rows": int(quality["rows"]),
+        "valid_rows": int(quality["valid_rows"]),
+        "valid_signal_months": int(quality["valid_signal_months"]),
+        "oracle_summary_rows": int(len(oracle_summary)),
+        "feature_bucket_rows": int(len(feature_buckets)),
+    }
+
+    gates = {
+        "data_gate": {
+            "passed": bool(metrics["valid_rows"] > 0 and metrics["valid_signal_months"] > 0),
+            "checks": {
+                "has_valid_rows": metrics["valid_rows"] > 0,
+                "has_valid_signal_months": metrics["valid_signal_months"] > 0,
+            },
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+
+    config_info = config_snapshot(
+        config_path=loaded_config_path,
+        resolved_config=cfg,
+        sections=("paths", "database", "signals", "monthly_selection"),
+    )
+    config_info["config_path"] = config_source
+
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_info,
+        params={
+            "cli": vars(args),
+            "overrides": {
+                key: value
+                for key, value in {
+                    "dataset": args.dataset,
+                    "results_dir": args.results_dir.strip(),
+                    "top_k": args.top_k,
+                    "candidate_pools": args.candidate_pools,
+                    "bucket_count": args.bucket_count,
+                }.items()
+                if value
+            },
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["oracle_diagnostic_only_not_promotion_candidate"],
+        },
+        notes="Monthly selection M3 oracle top-bucket diagnostic; uses ex-post labels for upper-bound estimation only.",
+    )
+    write_research_manifest(
+        paths_out["manifest"],
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "result_type": "monthly_selection_oracle_manifest",
+            "research_topic": identity.research_topic,
+            "research_config_id": identity.research_config_id,
+            "output_stem": identity.output_stem,
+            "config_source": config_source,
+            "dataset_path": _project_relative(dataset_path),
+            "candidate_pools": pools,
+            "top_ks": top_ks,
+            "bucket_count": int(args.bucket_count),
+            "legacy_artifacts": [*artifact_paths, str(paths_out["doc"].relative_to(ROOT))],
+        },
+    )
+    append_experiment_result(experiments_dir, result)
+
     print(f"[monthly-oracle] valid_rows={quality['valid_rows']} valid_months={quality['valid_signal_months']}")
     print(f"[monthly-oracle] oracle_summary={paths_out['oracle_topk_by_candidate_pool']}")
     print(f"[monthly-oracle] doc={paths_out['doc']}")
+    print(f"[monthly-oracle] manifest={paths_out['manifest']}")
+    print(f"[monthly-oracle] research_index={experiments_dir / 'research_results.jsonl'}")
     return 0
 
 

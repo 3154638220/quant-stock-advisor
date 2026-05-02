@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,28 +26,36 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.research_identity import slugify_token
+from scripts.research_identity import make_research_identity, slugify_token
 from scripts.run_monthly_selection_baselines import (
-    EXCESS_COL,
     LABEL_COL,
-    MARKET_COL,
     POOL_RULES,
     _format_markdown_table,
     _json_sanitize,
+    _project_relative,
+    load_baseline_dataset,
     model_n_jobs_token,
     normalize_model_n_jobs,
-    load_baseline_dataset,
     summarize_candidate_pool_reject_reason,
     summarize_candidate_pool_width,
 )
 from scripts.run_monthly_selection_ltr import (
-    M6RunConfig,
     _tag_importance,
     _train_predict_xgboost_ranker,
     build_m6_feature_spec,
     summarize_ltr_feature_importance,
 )
 from scripts.run_monthly_selection_multisource import M5RunConfig, _cap_fit_rows, attach_enabled_families
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.settings import load_config, resolve_config_path
 
 
@@ -922,6 +932,7 @@ def build_doc(
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
     cfg_raw = load_config(args.config)
     paths = cfg_raw.get("paths", {}) or {}
@@ -934,6 +945,10 @@ def main() -> int:
     docs_dir = ROOT / "docs"
     results_dir.mkdir(parents=True, exist_ok=True)
     docs_dir.mkdir(parents=True, exist_ok=True)
+    experiments_dir = _resolve_project_path(
+        str(paths.get("experiments_dir") or "data/experiments")
+    )
+    experiments_dir.mkdir(parents=True, exist_ok=True)
 
     top_ks = _parse_int_list(args.top_k)
     pools = tuple(_parse_str_list(args.candidate_pools))
@@ -964,6 +979,15 @@ def main() -> int:
         f"_wf_{int(args.min_train_months)}m"
     )
     print(f"[monthly-m7] research_config_id={research_config_id}")
+
+    identity = make_research_identity(
+        result_type="monthly_selection_m7_recommendation_report",
+        research_topic="monthly_selection",
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+        canonical_config_name="monthly_selection_m7_recommendation_report_v1",
+    )
+    loaded_config_path = resolve_config_path(args.config) if args.config is not None else None
 
     dataset = load_baseline_dataset(dataset_path, candidate_pools=list(pools))
     stock_name_cache_path = _resolve_project_path(args.stock_name_cache)
@@ -1139,9 +1163,167 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    # --- research contract ---
+    min_signal_date = str(dataset["signal_date"].min().date()) if not dataset.empty else ""
+    max_signal_date = str(dataset["signal_date"].max().date()) if not dataset.empty else ""
+    data_slice = DataSlice(
+        dataset_name="monthly_selection_m7_recommendation",
+        source_tables=(_project_relative(dataset_path),),
+        date_start=min_signal_date,
+        date_end=max_signal_date,
+        asof_trade_date=str(report_signal_date.date()),
+        signal_date_col="signal_date",
+        symbol_col="symbol",
+        candidate_pool_version=",".join(pools),
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id=spec.name,
+        feature_columns=tuple(active_feature_cols),
+        label_columns=(),
+        pit_policy="target features are signal-date rows; full-fit model uses only labeled months before report_signal_date",
+        config_path=config_source,
+        extra={
+            "dataset_path": _project_relative(dataset_path),
+            "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
+            "top_ks": top_ks,
+            "report_top_k": int(cfg.report_top_k),
+            "enabled_families": enabled_families,
+            "feature_spec_name": spec.name,
+            "active_feature_count": len(active_feature_cols),
+            "evidence_stem": evidence_stem,
+        },
+    )
+
+    artifact_refs: list[ArtifactRef] = []
+    for key, p in paths_out.items():
+        if key == "manifest":
+            artifact_refs.append(ArtifactRef("manifest_json", _project_relative(p), "json"))
+        elif key == "doc":
+            artifact_refs.append(ArtifactRef("report_md", _project_relative(p), "md"))
+        else:
+            artifact_refs.append(ArtifactRef(f"{key}_csv", _project_relative(p), "csv"))
+    artifact_refs = tuple(artifact_refs)
+
+    m9_pass = bool(m9_integrity["pass"].all()) if not m9_integrity.empty else False
+    metrics = {
+        "recommendation_rows": int(len(recommendations)),
+        "recommendation_topk_groups": int(recommendations["top_k"].nunique()) if not recommendations.empty else 0,
+        "candidate_pool_pass_rows": int(quality.get("target_candidate_pass_rows", 0)),
+        "active_feature_count": len(active_feature_cols),
+        "core_features": len([c for c in active_feature_cols if not c.startswith("is_missing_")]),
+        "missing_flag_features": len([c for c in active_feature_cols if c.startswith("is_missing_")]),
+        "evidence_stem_found": bool(evidence_stem),
+        "stock_name_cache_rows": int(len(stock_names)),
+    }
+
+    gates = {
+        "data_gate": {
+            "passed": bool(not dataset.empty and quality.get("target_candidate_pass_rows", 0) > 0),
+            "checks": {
+                "dataset_not_empty": not dataset.empty,
+                "has_candidate_pool_pass": quality.get("target_candidate_pass_rows", 0) > 0,
+            },
+        },
+        "m9_integrity_gate": {
+            "passed": m9_pass,
+            "integrity_checks": m9_integrity.to_dict(orient="records") if not m9_integrity.empty else [],
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+
+    config_info = config_snapshot(
+        config_path=loaded_config_path,
+        resolved_config=cfg_raw,
+        sections=(
+            "paths",
+            "database",
+            "signals",
+            "monthly_selection",
+        ),
+    )
+    config_info["config_path"] = config_source
+
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=int(cfg.random_seed),
+        data_slices=(data_slice,),
+        config=config_info,
+        params={
+            "cli": vars(args),
+            "run_config": {
+                "top_ks": list(cfg.top_ks),
+                "report_top_k": int(cfg.report_top_k),
+                "candidate_pools": list(cfg.candidate_pools),
+                "min_train_months": cfg.min_train_months,
+                "min_train_rows": cfg.min_train_rows,
+                "cost_bps": cfg.cost_bps,
+                "model_name": cfg.model_name,
+                "min_core_feature_coverage": cfg.min_core_feature_coverage,
+                "model_n_jobs": normalize_model_n_jobs(cfg.model_n_jobs),
+            },
+            "overrides": {
+                key: value
+                for key, value in {
+                    "dataset": args.dataset,
+                    "results_dir": args.results_dir.strip(),
+                    "signal_date": args.signal_date.strip(),
+                    "top_k": args.top_k,
+                    "candidate_pools": args.candidate_pools,
+                    "families": args.families,
+                    "evidence_stem": args.evidence_stem.strip(),
+                }.items()
+                if value
+            },
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["m7_research_report_only_not_promotion_candidate"],
+        },
+        notes="Monthly selection M7 recommendation report; full-fit XGBoost ranker on latest signal month; research-only output.",
+    )
+    write_research_manifest(
+        paths_out["manifest"],
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            "result_type": "monthly_selection_m7_recommendation_report_manifest",
+            "research_topic": identity.research_topic,
+            "research_config_id": identity.research_config_id,
+            "output_stem": identity.output_stem,
+            "config_source": config_source,
+            "dataset_path": _project_relative(dataset_path),
+            "dataset_version": "monthly_selection_features_v1",
+            "candidate_pools": pools,
+            "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
+            "top_ks": top_ks,
+            "report_top_k": int(cfg.report_top_k),
+            "feature_spec": spec.name,
+            "active_feature_cols": active_feature_cols,
+            "pit_policy": data_slice.pit_policy,
+            "historical_evidence_stem": evidence_stem,
+            "legacy_artifacts": [*artifact_paths, str(paths_out["doc"].relative_to(ROOT))],
+        },
+    )
+    append_experiment_result(experiments_dir, result)
+
     print(f"[monthly-m7] report_signal_date={quality['report_signal_date']} recommendations={len(recommendations)}")
     print(f"[monthly-m7] recommendations={paths_out['recommendations']}")
     print(f"[monthly-m7] doc={paths_out['doc']}")
+    print(f"[monthly-m7] manifest={paths_out['manifest']}")
+    print(f"[monthly-m7] research_index={experiments_dir / 'research_results.jsonl'}")
     return 0
 
 

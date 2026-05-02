@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from src.models.research_contract import ExperimentResult
+
 
 def _utc_ts() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -33,6 +35,11 @@ def append_experiment_jsonl(
     with fp.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
     return fp
+
+
+def append_experiment_result(base_dir: Union[str, Path], result: ExperimentResult) -> Path:
+    """Append a standard research-result contract to the local research index."""
+    return append_experiment_jsonl(base_dir, result.to_json_dict(), filename="research_results.jsonl")
 
 
 def append_experiment_csv(

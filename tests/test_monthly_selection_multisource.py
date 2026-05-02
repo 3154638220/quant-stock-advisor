@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import sys
+
 import pandas as pd
 
+import scripts.run_monthly_selection_multisource as multisource
 from scripts.run_monthly_selection_multisource import (
     M5RunConfig,
     attach_industry_breadth_features,
@@ -13,6 +17,7 @@ from scripts.run_monthly_selection_multisource import (
     build_rank_ic,
     build_walk_forward_scores_for_spec,
 )
+from scripts.validate_research_contracts import validate_manifest
 
 
 def _m5_sample(months: int = 5, symbols: int = 10) -> pd.DataFrame:
@@ -120,3 +125,47 @@ def test_m5_walk_forward_scores_and_delta_compare_to_price_volume_baseline():
     assert not delta.empty
     assert set(delta["feature_spec"]) == {"plus_industry_breadth"}
     assert "delta_rank_ic_mean" in delta.columns
+
+
+def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "monthly_selection_features.parquet"
+    _m5_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
+    monkeypatch.setattr(multisource, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_monthly_selection_multisource.py",
+            "--dataset",
+            str(dataset_path),
+            "--results-dir",
+            "results",
+            "--output-prefix",
+            "m5_contract_test",
+            "--top-k",
+            "2",
+            "--candidate-pools",
+            "U1_liquid_tradable",
+            "--min-train-months",
+            "2",
+            "--min-train-rows",
+            "10",
+            "--families",
+            "industry_breadth",
+            "--ml-models",
+            "elasticnet,logistic",
+            "--skip-xgboost",
+        ],
+    )
+
+    assert multisource.main() == 0
+
+    manifests = sorted((tmp_path / "results").glob("m5_contract_test_*_manifest.json"))
+    assert len(manifests) == 1
+    assert validate_manifest(manifests[0], root=tmp_path) == []
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "research_result_v1"
+    assert payload["identity"]["result_type"] == "monthly_selection_m5_multisource"
+    artifact_names = {x["name"] for x in payload["artifacts"]}
+    assert artifact_names >= {"leaderboard_csv", "incremental_delta_csv", "manifest_json", "report_md"}
+    assert (tmp_path / "data/experiments/research_results.jsonl").exists()

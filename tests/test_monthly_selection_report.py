@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import sys
+
 import pandas as pd
 import pytest
 
+import scripts.run_monthly_selection_report as m7_report
+from scripts.run_monthly_selection_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
 from scripts.run_monthly_selection_multisource import attach_industry_breadth_features
 from scripts.run_monthly_selection_report import (
     M7RunConfig,
@@ -14,7 +19,7 @@ from scripts.run_monthly_selection_report import (
     summarize_m9_integrity,
     summarize_report_feature_coverage,
 )
-from scripts.run_monthly_selection_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
+from scripts.validate_research_contracts import validate_manifest
 
 
 def _m7_sample(months: int = 5, symbols: int = 10) -> pd.DataFrame:
@@ -254,7 +259,7 @@ def test_m9_integrity_fails_st_name_recommendations():
 
     row = out[out["check"] == "recommendation_excludes_st_names"].iloc[0]
     assert row["value"] == 1
-    assert row["pass"] == False
+    assert not row["pass"]
 
 
 def test_m7_full_fit_report_scores_rank_latest_unlabeled_month():
@@ -291,3 +296,47 @@ def test_m7_full_fit_report_scores_rank_latest_unlabeled_month():
     assert scores["model"].unique().tolist() == ["M6_xgboost_rank_ndcg"]
     assert rec["top_k"].unique().tolist() == [2]
     assert rec["rank"].tolist() == [1, 2]
+
+
+def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
+    pytest.importorskip("xgboost")
+    dataset_path = tmp_path / "monthly_selection_features.parquet"
+    _m7_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
+    monkeypatch.setattr(m7_report, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_monthly_selection_report.py",
+            "--dataset",
+            str(dataset_path),
+            "--results-dir",
+            "results",
+            "--output-prefix",
+            "m7_contract_test",
+            "--top-k",
+            "2",
+            "--candidate-pools",
+            "U2_risk_sane",
+            "--min-train-months",
+            "2",
+            "--min-train-rows",
+            "10",
+            "--families",
+            "industry_breadth",
+            "--stock-name-cache",
+            str(tmp_path / "nonexistent_names.csv"),
+        ],
+    )
+
+    assert m7_report.main() == 0
+
+    manifests = sorted((tmp_path / "results").glob("m7_contract_test_*_manifest.json"))
+    assert len(manifests) == 1
+    assert validate_manifest(manifests[0], root=tmp_path) == []
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "research_result_v1"
+    assert payload["identity"]["result_type"] == "monthly_selection_m7_recommendation_report"
+    artifact_names = {x["name"] for x in payload["artifacts"]}
+    assert artifact_names >= {"recommendations_csv", "leaderboard_csv", "manifest_json", "report_md"}
+    assert (tmp_path / "data/experiments/research_results.jsonl").exists()

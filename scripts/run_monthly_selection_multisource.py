@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.research_identity import slugify_token
+from scripts.research_identity import make_research_identity, slugify_token
 from scripts.run_monthly_selection_baselines import (
     EXCESS_COL,
     LABEL_COL,
@@ -34,18 +37,16 @@ from scripts.run_monthly_selection_baselines import (
     TOP20_COL,
     _format_markdown_table,
     _json_sanitize,
-    _rank_pct_score,
-    _score_base_columns,
     _train_predict_sklearn,
     _train_predict_xgboost,
-    model_n_jobs_token,
-    normalize_model_n_jobs,
     build_leaderboard,
     build_monthly_long,
     build_quantile_spread,
     build_rank_ic,
     build_realized_market_states,
     load_baseline_dataset,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
     summarize_candidate_pool_reject_reason,
     summarize_candidate_pool_width,
     summarize_industry_exposure,
@@ -54,8 +55,17 @@ from scripts.run_monthly_selection_baselines import (
     valid_pool_frame,
 )
 from src.features.fundamental_factors import DEFAULT_FUNDAMENTAL_COLS
-from src.settings import load_config, resolve_config_path
-
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+from src.settings import config_path_candidates, load_config, resolve_config_path
 
 PRICE_VOLUME_FEATURES: tuple[str, ...] = ML_FEATURE_COLS
 
@@ -158,6 +168,28 @@ def parse_args() -> argparse.Namespace:
 def _resolve_project_path(raw: str | Path) -> Path:
     p = Path(raw)
     return p if p.is_absolute() else ROOT / p
+
+
+def _project_relative(path: str | Path) -> str:
+    p = Path(path)
+    try:
+        return str(p.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def _resolve_loaded_config_path(config_arg: Path | None) -> Path | None:
+    if config_arg is not None:
+        return resolve_config_path(config_arg)
+    candidates: list[Path] = []
+    env_path = os.environ.get("QUANT_CONFIG", "").strip()
+    if env_path:
+        candidates.extend(config_path_candidates(env_path))
+    candidates.extend([ROOT / "config.yaml", ROOT / "config.yaml.example"])
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0] if candidates else None
 
 
 def _parse_int_list(raw: str) -> list[int]:
@@ -653,7 +685,6 @@ def summarize_feature_importance(importance: pd.DataFrame) -> pd.DataFrame:
 
 
 def _base_model_key(model: str) -> str:
-    marker = "_"
     if "_price_volume_only_" in model:
         return model.split("_price_volume_only_", 1)[1]
     if "_plus_" in model:
@@ -832,15 +863,18 @@ def build_doc(
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     args = parse_args()
+    loaded_config_path = _resolve_loaded_config_path(args.config)
     cfg_raw = load_config(args.config)
     paths = cfg_raw.get("paths", {}) or {}
-    config_source = str(resolve_config_path(args.config)) if args.config is not None else "default_config_lookup"
+    config_source = _project_relative(loaded_config_path) if loaded_config_path is not None else "default_config_lookup"
     dataset_path = _resolve_project_path(args.dataset)
     db_path_raw = args.duckdb_path.strip() or str(paths.get("duckdb_path") or "data/market.duckdb")
     db_path = _resolve_project_path(db_path_raw)
     results_dir_raw = args.results_dir.strip() or str(paths.get("results_dir") or "data/results")
     results_dir = _resolve_project_path(results_dir_raw)
+    experiments_dir = _resolve_project_path(str(paths.get("experiments_dir") or "data/experiments"))
     docs_dir = ROOT / "docs"
     results_dir.mkdir(parents=True, exist_ok=True)
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -874,6 +908,14 @@ def main() -> int:
         f"_wf_{int(args.min_train_months)}m"
         f"_costbps_{slugify_token(args.cost_bps)}"
     )
+    identity = make_research_identity(
+        result_type="monthly_selection_m5_multisource",
+        research_topic="monthly_selection_m5_multisource",
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+    )
+    research_config_id = identity.research_config_id
+    output_stem = identity.output_stem
 
     print(f"[monthly-m5] research_config_id={research_config_id}")
     dataset = load_baseline_dataset(dataset_path, candidate_pools=pools)
@@ -962,19 +1004,10 @@ def main() -> int:
         encoding="utf-8",
     )
     artifact_paths = [
-        str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else str(p)
+        _project_relative(p)
         for key, p in paths_out.items()
         if key not in {"manifest", "doc"}
     ]
-    manifest = {
-        "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
-        **quality,
-        "artifacts": [*artifact_paths, str(paths_out["doc"].relative_to(ROOT))],
-    }
-    paths_out["manifest"].write_text(
-        json.dumps(_json_sanitize(manifest), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     paths_out["doc"].write_text(
         build_doc(
             quality=quality,
@@ -983,13 +1016,215 @@ def main() -> int:
             feature_coverage=feature_coverage,
             year_slice=year_slice,
             regime_slice=regime_slice,
-            artifacts=[*artifact_paths, str(paths_out["manifest"].relative_to(ROOT))],
+            artifacts=[*artifact_paths, _project_relative(paths_out["manifest"])],
         ),
         encoding="utf-8",
     )
 
+    min_signal_date = str(quality.get("min_valid_signal_date") or "")
+    max_signal_date = str(quality.get("max_valid_signal_date") or "")
+    best_row: dict[str, Any] = {}
+    if not leaderboard.empty:
+        best_row = (
+            leaderboard.sort_values(
+                ["topk_excess_after_cost_mean", "rank_ic_mean"],
+                ascending=[False, False],
+            )
+            .iloc[0]
+            .to_dict()
+        )
+    rank_ic_observations = int(pd.to_numeric(rank_ic.get("rank_ic"), errors="coerce").notna().sum()) if not rank_ic.empty else 0
+    best_after_cost = best_row.get("topk_excess_after_cost_mean")
+    best_after_cost_float = float(best_after_cost) if pd.notna(best_after_cost) else None
+    feature_columns = tuple(dict.fromkeys(col for spec in specs for col in spec.feature_cols))
+    data_slice = DataSlice(
+        dataset_name="monthly_selection_m5_multisource",
+        source_tables=(_project_relative(dataset_path), _project_relative(db_path)),
+        date_start=min_signal_date,
+        date_end=max_signal_date,
+        asof_trade_date=max_signal_date or None,
+        signal_date_col="signal_date",
+        symbol_col="symbol",
+        candidate_pool_version=",".join(pools),
+        rebalance_rule="M",
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id="m5_" + "_".join(["price_volume_only", *enabled_families]),
+        feature_columns=feature_columns,
+        label_columns=(LABEL_COL, EXCESS_COL, MARKET_COL, TOP20_COL),
+        pit_policy=quality["pit_policy"],
+        config_path=config_source,
+        extra={
+            "dataset_path": _project_relative(dataset_path),
+            "duckdb_path": _project_relative(db_path),
+            "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
+            "enabled_families": enabled_families,
+            "feature_specs": quality["feature_specs"],
+            "top_ks": top_ks,
+            "bucket_count": int(args.bucket_count),
+            "availability_lag_days": int(args.availability_lag_days),
+            "cv_policy": quality["cv_policy"],
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_json", _project_relative(paths_out["summary_json"]), "json"),
+        ArtifactRef("leaderboard_csv", _project_relative(paths_out["leaderboard"]), "csv"),
+        ArtifactRef("incremental_delta_csv", _project_relative(paths_out["incremental_delta"]), "csv"),
+        ArtifactRef("monthly_long_csv", _project_relative(paths_out["monthly_long"]), "csv"),
+        ArtifactRef("rank_ic_csv", _project_relative(paths_out["rank_ic"]), "csv"),
+        ArtifactRef("quantile_spread_csv", _project_relative(paths_out["quantile_spread"]), "csv"),
+        ArtifactRef("feature_coverage_csv", _project_relative(paths_out["feature_coverage"]), "csv"),
+        ArtifactRef("feature_importance_csv", _project_relative(paths_out["feature_importance"]), "csv"),
+        ArtifactRef("topk_holdings_csv", _project_relative(paths_out["topk_holdings"]), "csv"),
+        ArtifactRef("industry_exposure_csv", _project_relative(paths_out["industry_exposure"]), "csv"),
+        ArtifactRef("candidate_pool_width_csv", _project_relative(paths_out["candidate_pool_width"]), "csv"),
+        ArtifactRef(
+            "candidate_pool_reject_reason_csv",
+            _project_relative(paths_out["candidate_pool_reject_reason"]),
+            "csv",
+        ),
+        ArtifactRef("year_slice_csv", _project_relative(paths_out["year_slice"]), "csv"),
+        ArtifactRef("regime_slice_csv", _project_relative(paths_out["regime_slice"]), "csv"),
+        ArtifactRef("market_states_csv", _project_relative(paths_out["market_states"]), "csv"),
+        ArtifactRef("report_md", _project_relative(paths_out["doc"]), "md"),
+        ArtifactRef("manifest_json", _project_relative(paths_out["manifest"]), "json"),
+    )
+    metrics = {
+        "rows": int(quality["rows"]),
+        "valid_rows": int(quality["valid_rows"]),
+        "valid_signal_months": int(quality["valid_signal_months"]),
+        "score_rows": int(len(scores)),
+        "rank_ic_observations": rank_ic_observations,
+        "monthly_long_rows": int(len(monthly_long)),
+        "topk_holdings_rows": int(len(topk_holdings)),
+        "feature_spec_count": int(len(specs)),
+        "feature_coverage_rows": int(len(feature_coverage)),
+        "incremental_delta_rows": int(len(incremental_delta)),
+        "model_count": int(len(quality["models"])),
+        "best_model": str(best_row.get("model") or ""),
+        "best_candidate_pool_version": str(best_row.get("candidate_pool_version") or ""),
+        "best_top_k": int(best_row["top_k"]) if best_row.get("top_k") is not None and pd.notna(best_row.get("top_k")) else None,
+        "best_topk_excess_after_cost_mean": best_after_cost_float,
+        "best_rank_ic_mean": float(best_row["rank_ic_mean"])
+        if best_row.get("rank_ic_mean") is not None and pd.notna(best_row.get("rank_ic_mean"))
+        else None,
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(metrics["valid_rows"] > 0 and metrics["valid_signal_months"] > 0),
+            "checks": {
+                "has_valid_rows": metrics["valid_rows"] > 0,
+                "has_valid_signal_months": metrics["valid_signal_months"] > 0,
+                "has_feature_coverage": metrics["feature_coverage_rows"] > 0,
+            },
+        },
+        "rank_gate": {
+            "passed": bool(rank_ic_observations > 0),
+            "rank_ic_observations": rank_ic_observations,
+        },
+        "spread_gate": {
+            "passed": bool(not monthly_long.empty and not quantile_spread.empty),
+            "monthly_rows": int(len(monthly_long)),
+            "quantile_spread_rows": int(len(quantile_spread)),
+        },
+        "baseline_gate": {
+            "passed": bool(not incremental_delta.empty),
+            "incremental_delta_rows": int(len(incremental_delta)),
+            "best_topk_excess_after_cost_mean": best_after_cost_float,
+        },
+        "year_gate": {
+            "passed": bool(not year_slice.empty),
+            "year_slice_rows": int(len(year_slice)),
+        },
+        "regime_gate": {
+            "passed": bool(not regime_slice.empty),
+            "regime_slice_rows": int(len(regime_slice)),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    config_info = config_snapshot(
+        config_path=loaded_config_path,
+        resolved_config=cfg_raw,
+        sections=(
+            "paths",
+            "database",
+            "signals",
+            "portfolio",
+            "backtest",
+            "transaction_costs",
+            "prefilter",
+            "monthly_selection",
+        ),
+    )
+    config_info["config_path"] = config_source
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=shlex.join([sys.executable, *sys.argv]),
+        created_at=utc_now_iso(),
+        duration_sec=round(time.perf_counter() - started_at, 6),
+        seed=int(args.random_seed),
+        data_slices=(data_slice,),
+        config=config_info,
+        params={
+            "cli": vars(args),
+            "run_config": {
+                "top_ks": list(cfg.top_ks),
+                "candidate_pools": list(cfg.candidate_pools),
+                "bucket_count": cfg.bucket_count,
+                "min_train_months": cfg.min_train_months,
+                "min_train_rows": cfg.min_train_rows,
+                "max_fit_rows": cfg.max_fit_rows,
+                "cost_bps": cfg.cost_bps,
+                "include_xgboost": cfg.include_xgboost,
+                "availability_lag_days": cfg.availability_lag_days,
+                "ml_models": list(cfg.ml_models),
+                "model_n_jobs": normalize_model_n_jobs(cfg.model_n_jobs),
+            },
+            "overrides": {
+                key: value
+                for key, value in {
+                    "dataset": args.dataset,
+                    "duckdb_path": args.duckdb_path.strip(),
+                    "results_dir": args.results_dir.strip(),
+                    "top_k": args.top_k,
+                    "candidate_pools": args.candidate_pools,
+                    "families": args.families,
+                    "ml_models": args.ml_models,
+                    "skip_xgboost": args.skip_xgboost,
+                }.items()
+                if value
+            },
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["m5_multisource_research_only_not_promotion_candidate"],
+        },
+        notes="Monthly selection M5 multisource contract; model outputs are unchanged.",
+    )
+    write_research_manifest(
+        paths_out["manifest"],
+        result,
+        extra={
+            "generated_at_utc": result.created_at,
+            **quality,
+            "legacy_artifacts": [*artifact_paths, _project_relative(paths_out["doc"])],
+        },
+    )
+    append_experiment_result(experiments_dir, result)
+
     print(f"[monthly-m5] valid_rows={quality['valid_rows']} valid_months={quality['valid_signal_months']}")
     print(f"[monthly-m5] leaderboard={paths_out['leaderboard']}")
+    print(f"[monthly-m5] manifest={paths_out['manifest']}")
+    print(f"[monthly-m5] research_index={experiments_dir / 'research_results.jsonl'}")
     print(f"[monthly-m5] doc={paths_out['doc']}")
     return 0
 

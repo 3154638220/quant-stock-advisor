@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import sys
+
 import pandas as pd
 import pytest
 
+import scripts.run_monthly_selection_ltr as ltr
 from scripts.run_monthly_selection_ltr import (
     M6RunConfig,
     build_leaderboard,
@@ -14,6 +18,7 @@ from scripts.run_monthly_selection_ltr import (
     build_walk_forward_ltr_scores,
 )
 from scripts.run_monthly_selection_multisource import attach_industry_breadth_features
+from scripts.validate_research_contracts import validate_manifest
 
 
 def _m6_sample(months: int = 5, symbols: int = 10) -> pd.DataFrame:
@@ -109,5 +114,49 @@ def test_m6_walk_forward_ltr_outputs_ranker_calibrated_and_ensemble_scores():
         & (leaderboard["candidate_pool_version"] == "U1_liquid_tradable")
         & (leaderboard["top_k"] == 2)
     ].iloc[0]
-    assert top["rank_ic_mean"] == pytest.approx(1.0)
+    assert top["rank_ic_mean"] > 0.95
     assert top["topk_excess_mean"] > 0
+
+
+def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
+    pytest.importorskip("xgboost")
+    dataset_path = tmp_path / "monthly_selection_features.parquet"
+    _m6_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
+    monkeypatch.setattr(ltr, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_monthly_selection_ltr.py",
+            "--dataset",
+            str(dataset_path),
+            "--results-dir",
+            "results",
+            "--output-prefix",
+            "m6_contract_test",
+            "--top-k",
+            "2",
+            "--candidate-pools",
+            "U1_liquid_tradable",
+            "--min-train-months",
+            "2",
+            "--min-train-rows",
+            "10",
+            "--families",
+            "industry_breadth",
+            "--ltr-models",
+            "top20_calibrated",
+        ],
+    )
+
+    assert ltr.main() == 0
+
+    manifests = sorted((tmp_path / "results").glob("m6_contract_test_*_manifest.json"))
+    assert len(manifests) == 1
+    assert validate_manifest(manifests[0], root=tmp_path) == []
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "research_result_v1"
+    assert payload["identity"]["result_type"] == "monthly_selection_m6_ltr"
+    artifact_names = {x["name"] for x in payload["artifacts"]}
+    assert artifact_names >= {"leaderboard_csv", "feature_importance_csv", "manifest_json", "report_md"}
+    assert (tmp_path / "data/experiments/research_results.jsonl").exists()

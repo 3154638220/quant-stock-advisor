@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import sys
+
 import pandas as pd
 import pytest
 
+import scripts.run_monthly_selection_baselines as baselines
 from scripts.run_monthly_selection_baselines import (
     BaselineRunConfig,
     build_leaderboard,
@@ -15,6 +19,7 @@ from scripts.run_monthly_selection_baselines import (
     summarize_regime_slice,
     valid_pool_frame,
 )
+from scripts.validate_research_contracts import validate_manifest
 
 
 def _baseline_sample(months: int = 5, symbols: int = 8) -> pd.DataFrame:
@@ -101,3 +106,42 @@ def test_walk_forward_scores_only_start_after_required_train_window():
     assert {"M4_elasticnet_excess", "M4_logistic_top20"}.issubset(set(scores["model"]))
     assert not importance.empty
     assert len(valid_pool_frame(df)) == len(df)
+
+
+def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "monthly_selection_features.parquet"
+    _baseline_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
+    monkeypatch.setattr(baselines, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_monthly_selection_baselines.py",
+            "--dataset",
+            str(dataset_path),
+            "--results-dir",
+            "results",
+            "--output-prefix",
+            "baseline_contract_test",
+            "--top-k",
+            "2",
+            "--candidate-pools",
+            "U1_liquid_tradable",
+            "--min-train-months",
+            "2",
+            "--min-train-rows",
+            "10",
+            "--skip-xgboost",
+        ],
+    )
+
+    assert baselines.main() == 0
+
+    manifests = sorted((tmp_path / "results").glob("baseline_contract_test_*_manifest.json"))
+    assert len(manifests) == 1
+    assert validate_manifest(manifests[0], root=tmp_path) == []
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "research_result_v1"
+    assert payload["identity"]["result_type"] == "monthly_selection_baselines"
+    assert {x["name"] for x in payload["artifacts"]} >= {"leaderboard_csv", "manifest_json", "report_md"}
+    assert (tmp_path / "data/experiments/research_results.jsonl").exists()

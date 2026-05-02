@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import re
+from copy import deepcopy
 from typing import Any
 
+from src.models.research_contract import ResearchIdentity
 
 CANONICAL_RESEARCH_CONFIGS: dict[str, dict[str, Any]] = {
     "v3_market_ew_full_backtest": {
@@ -78,6 +79,39 @@ def build_light_research_identity(
         "research_config_id": research_config_id,
         "output_stem": f"{slugify_token(output_prefix)}_{research_config_id}",
     }
+
+
+def make_research_identity(
+    *,
+    result_type: str,
+    research_topic: str,
+    research_config_id: str,
+    output_stem: str,
+    canonical_config_name: str | None = None,
+    parent_result_id: str | None = None,
+) -> ResearchIdentity:
+    """Build the contract object while preserving existing slug rules."""
+    return ResearchIdentity(
+        result_type=slugify_token(result_type),
+        research_topic=slugify_token(research_topic),
+        research_config_id=slugify_token(research_config_id),
+        output_stem=slugify_token(output_stem),
+        canonical_config_name=slugify_token(canonical_config_name) if canonical_config_name else None,
+        parent_result_id=str(parent_result_id) if parent_result_id else None,
+    )
+
+
+def research_identity_from_mapping(payload: dict[str, Any]) -> ResearchIdentity:
+    """Convert a legacy identity dict into the standard contract object."""
+    result_type = str(payload.get("result_type") or payload.get("research_topic") or "research_result")
+    return make_research_identity(
+        result_type=result_type,
+        research_topic=str(payload.get("research_topic") or result_type),
+        research_config_id=str(payload.get("research_config_id") or ""),
+        output_stem=str(payload.get("output_stem") or ""),
+        canonical_config_name=payload.get("canonical_config_name"),
+        parent_result_id=payload.get("parent_result_id"),
+    )
 
 
 def canonical_research_config(name: str) -> dict[str, Any]:
