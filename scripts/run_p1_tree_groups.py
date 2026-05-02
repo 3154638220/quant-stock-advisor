@@ -17,6 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.models.experiment import append_experiment_result  # noqa: E402
+from src.models.research_contract import (  # noqa: E402
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+from scripts.research_identity import make_research_identity, slugify_token  # noqa: E402
+
 from src.models.xtree.p1_workflow import (
     FUND_FLOW_TREE_FEATURES,
     attach_p1_experimental_features,
@@ -1065,6 +1077,107 @@ def main() -> int:
     report_path.write_text(report_text, encoding="utf-8")
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    # --- standard research contract ---
+    def _project_relative(path: str | Path) -> str:
+        p = Path(path).resolve()
+        try:
+            return str(p.relative_to(ROOT.resolve()))
+        except ValueError:
+            return str(p)
+
+    manifest_path = Path(results_dir) / f"{output_stem}_manifest.json"
+    identity = make_research_identity(
+        result_type="p1_tree_groups",
+        research_topic="p1_tree_groups",
+        research_config_id=research_config_id,
+        output_stem=output_stem,
+    )
+    data_slice = DataSlice(
+        dataset_name="p1_tree_groups_daily_proxy",
+        source_tables=("a_share_daily",),
+        date_start=str(args.sample_start) or "2021-01-01",
+        date_end=str(args.backtest_end) or pd.Timestamp.today().strftime("%Y-%m-%d"),
+        asof_trade_date=pd.Timestamp.today().strftime("%Y-%m-%d"),
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="U1_liquid_tradable",
+        rebalance_rule=str(args.rebalance_rule),
+        execution_mode=execution_mode,
+        label_return_mode="open_to_open",
+        feature_set_id="p1_tree_features",
+        feature_columns=(),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=str(args.config) if args.config else "config.yaml.backtest",
+        extra={
+            "proxy_horizon": int(proxy_horizon),
+            "top_k": int(args.top_k),
+            "label_horizons": label_horizons,
+            "label_weights": label_weights,
+            "label_transform": label_transform,
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "分组汇总"),
+        ArtifactRef("detail_csv", _project_relative(detail_path), "csv", False, "分组明细"),
+        ArtifactRef("topk_boundary_csv", _project_relative(boundary_path), "csv", False, "TopK 边界诊断"),
+        ArtifactRef("daily_proxy_monthly_state_csv", _project_relative(state_monthly_path), "csv", False, "月度状态"),
+        ArtifactRef("daily_proxy_state_summary_csv", _project_relative(state_summary_path), "csv", False, "状态汇总"),
+        ArtifactRef("daily_proxy_leaderboard_csv", _project_relative(daily_leaderboard_path), "csv", False, "daily proxy leaderboard"),
+        ArtifactRef("bundle_manifest_csv", _project_relative(bundle_manifest_path), "csv", False, "bundle manifest"),
+        ArtifactRef("direction_diagnostic_csv", _project_relative(direction_diag_path), "csv", False, "方向诊断"),
+        ArtifactRef("report_md", _project_relative(report_path), "md", False, "P1 报告"),
+        ArtifactRef("json_report", _project_relative(json_path), "json", False, "P1 JSON 报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    )
+    metrics = {
+        "group_count": int(len(summary_df)),
+        "detail_rows": int(len(detail_all)),
+        "boundary_rows": int(len(boundary_all)),
+    }
+    if "daily_proxy_annualized_excess_vs_market" in summary_df.columns:
+        top = summary_df.sort_values("daily_proxy_annualized_excess_vs_market", ascending=False).head(1)
+        if not top.empty:
+            metrics["top_daily_proxy_excess"] = float(top.iloc[0]["daily_proxy_annualized_excess_vs_market"])
+    gates = {
+        "data_gate": {
+            "passed": bool(len(summary_df) > 0),
+            "group_count": int(len(summary_df)),
+        },
+        "execution_gate": {
+            "passed": True,
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=" ".join(sys.argv),
+        created_at=utc_now_iso(),
+        duration_sec=None,
+        seed=getattr(args, "seed", None),
+        data_slices=(data_slice,),
+        config=config_snapshot(config_path=str(args.config) if args.config else "config.yaml.backtest"),
+        params={"cli": {k: str(v) for k, v in vars(args).items()}},
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p1_tree_groups_is_historical_research_only"],
+        },
+        notes="Historical P1 tree groups experiment; not a promotion candidate.",
+    )
+    write_research_manifest(manifest_path, result)
+    append_experiment_result(ROOT / "data" / "experiments", result)
+    # --- end standard research contract ---
+
     return 0
 
 

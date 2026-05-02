@@ -26,7 +26,18 @@ from src.models.xtree.p1_workflow import (  # noqa: E402
     summarize_tree_group_result,
 )
 from src.backtest.transaction_costs import transaction_cost_params_from_mapping  # noqa: E402
+from src.models.experiment import append_experiment_result  # noqa: E402
+from src.models.research_contract import (  # noqa: E402
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.settings import load_config  # noqa: E402
+from scripts.research_identity import make_research_identity, slugify_token  # noqa: E402
 
 
 DEFAULT_JSONS = (
@@ -408,6 +419,98 @@ def main() -> int:
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     doc_path.write_text(_build_doc(prefix=prefix, summary=summary, rows=summary_rows), encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    # --- standard research contract ---
+    def _project_relative(path: str | Path) -> str:
+        p = Path(path).resolve()
+        try:
+            return str(p.relative_to(ROOT.resolve()))
+        except ValueError:
+            return str(p)
+
+    manifest_path = results_dir / f"{prefix}_manifest.json"
+    identity = make_research_identity(
+        result_type="p1_proxy_calibration",
+        research_topic="p1_proxy_calibration",
+        research_config_id=f"p1_proxy_cal_{slugify_token(prefix)}",
+        output_stem=prefix,
+    )
+    data_slice = DataSlice(
+        dataset_name="p1_proxy_calibration_backtest",
+        source_tables=("a_share_daily",),
+        date_start=str(args.start) if hasattr(args, "start") else "2021-01-01",
+        date_end=str(getattr(args, "end", "")) or pd.Timestamp.today().strftime("%Y-%m-%d"),
+        asof_trade_date=pd.Timestamp.today().strftime("%Y-%m-%d"),
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="p1_tree_groups_historical",
+        rebalance_rule=str(args.rebalance_rule),
+        execution_mode=execution_mode,
+        label_return_mode="open_to_open",
+        feature_set_id="p1_historical_bundle",
+        feature_columns=(),
+        label_columns=(),
+        pit_policy="historical_bundle_replay",
+        config_path=str(args.config),
+        extra={
+            "proxy_horizon": int(args.proxy_horizon),
+            "top_k": int(args.top_k),
+            "proxy_max_turnover": float(args.proxy_max_turnover),
+            "json_sources": [str(p) for p in json_paths],
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("summary_csv", _project_relative(summary_path), "csv", False, "校准汇总"),
+        ArtifactRef("detail_csv", _project_relative(detail_path), "csv", False, "校准明细"),
+        ArtifactRef("json_report", _project_relative(json_path), "json", False, "校准 JSON 报告"),
+        ArtifactRef("report_md", _project_relative(doc_path), "md", False, "校准报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    )
+    metrics = {
+        "sample_count": int(len(summary_rows)),
+        "json_source_count": int(len(json_paths)),
+    }
+    gates = {
+        "data_gate": {
+            "passed": bool(len(summary_rows) > 0),
+            "summary_rows": int(len(summary_rows)),
+        },
+        "execution_gate": {
+            "passed": True,
+            "json_sources_loaded": int(len(json_paths)),
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=" ".join(sys.argv),
+        created_at=utc_now_iso(),
+        duration_sec=None,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(config_path=str(args.config), resolved_config=cfg),
+        params={
+            "cli": {k: str(v) for k, v in vars(args).items()},
+        },
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p1_proxy_calibration_is_historical_research_only"],
+        },
+        notes="Historical P1 proxy calibration; not a promotion candidate.",
+    )
+    write_research_manifest(manifest_path, result)
+    append_experiment_result(ROOT / "data" / "experiments", result)
+    # --- end standard research contract ---
+
     return 0
 
 

@@ -60,6 +60,17 @@ from scripts.run_r2b_tradable_upside_replacement_v1 import (  # noqa: E402
     build_r2b_scores,
 )
 from src.models.xtree.p1_workflow import build_tree_score_weight_matrix  # noqa: E402
+from src.models.experiment import append_experiment_result  # noqa: E402
+from src.models.research_contract import (  # noqa: E402
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+from scripts.research_identity import make_research_identity, slugify_token  # noqa: E402
 
 
 DEFAULT_OUTPUT_PREFIX = "r2b_v2_weight_audit_2026-04-28"
@@ -682,6 +693,84 @@ def main() -> None:
     )
     (docs_dir / f"{prefix}.md").write_text(doc, encoding="utf-8")
     print(f"  doc -> {docs_dir / f'{prefix}.md'}", flush=True)
+
+    # --- standard research contract ---
+    def _project_relative(path: str | Path) -> str:
+        p = Path(path).resolve()
+        try:
+            return str(p.relative_to(PROJECT_ROOT.resolve()))
+        except ValueError:
+            return str(p)
+
+    manifest_path = results_dir / f"{prefix}_manifest.json"
+    identity = make_research_identity(
+        result_type="r2b_v2_weight_audit",
+        research_topic="r2b_v2_weight_audit",
+        research_config_id=f"r2b_audit_{slugify_token(prefix)}",
+        output_stem=prefix,
+    )
+    data_slice = DataSlice(
+        dataset_name="r2b_v2_weight_audit_backtest",
+        source_tables=("a_share_daily",),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="U1_liquid_tradable",
+        rebalance_rule=rebalance_rule,
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id="r2b_weight_audit_factors",
+        feature_columns=(),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=config_source,
+        extra={"top_k": int(top_k), "max_turnover": float(max_turnover), "target_rule_pair_rows": int(len(rule_pairs))},
+    )
+    artifact_refs = (
+        ArtifactRef("monthly_attribution_csv", _project_relative(results_dir / f"{prefix}_monthly_attribution.csv"), "csv", False, "月度归因"),
+        ArtifactRef("monthly_attribution_summary_csv", _project_relative(results_dir / f"{prefix}_monthly_attribution_summary.csv"), "csv", False, "归因汇总"),
+        ArtifactRef("feature_bucket_monotonicity_csv", _project_relative(results_dir / f"{prefix}_feature_bucket_monotonicity.csv"), "csv", False, "特征单调性"),
+        ArtifactRef("selected_pairs_by_year_csv", _project_relative(results_dir / f"{prefix}_selected_pairs_by_year.csv"), "csv", False, "按年选中"),
+        ArtifactRef("selected_pairs_by_slot_csv", _project_relative(results_dir / f"{prefix}_selected_pairs_by_slot.csv"), "csv", False, "按slot选中"),
+        ArtifactRef("selected_pairs_by_industry_csv", _project_relative(results_dir / f"{prefix}_selected_pairs_by_industry.csv"), "csv", False, "按行业选中"),
+        ArtifactRef("threshold_capacity_sensitivity_csv", _project_relative(results_dir / f"{prefix}_threshold_capacity_sensitivity.csv"), "csv", False, "阈值敏感性"),
+        ArtifactRef("simple_baseline_comparison_csv", _project_relative(results_dir / f"{prefix}_simple_baseline_comparison.csv"), "csv", False, "简单基线对比"),
+        ArtifactRef("summary_json", _project_relative(results_dir / f"{prefix}_summary.json"), "json", False, "汇总"),
+        ArtifactRef("report_md", _project_relative(docs_dir / f"{prefix}.md"), "md", False, "报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    )
+    metrics = {
+        "monthly_attr_rows": int(len(monthly_attr)),
+        "selected_pairs": int(len(selected)),
+        "sensitivity_rows": int(len(sensitivity)),
+    }
+    gates = {
+        "data_gate": {"passed": bool(len(monthly_attr) > 0)},
+        "execution_gate": {"passed": True},
+        "governance_gate": {"passed": True, "manifest_schema": "research_result_v1"},
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=" ".join(sys.argv),
+        created_at=utc_now_iso(),
+        duration_sec=None,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(config_path=config_source),
+        params={"cli": {k: str(v) for k, v in vars(args).items()}},
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={"production_eligible": False, "registry_status": "not_registered", "blocking_reasons": ["r2b_audit_is_research_only"]},
+        notes="R2B v2 gray-zone weight audit; not a promotion candidate.",
+    )
+    write_research_manifest(manifest_path, result)
+    append_experiment_result(PROJECT_ROOT / "data" / "experiments", result)
+    # --- end standard research contract ---
 
 
 if __name__ == "__main__":

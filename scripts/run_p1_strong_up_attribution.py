@@ -43,6 +43,17 @@ from scripts.run_backtest_eval import (
     run_backtest,
     transaction_cost_params_from_mapping,
 )
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+from scripts.research_identity import make_research_identity, slugify_token
 
 
 REGIME_ORDER = ["strong_down", "mild_down", "neutral", "mild_up", "strong_up"]
@@ -978,6 +989,103 @@ def main() -> None:
     )
     (docs_dir / f"{prefix}.md").write_text(doc_text, encoding="utf-8")
     print(f"  doc -> {docs_dir / f'{prefix}.md'}", flush=True)
+
+    # --- standard research contract ---
+    def _project_relative(path: str | Path) -> str:
+        p = Path(path).resolve()
+        try:
+            return str(p.relative_to(PROJECT_ROOT.resolve()))
+        except ValueError:
+            return str(p)
+
+    manifest_path = results_dir / f"{prefix}_manifest.json"
+    identity = make_research_identity(
+        result_type="p1_strong_up_attribution",
+        research_topic="p1_strong_up_attribution",
+        research_config_id=f"p1_strong_up_{slugify_token(prefix)}",
+        output_stem=prefix,
+    )
+    data_slice = DataSlice(
+        dataset_name="p1_strong_up_attribution_backtest",
+        source_tables=("a_share_daily", "pit_fundamental"),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="U1_liquid_tradable",
+        rebalance_rule=rebalance_rule,
+        execution_mode=execution_mode,
+        label_return_mode="open_to_open",
+        feature_set_id="p1_strong_up_attribution_factors",
+        feature_columns=EXPOSURE_FEATURES,
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=str(args.config),
+        extra={
+            "top_k": int(top_k),
+            "max_turnover": float(max_turnover),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("monthly_csv", _project_relative(results_dir / f"{prefix}_monthly.csv"), "csv", False, "月度状态"),
+        ArtifactRef("regime_capture_csv", _project_relative(results_dir / f"{prefix}_regime_capture.csv"), "csv", False, "状态捕获"),
+        ArtifactRef("breadth_capture_csv", _project_relative(results_dir / f"{prefix}_breadth_capture.csv"), "csv", False, "广度捕获"),
+        ArtifactRef("year_capture_csv", _project_relative(results_dir / f"{prefix}_year_capture.csv"), "csv", False, "年度捕获"),
+        ArtifactRef("group_exposure_detail_csv", _project_relative(results_dir / f"{prefix}_group_exposure_detail.csv"), "csv", False, "分组暴露明细"),
+        ArtifactRef("group_exposure_csv", _project_relative(results_dir / f"{prefix}_group_exposure.csv"), "csv", False, "分组暴露汇总"),
+        ArtifactRef("group_active_diff_csv", _project_relative(results_dir / f"{prefix}_group_active_diff.csv"), "csv", False, "主动差异"),
+        ArtifactRef("switch_quality_csv", _project_relative(results_dir / f"{prefix}_switch_quality.csv"), "csv", False, "切换质量"),
+        ArtifactRef("switch_by_regime_csv", _project_relative(results_dir / f"{prefix}_switch_by_regime.csv"), "csv", False, "切换按状态"),
+        ArtifactRef("summary_json", _project_relative(results_dir / f"{prefix}_summary.json"), "json", False, "归因汇总"),
+        ArtifactRef("report_md", _project_relative(docs_dir / f"{prefix}.md"), "md", False, "归因报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    )
+    metrics = {
+        "regime_capture_rows": int(len(regime_capture)),
+        "breadth_capture_rows": int(len(breadth_capture)),
+        "year_capture_rows": int(len(year_capture)),
+        "switch_by_regime_rows": int(len(switch_by_regime)),
+        "full_sample_annualized_return": float(res.panel.annualized_return),
+        "full_sample_sharpe_ratio": float(res.panel.sharpe_ratio),
+    }
+    gates = {
+        "data_gate": {
+            "passed": True,
+            "regime_capture_rows": int(len(regime_capture)),
+        },
+        "execution_gate": {
+            "passed": True,
+        },
+        "governance_gate": {
+            "passed": True,
+            "manifest_schema": "research_result_v1",
+        },
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=" ".join(sys.argv),
+        created_at=utc_now_iso(),
+        duration_sec=None,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(config_path=str(args.config)),
+        params={"cli": {k: str(v) for k, v in vars(args).items()}},
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p1_strong_up_attribution_is_historical_research_only"],
+        },
+        notes="Historical P1 Strong-Up attribution; not a promotion candidate.",
+    )
+    write_research_manifest(manifest_path, result)
+    append_experiment_result(PROJECT_ROOT / "data" / "experiments", result)
+    # --- end standard research contract ---
 
 
 if __name__ == "__main__":

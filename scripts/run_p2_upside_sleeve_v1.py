@@ -47,6 +47,17 @@ from scripts.run_backtest_eval import (
     load_daily_from_duckdb,
     transaction_cost_params_from_mapping,
 )
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
+from scripts.research_identity import make_research_identity, slugify_token
 from scripts.run_p1_strong_up_attribution import (
     REGIME_ORDER,
     _compound_return,
@@ -692,6 +703,94 @@ def main() -> None:
     )
     (docs_dir / f"{prefix}.md").write_text(doc_text, encoding="utf-8")
     print(f"  doc -> {docs_dir / f'{prefix}.md'}", flush=True)
+
+    # --- standard research contract ---
+    def _project_relative(path: str | Path) -> str:
+        p = Path(path).resolve()
+        try:
+            return str(p.relative_to(PROJECT_ROOT.resolve()))
+        except ValueError:
+            return str(p)
+
+    manifest_path = results_dir / f"{prefix}_manifest.json"
+    identity = make_research_identity(
+        result_type="p2_upside_sleeve",
+        research_topic="p2_upside_sleeve",
+        research_config_id=f"p2_upside_{slugify_token(prefix)}",
+        output_stem=prefix,
+    )
+    data_slice = DataSlice(
+        dataset_name="p2_upside_sleeve_backtest",
+        source_tables=("a_share_daily", "pit_fundamental"),
+        date_start=args.start,
+        date_end=end_date,
+        asof_trade_date=end_date,
+        signal_date_col="trade_date",
+        symbol_col="symbol",
+        candidate_pool_version="U1_liquid_tradable",
+        rebalance_rule=rebalance_rule,
+        execution_mode="tplus1_open",
+        label_return_mode="open_to_open",
+        feature_set_id="p2_upside_sleeve_factors",
+        feature_columns=(),
+        label_columns=(),
+        pit_policy="signal_date_close_visible_only",
+        config_path=config_source,
+        extra={
+            "top_k": int(top_k),
+            "max_turnover": float(max_turnover),
+            "upside_candidates_count": int(len(UPSIDE_CANDIDATES)),
+        },
+    )
+    artifact_refs = (
+        ArtifactRef("leaderboard_csv", _project_relative(results_dir / f"{prefix}_leaderboard.csv"), "csv", False, "leaderboard"),
+        ArtifactRef("regime_long_csv", _project_relative(results_dir / f"{prefix}_regime_long.csv"), "csv", False, "状态长期"),
+        ArtifactRef("breadth_long_csv", _project_relative(results_dir / f"{prefix}_breadth_long.csv"), "csv", False, "广度长期"),
+        ArtifactRef("year_long_csv", _project_relative(results_dir / f"{prefix}_year_long.csv"), "csv", False, "年度长期"),
+        ArtifactRef("switch_long_csv", _project_relative(results_dir / f"{prefix}_switch_long.csv"), "csv", False, "切换长期"),
+        ArtifactRef("monthly_long_csv", _project_relative(results_dir / f"{prefix}_monthly_long.csv"), "csv", False, "月度长期"),
+        ArtifactRef("summary_json", _project_relative(results_dir / f"{prefix}_summary.json"), "json", False, "汇总"),
+        ArtifactRef("report_md", _project_relative(docs_dir / f"{prefix}.md"), "md", False, "报告"),
+        ArtifactRef("manifest_json", _project_relative(manifest_path), "json", False),
+    )
+    top_leader = leaderboard.sort_values("daily_bt_like_proxy_annualized_excess_vs_market", ascending=False).head(1)
+    metrics = {
+        "candidate_count": int(len(leaderboard)),
+        "accept_count": int(sum(1 for v in accept_map.values() if v == "accept")),
+        "gray_zone_count": int(sum(1 for v in accept_map.values() if v == "gray_zone")),
+        "reject_count": int(sum(1 for v in accept_map.values() if v == "reject")),
+    }
+    if not top_leader.empty:
+        metrics["top_daily_proxy_excess"] = float(top_leader.iloc[0]["daily_bt_like_proxy_annualized_excess_vs_market"])
+    gates = {
+        "data_gate": {"passed": bool(len(leaderboard) > 0), "candidate_count": int(len(leaderboard))},
+        "execution_gate": {"passed": True},
+        "governance_gate": {"passed": True, "manifest_schema": "research_result_v1"},
+    }
+    result = ExperimentResult(
+        result_id=build_result_id(identity, [data_slice], metrics),
+        identity=identity,
+        script_name=_project_relative(Path(__file__).resolve()),
+        command=" ".join(sys.argv),
+        created_at=utc_now_iso(),
+        duration_sec=None,
+        seed=None,
+        data_slices=(data_slice,),
+        config=config_snapshot(config_path=config_source),
+        params={"cli": {k: str(v) for k, v in vars(args).items()}},
+        metrics=metrics,
+        gates=gates,
+        artifacts=artifact_refs,
+        promotion={
+            "production_eligible": False,
+            "registry_status": "not_registered",
+            "blocking_reasons": ["p2_upside_sleeve_is_historical_research_only"],
+        },
+        notes="Historical P2 upside sleeve experiment; not a promotion candidate.",
+    )
+    write_research_manifest(manifest_path, result)
+    append_experiment_result(PROJECT_ROOT / "data" / "experiments", result)
+    # --- end standard research contract ---
 
 
 if __name__ == "__main__":
