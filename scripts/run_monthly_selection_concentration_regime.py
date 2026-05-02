@@ -68,6 +68,12 @@ STABLE_M5_EXTRATREES = "M5_plus_industry_breadth_plus_fund_flow_plus_fundamental
 WATCHLIST_M6_RANK = "M6_xgboost_rank_ndcg"
 WATCHLIST_M6_TOP20 = "M6_top20_calibrated"
 M8_POLICY_MODEL = "M8_regime_aware_fixed_policy"
+TOPK_PRESET_DEFAULT = "default"
+TOPK_PRESET_NARROW = "narrow"
+TOPK_PRESETS: dict[str, str] = {
+    TOPK_PRESET_DEFAULT: "20,30,50",
+    TOPK_PRESET_NARROW: "5,10,20",
+}
 
 
 @dataclass(frozen=True)
@@ -94,8 +100,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-prefix", type=str, default="monthly_selection_m8_concentration_regime")
     p.add_argument("--as-of-date", type=str, default="", help="输出文件日期；默认使用当前日期。")
     p.add_argument("--results-dir", type=str, default="")
-    p.add_argument("--top-k", type=str, default="20,30,50")
-    p.add_argument("--cap-grid", type=str, default="20:3,4,5;30:4,5,6,8;50:6,8,10")
+    p.add_argument(
+        "--topk-preset",
+        type=str,
+        default=TOPK_PRESET_DEFAULT,
+        choices=tuple(TOPK_PRESETS.keys()),
+        help="default=20/30/50；narrow=5/10/20，适合先验证是否值得从 Top20 缩窄到 Top10/Top5。",
+    )
+    p.add_argument("--top-k", type=str, default="")
+    p.add_argument(
+        "--cap-grid",
+        type=str,
+        default="",
+        help="留空时按 top-k 自动生成行业 cap 网格；如 5->1,2；10->2,3；20->3,4,5。",
+    )
     p.add_argument("--candidate-pools", type=str, default="U1_liquid_tradable,U2_risk_sane")
     p.add_argument("--bucket-count", type=int, default=5)
     p.add_argument("--min-train-months", type=int, default=24)
@@ -144,6 +162,41 @@ def parse_cap_grid(raw: str, top_ks: list[int]) -> dict[int, tuple[int, ...]]:
     for k in top_ks:
         out.setdefault(k, tuple())
     return out
+
+
+def default_cap_values_for_topk(top_k: int) -> tuple[int, ...]:
+    k = int(top_k)
+    if k <= 5:
+        return (1, 2)
+    if k <= 10:
+        return (2, 3)
+    if k <= 20:
+        return (3, 4, 5)
+    if k <= 30:
+        return (4, 5, 6, 8)
+    return (6, 8, 10)
+
+
+def build_default_cap_grid(top_ks: list[int]) -> dict[int, tuple[int, ...]]:
+    return {int(k): default_cap_values_for_topk(int(k)) for k in top_ks}
+
+
+def serialize_cap_grid(cap_grid: dict[int, tuple[int, ...]]) -> str:
+    parts: list[str] = []
+    for k in sorted(cap_grid):
+        vals = ",".join(str(v) for v in cap_grid[k])
+        parts.append(f"{int(k)}:{vals}")
+    return ";".join(parts)
+
+
+def resolve_topk_and_cap_grid(*, preset: str, top_k_raw: str, cap_grid_raw: str) -> tuple[list[int], dict[int, tuple[int, ...]]]:
+    preset_topk = TOPK_PRESETS.get(str(preset), TOPK_PRESETS[TOPK_PRESET_DEFAULT])
+    top_ks = _parse_int_list(str(top_k_raw).strip() or preset_topk)
+    if str(cap_grid_raw).strip():
+        cap_grid = parse_cap_grid(cap_grid_raw, top_ks)
+    else:
+        cap_grid = build_default_cap_grid(top_ks)
+    return top_ks, cap_grid
 
 
 def _industry_threshold(top_k: int) -> float:
@@ -814,9 +867,12 @@ def main() -> int:
     results_dir.mkdir(parents=True, exist_ok=True)
     docs_dir.mkdir(parents=True, exist_ok=True)
 
-    top_ks = _parse_int_list(args.top_k)
+    top_ks, cap_grid = resolve_topk_and_cap_grid(
+        preset=args.topk_preset,
+        top_k_raw=args.top_k,
+        cap_grid_raw=args.cap_grid,
+    )
     pools = _parse_str_list(args.candidate_pools)
-    cap_grid = parse_cap_grid(args.cap_grid, top_ks)
     enabled_families = _parse_str_list(args.families)
     cfg = M8RunConfig(
         top_ks=tuple(top_ks),
@@ -838,7 +894,7 @@ def main() -> int:
         f"_families_{'-'.join(slugify_token(x) for x in ['price_volume_only', *enabled_families])}"
         f"_pools_{'-'.join(slugify_token(x) for x in pools)}"
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
-        f"_capgrid_{slugify_token(args.cap_grid)}"
+        f"_capgrid_{slugify_token(serialize_cap_grid(cap_grid))}"
         f"_maxfit_{int(args.max_fit_rows)}"
         f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
         f"_wf_{int(args.min_train_months)}m"

@@ -15,10 +15,14 @@ from scripts.run_monthly_selection_concentration_regime import (
     WATCHLIST_M6_TOP20,
     build_constrained_leaderboard,
     build_constrained_monthly,
+    build_default_cap_grid,
     build_lagged_state_frame,
     build_regime_policy_scores,
+    default_cap_values_for_topk,
     parse_cap_grid,
+    resolve_topk_and_cap_grid,
     select_with_industry_cap,
+    serialize_cap_grid,
     summarize_industry_concentration,
 )
 from scripts.run_monthly_selection_baselines import build_quantile_spread, build_rank_ic, summarize_regime_slice
@@ -130,3 +134,32 @@ def test_parse_cap_grid_keeps_requested_topk_without_caps():
     assert out[20] == (3, 4)
     assert out[30] == (5,)
     assert out[50] == tuple()
+
+
+@pytest.mark.parametrize(
+    ("top_k", "expected"),
+    [
+        (5, (1, 2)),
+        (10, (2, 3)),
+        (20, (3, 4, 5)),
+        (30, (4, 5, 6, 8)),
+        (50, (6, 8, 10)),
+    ],
+)
+def test_default_cap_values_follow_topk_width(top_k: int, expected: tuple[int, ...]):
+    assert default_cap_values_for_topk(top_k) == expected
+
+
+def test_resolve_topk_and_cap_grid_supports_narrow_preset():
+    top_ks, cap_grid = resolve_topk_and_cap_grid(preset="narrow", top_k_raw="", cap_grid_raw="")
+
+    assert top_ks == [5, 10, 20]
+    assert cap_grid == build_default_cap_grid([5, 10, 20])
+    assert serialize_cap_grid(cap_grid) == "5:1,2;10:2,3;20:3,4,5"
+
+
+def test_resolve_topk_and_cap_grid_auto_fills_manual_top10_top5():
+    top_ks, cap_grid = resolve_topk_and_cap_grid(preset="default", top_k_raw="10,5", cap_grid_raw="")
+
+    assert top_ks == [5, 10]
+    assert cap_grid == {5: (1, 2), 10: (2, 3)}

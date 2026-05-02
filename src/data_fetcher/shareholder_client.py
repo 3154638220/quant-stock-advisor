@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,13 @@ SHAREHOLDER_TABLE_COLS: tuple[str, ...] = (
     "source",
     "fetched_at",
 )
+
+
+@dataclass(frozen=True)
+class ShareholderUpdateSummary:
+    total_rows: int
+    success_dates: int
+    failed_dates: int
 
 
 def _norm_symbol(symbol: str) -> str:
@@ -138,14 +146,30 @@ class ShareholderClient:
             return out
         return out[list(SHAREHOLDER_TABLE_COLS)].drop_duplicates(["symbol", "end_date"], keep="last")
 
-    def fetch_end_date_shareholder(self, end_date: str) -> pd.DataFrame:
+    def fetch_end_date_shareholder(
+        self,
+        end_date: str,
+        *,
+        max_retries: int = 3,
+        retry_delay_sec: float = 1.0,
+    ) -> pd.DataFrame:
         key = str(end_date).replace("-", "")
-        try:
-            raw = _require_akshare().stock_zh_a_gdhs(symbol=key)
-        except Exception as exc:  # noqa: BLE001
-            _LOG.debug("股东人数拉取失败 end_date=%s: %s", key, exc)
-            return pd.DataFrame()
-        return self._prepare_shareholder_frame(raw)
+        retries = max(1, int(max_retries))
+        for attempt in range(retries):
+            try:
+                raw = _require_akshare().stock_zh_a_gdhs(symbol=key)
+                return self._prepare_shareholder_frame(raw)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "股东人数拉取失败 end_date=%s 第 %d/%d 次: %s",
+                    key,
+                    attempt + 1,
+                    retries,
+                    exc,
+                )
+                if attempt < retries - 1 and retry_delay_sec > 0:
+                    time.sleep(float(retry_delay_sec) * (attempt + 1))
+        return pd.DataFrame()
 
     def upsert(self, df: pd.DataFrame) -> int:
         if df is None or df.empty:
@@ -169,18 +193,24 @@ class ShareholderClient:
             self._conn.unregister("sh_in")
         return int(len(aligned))
 
-    def update_end_dates(
+    def update_end_dates_summary(
         self,
         end_dates: Iterable[str],
         *,
         sleep_sec: float = 0.5,
         log_every: int = 1,
-    ) -> int:
+        max_retries: int = 3,
+        retry_delay_sec: float = 1.0,
+    ) -> ShareholderUpdateSummary:
         total = 0
         success = 0
         fail = 0
         for i, end_date in enumerate(end_dates):
-            df = self.fetch_end_date_shareholder(end_date)
+            df = self.fetch_end_date_shareholder(
+                end_date,
+                max_retries=max_retries,
+                retry_delay_sec=retry_delay_sec,
+            )
             if not df.empty:
                 total += self.upsert(df)
                 success += 1
@@ -188,10 +218,33 @@ class ShareholderClient:
                     _LOG.info("股东人数已处理 %d 个截止日（成功 %d，失败 %d）", i + 1, success, fail)
             else:
                 fail += 1
+                _LOG.error("股东人数截止日抓取失败或返回空数据: %s", str(end_date).replace("-", ""))
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
         _LOG.info("股东人数完成：成功 %d，失败 %d，总行数 %d", success, fail, total)
-        return total
+        return ShareholderUpdateSummary(
+            total_rows=total,
+            success_dates=success,
+            failed_dates=fail,
+        )
+
+    def update_end_dates(
+        self,
+        end_dates: Iterable[str],
+        *,
+        sleep_sec: float = 0.5,
+        log_every: int = 1,
+        max_retries: int = 3,
+        retry_delay_sec: float = 1.0,
+    ) -> int:
+        summary = self.update_end_dates_summary(
+            end_dates,
+            sleep_sec=sleep_sec,
+            log_every=log_every,
+            max_retries=max_retries,
+            retry_delay_sec=retry_delay_sec,
+        )
+        return int(summary.total_rows)
 
     def load_by_date_range(
         self,
