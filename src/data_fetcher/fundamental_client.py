@@ -197,10 +197,10 @@ class FundamentalClient:
         out = raw.copy()
         report_col = _pick_col(out, ["报告期", "报告日期", "日期", "截止日期", "statDate"])
         ann_col = _pick_col(out, ["公告日期", "公告日", "最新公告日期", "公告时间", "publishDate"])
-        if report_col is None and ann_col is None:
+        if report_col is None or ann_col is None:
             return pd.DataFrame()
         report_date = pd.to_datetime(out[report_col], errors="coerce") if report_col else pd.NaT
-        ann_date = pd.to_datetime(out[ann_col], errors="coerce") if ann_col else report_date
+        ann_date = pd.to_datetime(out[ann_col], errors="coerce")
         norm = pd.DataFrame(
             {
                 "symbol": _norm_symbol(symbol),
@@ -500,7 +500,10 @@ class FundamentalClient:
     ) -> pd.DataFrame:
         t = self.cfg.table_name
         asof = pd.Timestamp(asof_date).date()
-        conds = ["announcement_date <= ?"]
+        conds = [
+            "announcement_date <= ?",
+            "(source = 'stock_value_em' OR report_period IS NULL OR announcement_date > report_period)",
+        ]
         params: list[object] = [asof]
         if symbols:
             sym_list = [str(_norm_symbol(s)) for s in symbols]

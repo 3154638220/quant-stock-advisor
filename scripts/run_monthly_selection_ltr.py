@@ -70,6 +70,24 @@ from src.models.research_contract import (
 )
 from src.settings import config_path_candidates, load_config, resolve_config_path
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 以下核心管线函数已提取到 src.pipeline.monthly_ltr：
+#   build_m6_feature_spec, build_ltr_relevance, build_walk_forward_ltr_scores,
+#   summarize_ltr_feature_importance, _train_predict_xgboost_ranker, 等。
+# 本脚本保留本地副本仅为向后兼容；后续维护请直接修改 monthly_ltr 中的版本。
+# ═══════════════════════════════════════════════════════════════════════════
+from src.pipeline.monthly_ltr import (  # noqa: F401
+    M6RunConfig,
+    build_ltr_relevance,
+    build_m6_feature_spec,
+    build_walk_forward_ltr_scores,
+    summarize_ltr_feature_importance,
+    _build_ranker_top20_ensemble,
+    _tag_importance,
+    _train_predict_top20_calibrated,
+    _train_predict_xgboost_ranker,
+)
+
 
 @dataclass(frozen=True)
 class M6RunConfig:

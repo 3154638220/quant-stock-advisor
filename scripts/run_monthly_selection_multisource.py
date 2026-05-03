@@ -54,7 +54,7 @@ from scripts.run_monthly_selection_baselines import (
     summarize_year_slice,
     valid_pool_frame,
 )
-from src.features.fundamental_factors import DEFAULT_FUNDAMENTAL_COLS
+from src.features.fundamental_factors import DEFAULT_FUNDAMENTAL_COLS, pit_safe_fundamental_rows
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
     ArtifactRef,
@@ -66,6 +66,31 @@ from src.models.research_contract import (
     write_research_manifest,
 )
 from src.settings import config_path_candidates, load_config, resolve_config_path
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 以下核心管线函数已提取到 src.pipeline.monthly_multisource：
+#   attach_industry_breadth_features, attach_fund_flow_features,
+#   attach_fundamental_features, attach_shareholder_features,
+#   build_feature_specs, build_all_m5_scores, summarize_feature_coverage_by_spec,
+#   summarize_feature_importance, build_incremental_delta, 等。
+# 本脚本保留本地副本仅为向后兼容；后续维护请直接修改 monthly_multisource 中的版本。
+# ═══════════════════════════════════════════════════════════════════════════
+from src.pipeline.monthly_multisource import (  # noqa: F401
+    FeatureSpec,
+    M5RunConfig,
+    add_zscore_and_missing_flags,
+    attach_enabled_families,
+    attach_fund_flow_features,
+    attach_fundamental_features,
+    attach_industry_breadth_features,
+    attach_shareholder_features,
+    build_all_m5_scores,
+    build_feature_specs,
+    build_incremental_delta,
+    summarize_feature_coverage_by_spec,
+    summarize_feature_importance,
+    _cap_fit_rows,
+)
 
 PRICE_VOLUME_FEATURES: tuple[str, ...] = ML_FEATURE_COLS
 
@@ -203,7 +228,7 @@ def _parse_str_list(raw: str) -> list[str]:
 def _normalize_symbol_date(df: pd.DataFrame, *, date_col: str = "signal_date") -> pd.DataFrame:
     out = df.copy()
     out["symbol"] = out["symbol"].astype(str).str.extract(r"(\d{1,6})", expand=False).fillna("").str.zfill(6)
-    out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize()
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize().astype("datetime64[ns]")
     return out
 
 
@@ -319,6 +344,20 @@ def _merge_asof_by_symbol(signal: pd.DataFrame, raw: pd.DataFrame, *, left_date:
     )
 
 
+def _filter_pit_safe_fundamental_rows(raw: pd.DataFrame) -> pd.DataFrame:
+    """Drop statement rows whose announcement date is not after the report period.
+
+    Daily valuation rows use the trade date as both report period and availability date,
+    so they are retained. Statement rows without a real announcement date are not PIT-safe.
+    """
+    if raw.empty:
+        return raw
+    out = raw.copy()
+    return out[
+        pit_safe_fundamental_rows(out, announcement_col="_fund_announcement_date")
+    ].copy()
+
+
 def attach_fund_flow_features(dataset: pd.DataFrame, db_path: Path, *, table: str = "a_share_fund_flow") -> pd.DataFrame:
     signal = dataset[["signal_date", "symbol"]].drop_duplicates(["signal_date", "symbol"]).copy()
     raw = _read_table_if_exists(
@@ -394,6 +433,7 @@ def attach_fundamental_features(
         "symbol",
         "report_period",
         "announcement_date",
+        "source",
         *[c.replace("feature_fundamental_", "") for c in FUNDAMENTAL_RAW_FEATURES],
     ]
     raw = _read_table_if_exists(db_path, table, raw_cols)
@@ -407,6 +447,7 @@ def attach_fundamental_features(
     raw = _normalize_symbol_date(raw, date_col="_fund_announcement_date")
     raw["report_period"] = pd.to_datetime(raw.get("report_period"), errors="coerce").dt.normalize()
     raw = raw[raw["_fund_announcement_date"].notna()].copy()
+    raw = _filter_pit_safe_fundamental_rows(raw)
     raw = raw.sort_values(["symbol", "_fund_announcement_date", "report_period"], kind="mergesort")
     raw = raw.drop_duplicates(["symbol", "_fund_announcement_date", "report_period"], keep="last")
     rename_map = {c.replace("feature_fundamental_", ""): c for c in FUNDAMENTAL_RAW_FEATURES}

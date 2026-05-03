@@ -58,6 +58,20 @@ from src.models.research_contract import (
 )
 from src.settings import load_config, resolve_config_path
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 以下核心报告函数已提取到 src.reporting.monthly_report：
+#   select_report_signal_date, build_full_fit_report_scores,
+#   summarize_report_feature_coverage, apply_m9_feature_coverage_policy, 等。
+# 本脚本保留本地副本仅为向后兼容；后续维护请直接修改 monthly_report 中的版本。
+# ═══════════════════════════════════════════════════════════════════════════
+from src.reporting.monthly_report import (  # noqa: F401
+    M7RunConfig,
+    apply_m9_feature_coverage_policy,
+    build_full_fit_report_scores,
+    select_report_signal_date,
+    summarize_report_feature_coverage,
+)
+
 
 @dataclass(frozen=True)
 class M7RunConfig:

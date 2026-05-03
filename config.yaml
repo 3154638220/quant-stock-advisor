@@ -3,7 +3,7 @@ paths:
   results_dir: data/results
   logs_dir: data/logs
   models_dir: data/models
-  # P4-C：统一实验记录落盘目录（run_backtest_eval.py / 训练 / eval 共用）
+  # 统一实验记录落盘目录
   experiments_dir: data/experiments
   universe_cache_path: data/cache/universe_symbols.json
   asof_trade_date: ""
@@ -95,17 +95,10 @@ signals:
     # P1-B 资金流（可选）
     northbound_net_inflow: 0.03
     margin_buy_ratio: -0.02
-  # P1-B：根据 diagnose_factor_ic 报告自动删减/翻转无效因子
-  p1_factor_filter:
-    enabled: false
-    ic_report_path: data/results/factor_ic_report.csv
-    remove_if_t1_and_t21_negative: true
-    zero_if_abs_t1_below: 0.0
-    flip_if_t1_negative_and_t21_above: 0.005
-  # P2-A：滚动 ICIR 动态权重（可选）
+  # 滚动 ICIR 动态权重（可选）
   ic_weighting:
     enabled: false
-    # update_ic_weights.py 输出路径；存在时优先读取
+    # IC 权重缓存路径；存在时优先读取
     weights_path: data/cache/ic_weights.json
     # 未提供 weights_path 或文件缺失时，可从监控文件在线计算
     monitor_path: data/logs/ic_monitor.json
@@ -113,56 +106,6 @@ signals:
     min_obs: 20
     half_life: 20.0
     clip_abs_weight: 0.25
-  tree_model:
-    bundle_dir: data/models/xgboost_panel_latest
-    rsi_mode: level
-    # P3-A：严格时间序列交叉验证折数（TimeSeriesSplit）
-    time_cv_splits: 3
-    keep_versions: 8
-    rank_ic_guard:
-      enabled: true
-      quantile: 0.25
-      min_history: 4
-      # P3-A：硬门槛，验证集 Rank IC 不达标不发布
-      min_rank_ic: 0.03
-    labels:
-      horizons: [5, 10, 20]
-      weights: [0.5, 0.3, 0.2]
-      fusion: rank_fusion
-    features:
-      - momentum
-      - rsi
-      - atr
-      - realized_vol
-      - turnover_roll_mean
-      - vol_ret_corr
-      - short_reversal
-      - vol_to_turnover
-      - volume_skew_log
-      - bias_short
-      - bias_long
-      - max_single_day_drop
-      - recent_return
-      - price_position
-      - log_market_cap
-      - weekly_kdj_k
-      - weekly_kdj_d
-      - weekly_kdj_j
-      - weekly_kdj_oversold
-      - weekly_kdj_oversold_depth
-      - weekly_kdj_rebound
-      - intraday_range
-      - upper_shadow_ratio
-      - lower_shadow_ratio
-      - close_open_return
-      - overnight_gap
-      - tail_strength
-      - volume_price_trend
-      - intraday_range_skew
-  deep_sequence:
-    bundle_dir: data/models/deep_sequence_latest
-    seq_len: 30
-    map_location: cpu
 
 monthly_selection:
   default_method:

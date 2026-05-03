@@ -21,18 +21,6 @@ CANONICAL_RESEARCH_CONFIGS: dict[str, dict[str, Any]] = {
         "universe_filter": True,
         "benchmark_symbol": "market_ew_proxy",
     },
-    "p1_tree_full_backtest": {
-        "result_type": "full_backtest",
-        "score": "xgboost",
-        "portfolio_method": "equal_weight",
-        "top_k": 20,
-        "rebalance_rule": "M",
-        "max_turnover": 1.0,
-        "execution_mode": "tplus1_open",
-        "prefilter": False,
-        "universe_filter": True,
-        "benchmark_symbol": "market_ew_proxy",
-    },
 }
 
 

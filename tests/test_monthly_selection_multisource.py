@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import sys
 
+import duckdb
 import pandas as pd
 
 import scripts.run_monthly_selection_multisource as multisource
 from scripts.run_monthly_selection_multisource import (
     M5RunConfig,
+    attach_fundamental_features,
     attach_industry_breadth_features,
     build_feature_specs,
     build_incremental_delta,
@@ -94,6 +96,56 @@ def test_feature_specs_are_cumulative_in_m5_order():
     ]
     assert len(specs[-1].feature_cols) > len(specs[0].feature_cols)
     assert set(specs[1].feature_cols).issubset(set(specs[2].feature_cols))
+
+
+def test_fundamental_features_drop_statement_rows_without_positive_notice_lag(tmp_path):
+    db_path = tmp_path / "fundamental.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            CREATE TABLE a_share_fundamental (
+                symbol VARCHAR,
+                report_period DATE,
+                announcement_date DATE,
+                pe_ttm DOUBLE,
+                pb DOUBLE,
+                roe_ttm DOUBLE,
+                net_profit_yoy DOUBLE,
+                gross_margin_change DOUBLE,
+                debt_to_assets_change DOUBLE,
+                ocf_to_net_profit DOUBLE,
+                ocf_to_asset DOUBLE,
+                gross_margin_delta DOUBLE,
+                asset_turnover DOUBLE,
+                net_margin_stability DOUBLE,
+                source VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO a_share_fundamental VALUES
+            ('000001', DATE '2025-09-30', DATE '2025-10-31', 10, 1, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'stock_financial_analysis_indicator_em'),
+            ('000001', DATE '2025-12-31', DATE '2025-12-31', 999, 1, 99, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'stock_financial_analysis_indicator'),
+            ('000002', DATE '2025-12-31', DATE '2025-12-31', 30, 3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'stock_value_em')
+            """
+        )
+    finally:
+        con.close()
+
+    dataset = pd.DataFrame(
+        {
+            "signal_date": pd.to_datetime(["2026-02-28", "2026-02-28"]),
+            "symbol": ["000001", "000002"],
+        }
+    )
+
+    out = attach_fundamental_features(dataset, db_path).sort_values("symbol").reset_index(drop=True)
+
+    assert out.loc[0, "feature_fundamental_pe_ttm"] == 10
+    assert out.loc[0, "feature_fundamental_roe_ttm"] == 1
+    assert out.loc[1, "feature_fundamental_pe_ttm"] == 30
 
 
 def test_m5_walk_forward_scores_and_delta_compare_to_price_volume_baseline():

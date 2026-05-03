@@ -26,6 +26,39 @@ DEFAULT_FUNDAMENTAL_COLS: tuple[str, ...] = (
     "margin_buy_ratio",
 )
 
+DAILY_VALUATION_SOURCES: tuple[str, ...] = ("stock_value_em",)
+
+
+def pit_safe_fundamental_rows(
+    df: pd.DataFrame,
+    *,
+    announcement_col: str = "announcement_date",
+    report_period_col: str = "report_period",
+    source_col: str = "source",
+) -> pd.Series:
+    """Return rows whose fundamental values were observable at announcement time.
+
+    Statement-derived fundamentals need a real disclosure lag
+    (announcement date after report period). Daily valuation snapshots are already
+    dated by trading day and may use the same date for availability/report period.
+    """
+    if df.empty:
+        return pd.Series(False, index=df.index, dtype=bool)
+    ann = pd.to_datetime(df.get(announcement_col), errors="coerce").dt.normalize()
+    if report_period_col in df.columns:
+        period = pd.to_datetime(df[report_period_col], errors="coerce").dt.normalize()
+        has_unknown_period = period.isna()
+        has_positive_notice_lag = ann > period
+    else:
+        has_unknown_period = pd.Series(True, index=df.index)
+        has_positive_notice_lag = pd.Series(True, index=df.index)
+    if source_col in df.columns:
+        source = df[source_col].astype(object).where(df[source_col].notna(), "").astype(str)
+    else:
+        source = pd.Series("", index=df.index)
+    is_daily_valuation = source.isin(DAILY_VALUATION_SOURCES)
+    return ann.notna() & (is_daily_valuation | has_unknown_period | has_positive_notice_lag)
+
 
 def preprocess_fundamental_cross_section(
     df: pd.DataFrame,

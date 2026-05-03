@@ -6,6 +6,8 @@
 
 输出 price-volume-only 的可解释 baseline、walk-forward ML baseline，以及
 Rank IC、Top-K 超额、分桶 spread、年度/市场状态、行业暴露和换手诊断。
+
+核心工具已迁移至 src/reporting/markdown_report.py 和 src/research/gates.py。
 """
 
 from __future__ import annotations
@@ -39,19 +41,22 @@ from src.models.research_contract import (
     utc_now_iso,
     write_research_manifest,
 )
+from src.reporting.markdown_report import (
+    format_markdown_table,
+    json_sanitize,
+    project_relative,
+)
+from src.research.gates import (
+    EXCESS_COL,
+    INDUSTRY_EXCESS_COL,
+    LABEL_COL,
+    MARKET_COL,
+    POOL_RULES,
+    TOP20_COL,
+)
 from src.settings import config_path_candidates, load_config, resolve_config_path
 
-LABEL_COL = "label_forward_1m_o2o_return"
-EXCESS_COL = "label_forward_1m_excess_vs_market"
-INDUSTRY_EXCESS_COL = "label_forward_1m_industry_neutral_excess"
-MARKET_COL = "label_market_ew_o2o_return"
-TOP20_COL = "label_future_top_20pct"
 
-POOL_RULES: dict[str, str] = {
-    "U0_all_tradable": "valid current OHLCV + buyable at next trading day's open",
-    "U1_liquid_tradable": "U0 + minimum history length + 20d average amount threshold",
-    "U2_risk_sane": "U1 + exclude extreme limit-move path, extreme volatility/turnover, and absolute-high names",
-}
 
 FEATURE_SPECS: tuple[tuple[str, str, int], ...] = (
     ("B2_momentum_20d", "feature_ret_20d_z", 1),
@@ -134,12 +139,17 @@ def _resolve_project_path(raw: str | Path) -> Path:
     return p if p.is_absolute() else ROOT / p
 
 
-def _project_relative(path: str | Path) -> str:
+def project_relative(path: str | Path) -> str:
     p = Path(path)
     try:
         return str(p.resolve().relative_to(ROOT))
     except ValueError:
         return str(p)
+
+
+_project_relative = project_relative
+_format_markdown_table = format_markdown_table
+_json_sanitize = json_sanitize
 
 
 def _resolve_loaded_config_path(config_arg: Path | None) -> Path | None:
@@ -174,50 +184,6 @@ def normalize_model_n_jobs(n_jobs: int) -> int:
 def model_n_jobs_token(n_jobs: int) -> str:
     normalized = normalize_model_n_jobs(n_jobs)
     return "all" if normalized == -1 else str(normalized)
-
-
-def _json_sanitize(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {str(k): _json_sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_json_sanitize(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [_json_sanitize(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating, float)):
-        val = float(obj)
-        return val if np.isfinite(val) else None
-    if isinstance(obj, pd.Timestamp):
-        return obj.isoformat()
-    return obj
-
-
-def _markdown_cell(value: object) -> str:
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, float):
-        return f"{value:.6g}"
-    return str(value).replace("|", "\\|").replace("\n", "<br>")
-
-
-def _format_markdown_table(df: pd.DataFrame, *, max_rows: int = 30) -> str:
-    if df.empty:
-        return "_无记录_"
-    view = df.head(max_rows).copy()
-    header = "| " + " | ".join(str(c) for c in view.columns) + " |"
-    sep = "| " + " | ".join("---" for _ in view.columns) + " |"
-    rows = [
-        "| " + " | ".join(_markdown_cell(row[col]) for col in view.columns) + " |"
-        for _, row in view.iterrows()
-    ]
-    suffix = [f"\n_仅展示前 {max_rows} 行，共 {len(df)} 行。_"] if len(df) > max_rows else []
-    return "\n".join([header, sep, *rows, *suffix])
 
 
 def load_baseline_dataset(path: Path, *, candidate_pools: list[str] | None = None) -> pd.DataFrame:
@@ -1031,19 +997,19 @@ def build_doc(
 
 ## Leaderboard
 
-{_format_markdown_table(leader_view, max_rows=40)}
+{format_markdown_table(leader_view, max_rows=40)}
 
 ## Year Slice
 
-{_format_markdown_table(year_view, max_rows=40)}
+{format_markdown_table(year_view, max_rows=40)}
 
 ## Realized Market State Slice
 
-{_format_markdown_table(regime_view, max_rows=40)}
+{format_markdown_table(regime_view, max_rows=40)}
 
 ## Industry Exposure
 
-{_format_markdown_table(industry_view, max_rows=40)}
+{format_markdown_table(industry_view, max_rows=40)}
 
 ## 口径
 
@@ -1061,11 +1027,11 @@ def build_doc(
 - 数据质量：沿用 M2 canonical dataset 的 PIT 与候选池口径；本脚本只消费已落地特征，不引入新数据家族。
 - `U1_liquid_tradable` Top20 当前领先模型：
 
-{_format_markdown_table(best_u1_top20, max_rows=3)}
+{format_markdown_table(best_u1_top20, max_rows=3)}
 
 - `U2_risk_sane` Top20 当前领先模型：
 
-{_format_markdown_table(best_u2_top20, max_rows=3)}
+{format_markdown_table(best_u2_top20, max_rows=3)}
 
 - 静态单因子/线性 blend 多数无法稳定跑赢市场，应保留为低门槛对照，不作为推荐候选。
 - walk-forward ML baseline 有弱正向起点，但 strong-up / strong-down 切片仍不稳；M4 不进入生产。
@@ -1083,7 +1049,7 @@ def main() -> int:
     loaded_config_path = _resolve_loaded_config_path(args.config)
     cfg_raw = load_config(args.config)
     paths = cfg_raw.get("paths", {}) or {}
-    config_source = _project_relative(loaded_config_path) if loaded_config_path is not None else "default_config_lookup"
+    config_source = project_relative(loaded_config_path) if loaded_config_path is not None else "default_config_lookup"
     dataset_path = _resolve_project_path(args.dataset)
     results_dir_raw = args.results_dir.strip() or str(paths.get("results_dir") or "data/results")
     results_dir = _resolve_project_path(results_dir_raw)
@@ -1204,11 +1170,11 @@ def main() -> int:
 
     summary_payload = build_summary_payload(quality=quality, leaderboard=leaderboard)
     paths_out["summary_json"].write_text(
-        json.dumps(_json_sanitize(summary_payload), ensure_ascii=False, indent=2),
+        json.dumps(json_sanitize(summary_payload), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact_paths = [
-        _project_relative(p)
+        project_relative(p)
         for key, p in paths_out.items()
         if key not in {"manifest", "doc"}
     ]
@@ -1219,7 +1185,7 @@ def main() -> int:
             year_slice=year_slice,
             regime_slice=regime_slice,
             industry_exposure=industry_exposure,
-            artifacts=[*artifact_paths, _project_relative(paths_out["manifest"])],
+            artifacts=[*artifact_paths, project_relative(paths_out["manifest"])],
         ),
         encoding="utf-8",
     )
@@ -1241,7 +1207,7 @@ def main() -> int:
     best_after_cost_float = float(best_after_cost) if pd.notna(best_after_cost) else None
     data_slice = DataSlice(
         dataset_name="monthly_selection_baselines",
-        source_tables=(_project_relative(dataset_path),),
+        source_tables=(project_relative(dataset_path),),
         date_start=min_signal_date,
         date_end=max_signal_date,
         asof_trade_date=max_signal_date or None,
@@ -1257,7 +1223,7 @@ def main() -> int:
         pit_policy="features are consumed from M2 PIT-safe monthly signal rows; ML uses past months only",
         config_path=config_source,
         extra={
-            "dataset_path": _project_relative(dataset_path),
+            "dataset_path": project_relative(dataset_path),
             "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
             "top_ks": top_ks,
             "bucket_count": int(args.bucket_count),
@@ -1265,25 +1231,25 @@ def main() -> int:
         },
     )
     artifact_refs = (
-        ArtifactRef("summary_json", _project_relative(paths_out["summary_json"]), "json"),
-        ArtifactRef("leaderboard_csv", _project_relative(paths_out["leaderboard"]), "csv"),
-        ArtifactRef("monthly_long_csv", _project_relative(paths_out["monthly_long"]), "csv"),
-        ArtifactRef("rank_ic_csv", _project_relative(paths_out["rank_ic"]), "csv"),
-        ArtifactRef("quantile_spread_csv", _project_relative(paths_out["quantile_spread"]), "csv"),
-        ArtifactRef("topk_holdings_csv", _project_relative(paths_out["topk_holdings"]), "csv"),
-        ArtifactRef("industry_exposure_csv", _project_relative(paths_out["industry_exposure"]), "csv"),
-        ArtifactRef("candidate_pool_width_csv", _project_relative(paths_out["candidate_pool_width"]), "csv"),
+        ArtifactRef("summary_json", project_relative(paths_out["summary_json"]), "json"),
+        ArtifactRef("leaderboard_csv", project_relative(paths_out["leaderboard"]), "csv"),
+        ArtifactRef("monthly_long_csv", project_relative(paths_out["monthly_long"]), "csv"),
+        ArtifactRef("rank_ic_csv", project_relative(paths_out["rank_ic"]), "csv"),
+        ArtifactRef("quantile_spread_csv", project_relative(paths_out["quantile_spread"]), "csv"),
+        ArtifactRef("topk_holdings_csv", project_relative(paths_out["topk_holdings"]), "csv"),
+        ArtifactRef("industry_exposure_csv", project_relative(paths_out["industry_exposure"]), "csv"),
+        ArtifactRef("candidate_pool_width_csv", project_relative(paths_out["candidate_pool_width"]), "csv"),
         ArtifactRef(
             "candidate_pool_reject_reason_csv",
-            _project_relative(paths_out["candidate_pool_reject_reason"]),
+            project_relative(paths_out["candidate_pool_reject_reason"]),
             "csv",
         ),
-        ArtifactRef("feature_importance_csv", _project_relative(paths_out["feature_importance"]), "csv"),
-        ArtifactRef("year_slice_csv", _project_relative(paths_out["year_slice"]), "csv"),
-        ArtifactRef("regime_slice_csv", _project_relative(paths_out["regime_slice"]), "csv"),
-        ArtifactRef("market_states_csv", _project_relative(paths_out["market_states"]), "csv"),
-        ArtifactRef("report_md", _project_relative(paths_out["doc"]), "md"),
-        ArtifactRef("manifest_json", _project_relative(paths_out["manifest"]), "json"),
+        ArtifactRef("feature_importance_csv", project_relative(paths_out["feature_importance"]), "csv"),
+        ArtifactRef("year_slice_csv", project_relative(paths_out["year_slice"]), "csv"),
+        ArtifactRef("regime_slice_csv", project_relative(paths_out["regime_slice"]), "csv"),
+        ArtifactRef("market_states_csv", project_relative(paths_out["market_states"]), "csv"),
+        ArtifactRef("report_md", project_relative(paths_out["doc"]), "md"),
+        ArtifactRef("manifest_json", project_relative(paths_out["manifest"]), "json"),
     )
     metrics = {
         "rows": int(quality["rows"]),
@@ -1354,7 +1320,7 @@ def main() -> int:
     result = ExperimentResult(
         result_id=build_result_id(identity, [data_slice], metrics),
         identity=identity,
-        script_name=_project_relative(Path(__file__).resolve()),
+        script_name=project_relative(Path(__file__).resolve()),
         command=shlex.join([sys.executable, *sys.argv]),
         created_at=utc_now_iso(),
         duration_sec=round(time.perf_counter() - started_at, 6),
@@ -1405,7 +1371,7 @@ def main() -> int:
             "research_config_id": research_config_id,
             "output_stem": output_stem,
             "config_source": config_source,
-            "dataset_path": _project_relative(dataset_path),
+            "dataset_path": project_relative(dataset_path),
             "dataset_version": "monthly_selection_features_v1",
             "candidate_pools": pools,
             "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
@@ -1413,7 +1379,7 @@ def main() -> int:
             "feature_spec": "price_volume_only_v1",
             "label_spec": "forward_1m_open_to_open_return + market-relative excess + top20 bucket",
             "pit_policy": data_slice.pit_policy,
-            "legacy_artifacts": [*artifact_paths, _project_relative(paths_out["doc"])],
+            "legacy_artifacts": [*artifact_paths, project_relative(paths_out["doc"])],
         },
     )
     append_experiment_result(experiments_dir, result)

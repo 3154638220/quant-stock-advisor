@@ -18,14 +18,15 @@
 | --- | --- |
 | 数据 | AkShare 日线增量、股票池缓存、DuckDB 存储、写入前质量检查、网络重试与本地缓存回退，位于 `src/data_fetcher/` |
 | 可交易性 | ST/停牌近似、涨跌停板比例、次日开盘一字涨停不可买过滤、月度候选池 U0/U1/U2，位于 `src/market/tradability.py` |
+| 核心管线 | 月度数据集、多源特征、LTR、P1 标签和正式回测核心逻辑，位于 `src/pipeline/` |
 | 日线因子 | GPU/CPU 张量批量计算动量、RSI、ATR、波动率、换手、量价相关、乖离、价格区间位置、周线 KDJ 与 K 线结构代理因子 |
 | 多源因子 | PIT 基本面、资金流、股东户数、行业宽度；月度链路做覆盖率和缺失标记诊断 |
-| 特征处理 | 截面 winsorize、z-score、缺失填充、市值/行业中性化、可选 Löwdin 或 Gram-Schmidt 正交化 |
-| 打分模型 | 线性 `composite` / `composite_extended`、XGBoost 截面排序、月度 M6 learning-to-rank |
+| 特征处理 | 截面 winsorize、z-score、缺失填充、市值/行业中性化 |
+| 打分模型 | 线性 `composite` / `composite_extended`、月度 M6 learning-to-rank |
 | 市场状态 | Regime Switch 根据基准短中期收益与波动率调整线性因子权重，可用 `510300` 或 `market_ew_proxy` |
 | 组合权重 | 等权、分数权重、分层等权、风险平价、最小方差、均值-方差；支持 Ledoit-Wolf、EWMA、行业因子协方差 |
-| 回测评估 | `tplus1_open`、`close_to_close`、`vwap` 执行口径，涨停买入失败 `idle` / `redistribute`，交易成本、walk-forward、切片诊断 |
-| 研究治理 | 研究身份、配置快照、manifest、promoted registry，避免轻量诊断或 gray zone 结果误入生产 |
+| 回测评估 | `tplus1_open` 执行口径，涨停买入失败 `idle` / `redistribute`，交易成本 |
+| 报告与研究治理 | Markdown 报告工具、研究身份、配置快照、manifest、promoted registry，位于 `src/reporting/` 与 `src/research/` |
 
 ## 技术栈
 
@@ -42,7 +43,6 @@
 ├── config.yaml.example      # 本地月度选股配置模板
 ├── config.yaml.backtest     # 当前 canonical 研究回测配置入口
 ├── configs/
-│   ├── backtests/           # 历史研究配置快照与场景变体
 │   ├── experiments/         # 临时探索配置
 │   └── promoted/            # 生产 promotion registry
 ├── docs/
@@ -57,21 +57,44 @@
 │   ├── market/              # 可交易性与 Regime Switch
 │   ├── models/              # 打分、训练、推理、工件管理
 │   ├── portfolio/           # 协方差、权重优化、约束
-│   └── backtest/            # 回测引擎、成本、绩效、walk-forward
+│   ├── backtest/            # 回测引擎、成本、绩效
+│   ├── pipeline/            # 月度选股标签与正式回测的核心管线逻辑
+│   ├── reporting/           # Markdown 表格、JSON 序列化、月度推荐报告工具
+│   └── research/            # 共享 gates、候选池规则、研究 manifest 记录
 ├── scripts/
 │   ├── fetch_only.py                        # 更新月度链路所需日线表
-│   ├── run_monthly_selection_dataset.py     # M2 月度 canonical dataset
+│   ├── run_monthly_selection_dataset.py     # M2 CLI 编排，核心在 src/pipeline/monthly_dataset.py
 │   ├── run_monthly_selection_oracle.py      # M3 oracle 上限诊断
-│   ├── run_monthly_selection_baselines.py   # M4 baseline
-│   ├── run_monthly_selection_multisource.py # M5 多源扩展
-│   ├── run_monthly_selection_ltr.py         # M6 learning-to-rank
-│   ├── run_monthly_selection_report.py      # M7 研究版推荐报告
-│   ├── run_backtest_eval.py                 # 正式回测评估
-│   └── train/                               # 离线训练入口
+│   ├── run_monthly_selection_baselines.py   # M4 baseline，兼容导出共享评估工具
+│   ├── run_monthly_selection_multisource.py # M5 CLI 编排，核心在 src/pipeline/monthly_multisource.py
+│   ├── run_monthly_selection_ltr.py         # M6 CLI 编排，核心在 src/pipeline/monthly_ltr.py
+│   ├── run_monthly_selection_report.py      # M7 CLI 编排，核心在 src/reporting/monthly_report.py
+│   ├── run_monthly_selection_concentration_regime.py  # M8 行业集中度约束
+│   ├── run_monthly_selection_m8_natural_industry_constraints.py  # M8 自然化行业约束
+│   └── run_monthly_benchmark_suite.py       # 月度选股基准评估套件
 └── tests/
 ```
 
 `data/`、`tmp/`、`.pytest_cache/`、`.ruff_cache/`、`__pycache__/`、`.conda_envs/`、`.conda_pkgs/`、`.miniforge3/` 是本机私有或可再生产物，默认不进入版本控制和 Docker build context。
+
+## 模块化边界
+
+`scripts/run_*.py` 保持为稳定 CLI 入口，负责参数解析、路径解析、文件 I/O、报告落盘和 manifest 记录。新开发和维护应优先修改 `src/` 下的核心模块：
+
+| 模块 | 职责 |
+| --- | --- |
+| `src/pipeline/monthly_dataset.py` | M2 月度截面、候选池、open-to-open 标签、质量摘要 |
+| `src/pipeline/monthly_baselines.py` | M4/M5/M6 共享的候选池有效样本、截面打分基列、sklearn/XGBoost 训练预测 helper |
+| `src/pipeline/monthly_multisource.py` | M5 行业宽度、资金流、基本面、股东户数特征接入与增量评估 |
+| `src/pipeline/monthly_ltr.py` | M6 walk-forward learning-to-rank、top20 calibrated 与 ranker ensemble |
+| `src/reporting/monthly_report.py` | M7 最新信号月 full-fit 打分、推荐名单与 M9 覆盖率策略 |
+| `src/pipeline/backtest_runner.py` | 正式回测的因子计算、缓存、打分、Top-K 权重、基准、Regime 调权与动态 IC 权重 |
+| `src/pipeline/label_builder.py` | P1 树模型训练标签、可投资持有期收益面板和调仓日选择 |
+| `src/research/gates.py` | 共享候选池规则、标签列名、预过滤器与 P1 因子策略 |
+| `src/reporting/markdown_report.py` | Markdown 表格、JSON-safe 序列化、项目相对路径与通用报告片段 |
+| `src/research/manifest.py` | 研究身份工厂、标准 manifest 与本地实验索引记录 |
+
+部分脚本仍保留本地函数副本或 re-export 以兼容既有测试、历史研究脚本和 M5-M8 调用；这些副本不应作为后续维护的主位置。`src/pipeline/`、`src/reporting/`、`src/research/` 不应反向导入 `scripts/`，脚本只能调用核心模块或保留兼容薄层。
 
 ## 环境安装
 

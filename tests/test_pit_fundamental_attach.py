@@ -6,6 +6,24 @@ import duckdb
 import pandas as pd
 
 from scripts.run_backtest_eval import _attach_pit_fundamentals
+from scripts.run_p2_regime_aware_dual_sleeve_v1 import _attach_pit_roe_ttm
+from src.features.fundamental_factors import pit_safe_fundamental_rows
+
+
+def test_pit_safe_fundamental_rows_requires_real_notice_lag_for_statements():
+    raw = pd.DataFrame(
+        {
+            "report_period": pd.to_datetime(["2025-12-31", "2025-12-31", "2025-12-31"]),
+            "announcement_date": pd.to_datetime(["2025-12-31", "2026-03-15", "2025-12-31"]),
+            "source": [
+                "stock_financial_analysis_indicator",
+                "stock_financial_analysis_indicator_em",
+                "stock_value_em",
+            ],
+        }
+    )
+
+    assert pit_safe_fundamental_rows(raw).tolist() == [False, True, True]
 
 
 def test_attach_pit_fundamentals_uses_latest_announcement_by_trade_date(tmp_path, monkeypatch):
@@ -39,6 +57,7 @@ def test_attach_pit_fundamentals_uses_latest_announcement_by_trade_date(tmp_path
             """
             INSERT INTO a_share_fundamental VALUES
             ('000001', DATE '2025-09-30', DATE '2025-10-31', 10, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('000001', DATE '2025-12-31', DATE '2025-12-31', 999, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
             ('000001', DATE '2025-12-31', DATE '2026-03-15', 30, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
             ('000002', DATE '2025-09-30', DATE '2025-11-05', 20, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
             """
@@ -59,6 +78,48 @@ def test_attach_pit_fundamentals_uses_latest_announcement_by_trade_date(tmp_path
         lambda df, **_: df,
     )
 
-    out = _attach_pit_fundamentals(factors, str(db_path)).sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+    out = (
+        _attach_pit_fundamentals(factors, str(db_path))
+        .sort_values(["trade_date", "symbol"])
+        .reset_index(drop=True)
+    )
 
     assert out["pe_ttm"].tolist() == [10.0, 20.0, 30.0, 20.0]
+
+
+def test_attach_pit_roe_ttm_filters_statement_rows_without_real_notice_lag(tmp_path):
+    db_path = Path(tmp_path) / "pit_roe.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            CREATE TABLE a_share_fundamental (
+                symbol VARCHAR,
+                report_period DATE,
+                announcement_date DATE,
+                roe_ttm DOUBLE,
+                source VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO a_share_fundamental VALUES
+            ('000001', DATE '2025-09-30', DATE '2025-10-31', 1, 'stock_financial_analysis_indicator_em'),
+            ('000001', DATE '2025-12-31', DATE '2025-12-31', 99, 'stock_financial_analysis_indicator'),
+            ('000001', DATE '2025-12-31', DATE '2026-03-15', 3, 'stock_financial_analysis_indicator_em')
+            """
+        )
+    finally:
+        con.close()
+
+    factors = pd.DataFrame(
+        {
+            "symbol": ["000001", "000001"],
+            "trade_date": pd.to_datetime(["2026-02-28", "2026-03-31"]),
+        }
+    )
+
+    out = _attach_pit_roe_ttm(factors, str(db_path)).sort_values("trade_date").reset_index(drop=True)
+
+    assert out["roe_ttm"].tolist() == [1.0, 3.0]
