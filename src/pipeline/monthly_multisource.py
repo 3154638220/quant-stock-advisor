@@ -25,7 +25,12 @@ from src.pipeline.monthly_baselines import (
     normalize_model_n_jobs,
     valid_pool_frame,
 )
-from src.features.fundamental_factors import DEFAULT_FUNDAMENTAL_COLS, pit_safe_fundamental_rows
+from src.features.fundamental_factors import (
+    DEFAULT_FUNDAMENTAL_COLS,
+    LOW_COVERAGE_THRESHOLD,
+    filter_low_coverage_cols,
+    pit_safe_fundamental_rows,
+)
 
 # ── 特征列常量 ───────────────────────────────────────────────────────────
 
@@ -70,6 +75,58 @@ SHAREHOLDER_RAW_FEATURES: tuple[str, ...] = (
 )
 
 
+# ── P1-2: 特征家族数据起始日期（用于 walk-forward 分期训练）─────────────
+
+FAMILY_DATA_START: dict[str, str] = {
+    "price_volume": "2018-01-01",
+    "industry_breadth": "2018-01-01",
+    "fundamental": "2018-01-01",
+    "shareholder": "2019-01-01",
+    "fund_flow": "2023-10-01",   # 实际数据起始日
+}
+
+_FAMILY_FEATURE_PREFIX: dict[str, str] = {
+    "price_volume": "feature_ret_|feature_realized_|feature_amount_|feature_turnover_|feature_price_position_|feature_limit_move_",
+    "industry_breadth": "feature_industry_",
+    "fund_flow": "feature_fund_flow_",
+    "fundamental": "feature_fundamental_",
+    "shareholder": "feature_shareholder_",
+}
+
+
+def _infer_feature_family(feature_name: str) -> str:
+    """根据特征名前缀推断其所属家族。"""
+    import re
+    for family, pattern in _FAMILY_FEATURE_PREFIX.items():
+        if re.search(pattern, feature_name):
+            return family
+    return "price_volume"
+
+
+def get_active_features_for_fold(
+    all_features: list[str],
+    fold_train_end: pd.Timestamp,
+    family_start: dict[str, str] | None = None,
+) -> list[str]:
+    """P1-2: 按 fold 训练末尾日期过滤不可用特征。
+
+    fund_flow 数据始于 2023-10，当 fold train_end < 2023-10-01 时，
+    排除所有 fund_flow z-score 列。is_missing 标志始终保留。
+    """
+    fm_start = family_start or FAMILY_DATA_START
+    active: list[str] = []
+    for feat in all_features:
+        if feat.startswith("is_missing_"):
+            active.append(feat)  # 缺失标志始终可用
+            continue
+        family = _infer_feature_family(feat)
+        start_str = fm_start.get(family, "2000-01-01")
+        start = pd.Timestamp(start_str)
+        if fold_train_end >= start:
+            active.append(feat)
+    return active
+
+
 # ── 配置数据类 ───────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -94,8 +151,18 @@ class M5RunConfig:
     # P1-2: Walk-forward 窗口配置
     window_type: str = "expanding"  # "rolling" | "expanding"
     halflife_months: float = 36.0   # 扩张窗口样本半衰期（月），0 表示等权
-    ml_models: tuple[str, ...] = ("elasticnet", "logistic", "extratrees", "xgboost_excess", "xgboost_top20")
+    ml_models: tuple[str, ...] = (
+        "elasticnet",
+        "extratrees",
+        "xgboost_excess",
+        # "logistic",         # DEPRECATED P1-4: after-cost excess 长期为负，移入 ablation
+        # "xgboost_top20",    # DEPRECATED P1-4: 同上
+    )
     model_n_jobs: int = 0
+    # P0-1: 对基本面因子使用行业内 z-score 中性化（默认 False，保持向后兼容）
+    use_industry_neutral_zscore: bool = False
+    # P2-1: z-score 后应用 rank transform（将截面秩映射到 [-1,1]，缓解上限堆积）
+    use_rank_transform: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,15 +201,62 @@ def add_zscore_and_missing_flags(
     raw_cols: tuple[str, ...],
     *,
     date_col: str = "signal_date",
+    use_rank_transform: bool = False,
 ) -> pd.DataFrame:
+    """截面 z-score + 缺失标志，可选 rank transform（P2-1）。"""
     out = dataset.copy()
     for col in raw_cols:
         if col not in out.columns:
             out[col] = np.nan
         vals = pd.to_numeric(out[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
         out[f"is_missing_{col}"] = vals.isna().astype(int)
-        out[f"{col}_z"] = vals.groupby(out[date_col], sort=False).transform(_winsor_zscore)
+        z_col = f"{col}_z"
+        out[z_col] = vals.groupby(out[date_col], sort=False).transform(_winsor_zscore)
+        # P2-1: 可选秩变换，缓解 z-score 上限堆积
+        if use_rank_transform:
+            out[z_col] = out.groupby(date_col, sort=False)[z_col].transform(_rank_transform)
     return out
+
+
+def industry_neutral_zscore(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    date_col: str = "signal_date",
+    industry_col: str = "industry_level1",
+) -> pd.DataFrame:
+    """P0-1: 行业内 z-score 中性化。
+
+    对每个 (signal_date, industry) 分组，将 feature_cols 做 z-score。
+    消除行业间特征分布差异，防止高 asset_turnover 行业（如证券）系统性排名靠前。
+
+    返回新增列 {col}_ind_z 的 DataFrame。
+    """
+    out = df.copy()
+    if industry_col not in out.columns:
+        return out
+    for col in feature_cols:
+        if col not in out.columns:
+            continue
+        vals = pd.to_numeric(out[col], errors="coerce")
+        out[f"{col}_ind_z"] = (
+            vals.groupby([out[date_col], out[industry_col]], sort=False, group_keys=False)
+            .transform(lambda s: (s - s.mean()) / (s.std(ddof=0) + 1e-12))
+            .clip(-5, 5)
+        )
+    return out
+
+
+def _rank_transform(series: pd.Series) -> pd.Series:
+    """P2-1: 将 z-score 转换为截面秩分（均匀分布于 [-1, 1]）。
+
+    对极值堆积的 z-score 分布更鲁棒。
+    """
+    n = series.notna().sum()
+    if n < 2:
+        return pd.Series(0.0, index=series.index)
+    ranked = series.rank(method="average", na_option="keep")
+    return ((ranked - 1) / (n - 1) * 2 - 1).clip(-1, 1)
 
 
 def _unique_signal_frame(dataset: pd.DataFrame) -> pd.DataFrame:
@@ -341,7 +455,20 @@ def attach_fundamental_features(
     )
     attached = attached.drop(columns=["_fund_announcement_date"], errors="ignore")
     out = dataset.merge(attached, on=["signal_date", "symbol"], how="left")
-    return add_zscore_and_missing_flags(out, FUNDAMENTAL_RAW_FEATURES)
+
+    # P0-2: 排除覆盖率过低的特征列（如 ev_ebitda 覆盖率=0），仅保留 is_missing 标志
+    active_fundamental, dropped = filter_low_coverage_cols(
+        out, list(FUNDAMENTAL_RAW_FEATURES),
+        threshold=LOW_COVERAGE_THRESHOLD,
+    )
+    if dropped:
+        import warnings
+        warnings.warn(
+            f"P0-2: 基本面特征覆盖率过低已排除: {dropped}，阈值={LOW_COVERAGE_THRESHOLD}",
+            RuntimeWarning,
+        )
+
+    return add_zscore_and_missing_flags(out, tuple(active_fundamental))
 
 
 def attach_shareholder_features(
@@ -388,7 +515,18 @@ def attach_shareholder_features(
 
 # ── FeatureSpec 构建 ─────────────────────────────────────────────────────
 
-def build_feature_specs(enabled_families: list[str]) -> list[FeatureSpec]:
+def build_feature_specs(
+    enabled_families: list[str],
+    *,
+    use_industry_neutral_zscore: bool = False,
+) -> list[FeatureSpec]:
+    """构建增量 FeatureSpec 列表。
+
+    Parameters
+    ----------
+    use_industry_neutral_zscore : bool
+        P0-1: 若为 True，基本面因子使用 _ind_z（行业内 z-score）替代 _z（全截面 z-score）。
+    """
     enabled = [x for x in enabled_families if x and x != "price_volume_only"]
     specs = [
         FeatureSpec(name="price_volume_only", families=("price_volume",), feature_cols=PRICE_VOLUME_FEATURES)
@@ -397,7 +535,10 @@ def build_feature_specs(enabled_families: list[str]) -> list[FeatureSpec]:
     family_cols: dict[str, tuple[str, ...]] = {
         "industry_breadth": tuple(f"{c}_z" for c in INDUSTRY_BREADTH_RAW_FEATURES),
         "fund_flow": tuple(f"{c}_z" for c in FUND_FLOW_RAW_FEATURES),
-        "fundamental": tuple(f"{c}_z" for c in FUNDAMENTAL_RAW_FEATURES),
+        "fundamental": tuple(
+            f"{c}_ind_z" if use_industry_neutral_zscore else f"{c}_z"
+            for c in FUNDAMENTAL_RAW_FEATURES
+        ),
         "shareholder": tuple(f"{c}_z" for c in SHAREHOLDER_RAW_FEATURES),
     }
     family_order = ["industry_breadth", "fund_flow", "fundamental", "shareholder"]
@@ -407,9 +548,10 @@ def build_feature_specs(enabled_families: list[str]) -> list[FeatureSpec]:
             continue
         cumulative.extend(family_cols[family])
         active_families.append(family)
+        suffix = "_ind" if use_industry_neutral_zscore and family == "fundamental" else ""
         specs.append(
             FeatureSpec(
-                name="plus_" + "_plus_".join(active_families[1:]),
+                name="plus_" + "_plus_".join(active_families[1:]) + suffix,
                 families=tuple(active_families),
                 feature_cols=tuple(dict.fromkeys(cumulative)),
             )
@@ -432,6 +574,20 @@ def attach_enabled_families(
         )
     if "shareholder" in enabled_families:
         out = attach_shareholder_features(out, db_path, availability_lag_days=cfg.availability_lag_days)
+
+    # P0-1: 可选行业内 z-score 中性化（生成 _ind_z 列）
+    if getattr(cfg, 'use_industry_neutral_zscore', False) and "fundamental" in enabled_families:
+        fundamental_z_cols = [f"{c}_z" for c in FUNDAMENTAL_RAW_FEATURES if f"{c}_z" in out.columns]
+        if fundamental_z_cols and "industry_level1" in out.columns:
+            out = industry_neutral_zscore(out, fundamental_z_cols)
+
+    # P2-1: 可选 rank transform（对已有 _z 列施加秩变换）
+    if getattr(cfg, 'use_rank_transform', False):
+        all_z_cols = [c for c in out.columns if c.endswith("_z")]
+        if all_z_cols:
+            for col in all_z_cols:
+                out[col] = out.groupby("signal_date", sort=False)[col].transform(_rank_transform)
+
     return out
 
 

@@ -67,6 +67,31 @@ def parse_args() -> argparse.Namespace:
             "CSV 需包含 trade_date/date 与 open；若含多 symbol 可用 name:symbol=path 过滤。"
         ),
     )
+    # P1-1: M10 压力测试参数
+    p.add_argument(
+        "--db-path",
+        type=str,
+        default="",
+        help="DuckDB 路径（用于容量分析，查询日线成交额）。",
+    )
+    p.add_argument(
+        "--daily-table",
+        type=str,
+        default="a_share_daily",
+        help="日线数据表名（用于容量分析）。",
+    )
+    p.add_argument(
+        "--stress-monthly-long",
+        type=str,
+        default="",
+        help="对比用 monthly_long CSV（如 limit_up=redistribute 或 vwap 模式输出）。",
+    )
+    p.add_argument(
+        "--stress-label",
+        type=str,
+        default="stress",
+        help="对比用 monthly_long 的标签。",
+    )
     return p.parse_args()
 
 
@@ -316,6 +341,228 @@ def build_benchmark_suite(monthly: pd.DataFrame, index_specs: list[BenchmarkSpec
     return pd.DataFrame(summary_rows), pd.DataFrame(relative_rows), series, index_meta
 
 
+# ── P1-1: M10 成本敏感性测试 ──────────────────────────────────────────────
+
+COST_SENSITIVITY_GRID: list[dict[str, Any]] = [
+    {"cost_bps": 10.0, "label": "baseline_10bps"},
+    {"cost_bps": 30.0, "label": "stress_30bps"},
+    {"cost_bps": 50.0, "label": "stress_50bps"},
+]
+
+
+def build_cost_sensitivity(monthly: pd.DataFrame, *, base_cost_bps: float = 10.0) -> pd.DataFrame:
+    """P1-1: 计算不同成本档位下的 after-cost excess 表现。
+
+    基于 monthly 中的 cost_drag（按 base_cost_bps 计算），
+    等比缩放得到各档位的成本拖累，输出对比表。
+    """
+    if monthly.empty:
+        return pd.DataFrame()
+    topk_ret = pd.to_numeric(monthly["topk_return"], errors="coerce")
+    market_ret = pd.to_numeric(monthly["market_ew_return"], errors="coerce")
+    base_drag = pd.to_numeric(monthly["cost_drag"], errors="coerce").fillna(0.0)
+
+    rows: list[dict[str, Any]] = []
+    for entry in COST_SENSITIVITY_GRID:
+        bps = float(entry["cost_bps"])
+        label = str(entry["label"])
+        # 等比缩放 cost_drag
+        scaled_drag = base_drag * (bps / max(float(base_cost_bps), 1e-6))
+        after_cost_excess = topk_ret - scaled_drag - market_ret
+        excess_valid = after_cost_excess.dropna()
+        if excess_valid.empty:
+            rows.append({"cost_bps": bps, "label": label, "after_cost_excess_mean": np.nan,
+                         "after_cost_excess_total": np.nan, "positive_months_ratio": np.nan,
+                         "breakeven": False})
+            continue
+        rows.append({
+            "cost_bps": bps,
+            "label": label,
+            "after_cost_excess_mean": float(excess_valid.mean()),
+            "after_cost_excess_total": float((1.0 + excess_valid).prod() - 1.0),
+            "positive_months_ratio": float((excess_valid > 0).mean()),
+            "breakeven": bool(excess_valid.mean() > 0),
+        })
+
+    # 估算 breakeven cost bps（线性插值）
+    df = pd.DataFrame(rows)
+    pos = df[df["after_cost_excess_mean"] > 0]
+    neg = df[df["after_cost_excess_mean"] <= 0]
+    breakeven_bps = np.nan
+    if not pos.empty and not neg.empty:
+        # 在正负之间线性插值找 breakeven
+        p_low = pos.loc[pos["cost_bps"].idxmin()] if not pos.empty else None
+        n_high = neg.loc[neg["cost_bps"].idxmax()] if not neg.empty else None
+        if p_low is not None and n_high is not None:
+            x0, y0 = float(n_high["cost_bps"]), float(n_high["after_cost_excess_mean"])
+            x1, y1 = float(p_low["cost_bps"]), float(p_low["after_cost_excess_mean"])
+            if abs(y1 - y0) > 1e-12:
+                breakeven_bps = float(x0 - y0 * (x1 - x0) / (y1 - y0))
+    elif not pos.empty:
+        breakeven_bps = float(pos["cost_bps"].max()) * 1.5  # 外推估计（乐观）
+    elif not neg.empty:
+        breakeven_bps = float(neg["cost_bps"].min()) * 0.5  # 外推估计（悲观）
+
+    df["breakeven_bps"] = breakeven_bps
+    return df
+
+
+# ── P1-1: M10 容量分析 ──────────────────────────────────────────────────
+
+def build_capacity_analysis(
+    monthly: pd.DataFrame,
+    *,
+    db_path: str = "",
+    daily_table: str = "a_share_daily",
+    top_k: int = 20,
+) -> pd.DataFrame:
+    """P1-1: 从日线数据计算 Top-K 推荐名单的容量估计。
+
+    对每月信号日，查找 Top-K 推荐股票在近 20 日的日均成交额，
+    估算冲击成本 1% 时的最大可交易量（日均成交额 × 0.01）。
+
+    若无 daily 数据路径或 DuckDB 不可用，返回空 DataFrame。
+    """
+    if not db_path or monthly.empty:
+        return pd.DataFrame()
+    db = Path(db_path)
+    if not db.exists():
+        return pd.DataFrame()
+
+    import duckdb
+    try:
+        con = duckdb.connect(str(db), read_only=True)
+    except Exception:
+        return pd.DataFrame()
+
+    try:
+        # 获取月度信号日序列
+        schedule = monthly[["signal_date", "buy_trade_date"]].drop_duplicates().copy()
+        schedule["signal_date"] = pd.to_datetime(schedule["signal_date"], errors="coerce").dt.normalize()
+        schedule = schedule.dropna(subset=["signal_date"])
+
+        rows: list[dict[str, Any]] = []
+        for _, srow in schedule.iterrows():
+            sd = pd.Timestamp(srow["signal_date"]).normalize()
+            # Top-K 选股（从 monthly 中提取该信号日的 Top-K）
+            slice_df = monthly[
+                (pd.to_datetime(monthly["signal_date"], errors="coerce").dt.normalize() == sd)
+            ]
+            if slice_df.empty:
+                continue
+            # 按 topk_return 排序（正收益更好），取 top_k 只
+            top_symbols = (
+                slice_df.sort_values("topk_return", ascending=False)
+                .head(int(top_k))["symbol"]
+                .dropna()
+                .astype(str)
+                .str.zfill(6)
+                .tolist()
+            )
+            if not top_symbols:
+                continue
+
+            # 查询近 20 日日均成交额
+            sym_list = ", ".join(f"'{s}'" for s in top_symbols)
+            lookback_start = (sd - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
+            lookback_end = sd.strftime("%Y-%m-%d")
+            try:
+                adv_df = con.execute(
+                    f"""
+                    SELECT symbol,
+                           AVG(amount) AS avg_amount_20d
+                    FROM {daily_table}
+                    WHERE trade_date >= '{lookback_start}'
+                      AND trade_date <= '{lookback_end}'
+                      AND symbol IN ({sym_list})
+                    GROUP BY symbol
+                    """
+                ).fetchdf()
+            except Exception:
+                adv_df = pd.DataFrame()
+
+            if adv_df.empty:
+                rows.append({
+                    "signal_date": sd,
+                    "top_symbols": len(top_symbols),
+                    "min_avg_amount": np.nan,
+                    "median_avg_amount": np.nan,
+                    "total_capacity_est": np.nan,
+                })
+                continue
+
+            adv_df["avg_amount"] = pd.to_numeric(adv_df["avg_amount"], errors="coerce")
+            adv_valid = adv_df["avg_amount"].dropna()
+            if adv_valid.empty:
+                rows.append({
+                    "signal_date": sd,
+                    "top_symbols": len(top_symbols),
+                    "min_avg_amount": np.nan,
+                    "median_avg_amount": np.nan,
+                    "total_capacity_est": np.nan,
+                })
+                continue
+
+            # 假设冲击成本 1% 时最大可交易量 = 日均成交额 × 0.01
+            capacity_est = float(adv_valid.sum() * 0.01)
+            rows.append({
+                "signal_date": sd,
+                "top_symbols": len(top_symbols),
+                "min_avg_amount": float(adv_valid.min()),
+                "median_avg_amount": float(adv_valid.median()),
+                "total_capacity_est": capacity_est,
+            })
+    finally:
+        con.close()
+
+    return pd.DataFrame(rows)
+
+
+def build_limit_up_stress_comparison(
+    monthly_base: pd.DataFrame,
+    monthly_limit_up: pd.DataFrame | None = None,
+    *,
+    base_label: str = "baseline_idle",
+    stress_label: str = "stress_redistribute",
+) -> pd.DataFrame:
+    """P1-1: 对比 baseline 与 limit-up redistrib 模式的 after-cost excess 差异。
+
+    若未提供 stress 文件，返回空 DataFrame。
+    """
+    if monthly_limit_up is None or monthly_limit_up.empty or monthly_base.empty:
+        return pd.DataFrame()
+
+    def _extract_excess(df: pd.DataFrame, label: str) -> pd.Series:
+        topk = pd.to_numeric(df["topk_return"], errors="coerce")
+        market = pd.to_numeric(df["market_ew_return"], errors="coerce")
+        drag = pd.to_numeric(df["cost_drag"], errors="coerce").fillna(0.0)
+        excess = (topk - drag - market).rename(label)
+        return excess.dropna()
+
+    base_excess = _extract_excess(monthly_base, base_label)
+    stress_excess = _extract_excess(monthly_limit_up, stress_label)
+    if base_excess.empty or stress_excess.empty:
+        return pd.DataFrame()
+
+    # 对齐信号日
+    aligned = pd.concat([base_excess, stress_excess], axis=1).dropna()
+    if aligned.empty:
+        return pd.DataFrame()
+
+    delta = aligned[stress_label] - aligned[base_label]
+    return pd.DataFrame([{
+        "comparison": f"{stress_label}_vs_{base_label}",
+        "months": int(len(aligned)),
+        "baseline_mean_excess": float(aligned[base_label].mean()),
+        "stress_mean_excess": float(aligned[stress_label].mean()),
+        "delta_mean": float(delta.mean()),
+        "delta_total": float((1.0 + delta).prod() - 1.0),
+        "positive_delta_ratio": float((delta > 0).mean()),
+        "baseline_sharpe": float(aligned[base_label].mean() / (aligned[base_label].std() + 1e-12) * np.sqrt(12)),
+        "stress_sharpe": float(aligned[stress_label].mean() / (aligned[stress_label].std() + 1e-12) * np.sqrt(12)),
+    }])
+
+
 def _pct_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     for col in cols:
@@ -333,9 +580,18 @@ def build_doc(
     summary: pd.DataFrame,
     relative: pd.DataFrame,
     index_meta: list[dict[str, Any]],
-    artifacts: list[str],
+    cost_sensitivity: pd.DataFrame,
+    capacity: pd.DataFrame = None,
+    limit_up_stress: pd.DataFrame = None,
+    artifacts: list[str] = None,
 ) -> str:
     generated_at = pd.Timestamp.utcnow().isoformat()
+    if capacity is None:
+        capacity = pd.DataFrame()
+    if limit_up_stress is None:
+        limit_up_stress = pd.DataFrame()
+    if artifacts is None:
+        artifacts = []
     summary_view = _pct_cols(
         summary,
         ["total_return", "annualized_return", "mean_monthly_return", "median_monthly_return", "monthly_positive_rate", "max_drawdown"],
@@ -347,6 +603,84 @@ def build_doc(
     meta = pd.DataFrame(index_meta) if index_meta else pd.DataFrame(
         [{"benchmark": "csi1000/csi2000", "status": "not_supplied", "note": "提供 --index-csv 后自动纳入主基准。"}]
     )
+    # P1-1: 成本敏感性表格格式化
+    cost_view = pd.DataFrame()
+    if not cost_sensitivity.empty:
+        cost_view = cost_sensitivity.copy()
+        cost_view["after_cost_excess_mean"] = pd.to_numeric(
+            cost_view["after_cost_excess_mean"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"{x:.4%}")
+        cost_view["after_cost_excess_total"] = pd.to_numeric(
+            cost_view["after_cost_excess_total"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"{x:.2%}")
+        cost_view["positive_months_ratio"] = pd.to_numeric(
+            cost_view["positive_months_ratio"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"{x:.1%}")
+        breakeven = cost_sensitivity["breakeven_bps"].dropna()
+        breakeven_str = f"{float(breakeven.iloc[0]):.1f} bps" if len(breakeven) > 0 else "N/A"
+    else:
+        breakeven_str = "N/A"
+    cost_section = f"""## Cost Sensitivity (M10)
+
+{_format_markdown_table(cost_view[["label", "cost_bps", "after_cost_excess_mean", "after_cost_excess_total", "positive_months_ratio", "breakeven"]], max_rows=10)}
+
+- 估算 Breakeven 成本: `{breakeven_str}`
+- 解释: `after_cost_excess = topk_return - scaled_cost_drag - market_ew_return`
+- 30bps 下 after_cost_excess > 0 是 promotion 前提条件之一。
+""" if not cost_sensitivity.empty else ""
+
+    # P1-1: 容量分析 section
+    capacity_section = ""
+    if not capacity.empty:
+        cap_view = capacity.copy()
+        cap_view["min_avg_amount"] = pd.to_numeric(
+            cap_view["min_avg_amount"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"¥{x/1e4:.0f}万")
+        cap_view["median_avg_amount"] = pd.to_numeric(
+            cap_view["median_avg_amount"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"¥{x/1e4:.0f}万")
+        cap_view["total_capacity_est"] = pd.to_numeric(
+            cap_view["total_capacity_est"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"¥{x/1e4:.0f}万")
+        cap_min_amount = capacity["min_avg_amount"].dropna()
+        cap_total = capacity["total_capacity_est"].dropna()
+        cap_min_str = f"¥{float(cap_min_amount.min())/1e4:.0f}万" if not cap_min_amount.empty else "N/A"
+        cap_total_str = f"¥{float(cap_total.median())/1e4:.0f}万" if not cap_total.empty else "N/A"
+        capacity_section = f"""## Capacity Analysis (M10)
+
+{_format_markdown_table(cap_view[["signal_date", "top_symbols", "min_avg_amount", "median_avg_amount", "total_capacity_est"]], max_rows=20)}
+
+- Top{top_k} 最小日均成交额: `{cap_min_str}`
+- Top{top_k} 组合容量中位数（1% 冲击约束）: `{cap_total_str}`
+- 容量估计方法: `total_capacity = sum(avg_amount_20d) × 0.01`（冲击成本 1% 假设）
+- 组合容量 > ¥1 亿是 promotion 前提条件之一。
+""" if not capacity.empty else ""
+
+    # P1-1: limit-up/VWAP 压力测试 section
+    limit_up_section = ""
+    if not limit_up_stress.empty:
+        lu_view = limit_up_stress.copy()
+        for c in ["baseline_mean_excess", "stress_mean_excess", "delta_mean", "delta_total", "positive_delta_ratio"]:
+            if c in lu_view.columns:
+                lu_view[c] = pd.to_numeric(lu_view[c], errors="coerce").map(
+                    lambda x: "" if pd.isna(x) else f"{x:.4%}"
+                )
+        lu_view["baseline_sharpe"] = pd.to_numeric(
+            lu_view["baseline_sharpe"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
+        lu_view["stress_sharpe"] = pd.to_numeric(
+            lu_view["stress_sharpe"], errors="coerce"
+        ).map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
+        lu_delta_mean = limit_up_stress["delta_mean"].dropna()
+        lu_delta_str = f"{float(lu_delta_mean.iloc[0]):.4%}" if len(lu_delta_mean) > 0 else "N/A"
+        limit_up_section = f"""## Limit-Up / VWAP Stress Test (M10)
+
+{_format_markdown_table(lu_view, max_rows=10)}
+
+- 月均 excess delta: `{lu_delta_str}`
+- 涨停买入失败影响 < 5% after-cost excess 损失为 promotion 前提条件之一。
+""" if not limit_up_stress.empty else ""
+
     artifact_lines = "\n".join(f"- `{x}`" for x in artifacts)
     return f"""# Monthly Selection Benchmark Suite
 
@@ -365,6 +699,9 @@ def build_doc(
 
 {_format_markdown_table(relative_view, max_rows=30)}
 
+{cost_section}
+{capacity_section}
+{limit_up_section}
 ## Index Inputs
 
 {_format_markdown_table(meta, max_rows=30)}
@@ -395,22 +732,58 @@ def main() -> int:
     monthly = load_promoted_monthly(monthly_path, model=args.model, pool=args.candidate_pool, top_k=int(args.top_k))
     index_specs = parse_index_specs(args.index_csv)
     summary, relative, series, index_meta = build_benchmark_suite(monthly, index_specs)
+    cost_sensitivity = build_cost_sensitivity(monthly, base_cost_bps=10.0)
+
+    # P1-1: M10 容量分析 & 涨停/VWAP 压力测试对比
+    capacity = build_capacity_analysis(
+        monthly,
+        db_path=args.db_path,
+        daily_table=args.daily_table,
+        top_k=int(args.top_k),
+    )
+    limit_up_vwap_comparison = pd.DataFrame()
+    if args.stress_monthly_long:
+        stress_path = _resolve_project_path(args.stress_monthly_long)
+        if stress_path.exists():
+            try:
+                stress_monthly = load_promoted_monthly(
+                    stress_path,
+                    model=args.model,
+                    pool=args.candidate_pool,
+                    top_k=int(args.top_k),
+                )
+                limit_up_vwap_comparison = build_limit_up_stress_comparison(
+                    monthly, stress_monthly,
+                    base_label="baseline",
+                    stress_label=args.stress_label,
+                )
+            except Exception:
+                pass
 
     output_stem = f"{args.output_prefix}_{as_of}"
     paths = {
         "summary": results_dir / f"{output_stem}_summary.csv",
         "relative": results_dir / f"{output_stem}_relative.csv",
         "series": results_dir / f"{output_stem}_monthly_series.csv",
+        "cost_sensitivity": results_dir / f"{output_stem}_cost_sensitivity.csv",
+        "capacity": results_dir / f"{output_stem}_capacity.csv",
+        "limit_up_stress": results_dir / f"{output_stem}_limit_up_stress.csv",
         "manifest": results_dir / f"{output_stem}_manifest.json",
         "doc": docs_dir / f"{output_stem}.md",
     }
     summary.to_csv(paths["summary"], index=False)
     relative.to_csv(paths["relative"], index=False)
     series.to_csv(paths["series"], index=False)
+    cost_sensitivity.to_csv(paths["cost_sensitivity"], index=False)
+    capacity.to_csv(paths["capacity"], index=False)
+    limit_up_vwap_comparison.to_csv(paths["limit_up_stress"], index=False)
     artifact_paths = [
         _project_relative(paths["summary"]),
         _project_relative(paths["relative"]),
         _project_relative(paths["series"]),
+        _project_relative(paths["cost_sensitivity"]),
+        _project_relative(paths["capacity"]),
+        _project_relative(paths["limit_up_stress"]),
         _project_relative(paths["manifest"]),
         _project_relative(paths["doc"]),
     ]
@@ -423,6 +796,9 @@ def main() -> int:
             summary=summary,
             relative=relative,
             index_meta=index_meta,
+            cost_sensitivity=cost_sensitivity,
+            capacity=capacity,
+            limit_up_stress=limit_up_vwap_comparison,
             artifacts=artifact_paths,
         ),
         encoding="utf-8",
@@ -467,6 +843,9 @@ def main() -> int:
         ArtifactRef("summary_csv", _project_relative(paths["summary"]), "csv", False, "基准收益汇总"),
         ArtifactRef("relative_csv", _project_relative(paths["relative"]), "csv", False, "相对基准表现"),
         ArtifactRef("monthly_series_csv", _project_relative(paths["series"]), "csv", False, "月度收益序列"),
+        ArtifactRef("cost_sensitivity_csv", _project_relative(paths["cost_sensitivity"]), "csv", False, "成本敏感性分析"),
+        ArtifactRef("capacity_csv", _project_relative(paths["capacity"]), "csv", False, "容量分析"),
+        ArtifactRef("limit_up_stress_csv", _project_relative(paths["limit_up_stress"]), "csv", False, "涨停/VWAP压力测试"),
         ArtifactRef("report_md", _project_relative(paths["doc"]), "md", False, "基准对比报告"),
         ArtifactRef("manifest_json", _project_relative(paths["manifest"]), "json", False, "标准研究 manifest"),
     )

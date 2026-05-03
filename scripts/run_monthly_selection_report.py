@@ -562,7 +562,13 @@ def build_recommendation_table(
         ranked = part.sort_values(["score", "symbol"], ascending=[False, True]).copy()
         ranked["rank_all"] = np.arange(1, len(ranked) + 1)
         for k in top_ks:
-            top = ranked.head(int(k)).copy()
+            # P0-1: 行业上限贪心过滤，防止推荐集过度集中
+            top = apply_industry_cap(
+                ranked, top_k=int(k), max_industry_share=0.30,
+                industry_col="industry_level1", score_col="score",
+            )
+            if top.empty:
+                top = ranked.head(int(k)).copy()
             prev_map = _build_previous_rank_map(
                 previous,
                 report_signal_date=pd.Timestamp(signal_date),
@@ -623,6 +629,36 @@ def build_recommendation_table(
         rec["last_month_rank"] = pd.to_numeric(rec["last_month_rank"], errors="coerce").astype("Int64")
     contrib_df = pd.DataFrame(contrib_rows)
     return rec, contrib_df
+
+
+def apply_industry_cap(
+    ranked: pd.DataFrame,
+    *,
+    top_k: int,
+    max_industry_share: float = 0.30,
+    industry_col: str = "industry",
+    score_col: str = "score",
+) -> pd.DataFrame:
+    """贪心选取：按 score 降序遍历，当某行业已达上限时跳过。
+
+    保证最终推荐集大小 <= top_k。
+    max_industry_share = 0.30 表示 Top20 中单行业最多 6 只。
+    """
+    if ranked.empty:
+        return ranked
+    cap = max(1, int(np.floor(max_industry_share * top_k)))
+    # 如果 top_k 本身很小（如 5），cap 至少为 1
+    industry_counts: dict[str, int] = {}
+    selected = []
+    for _, row in ranked.sort_values(score_col, ascending=False).iterrows():
+        ind = str(row.get(industry_col, "") or "")
+        if industry_counts.get(ind, 0) >= cap:
+            continue
+        selected.append(row)
+        industry_counts[ind] = industry_counts.get(ind, 0) + 1
+        if len(selected) >= top_k:
+            break
+    return pd.DataFrame(selected)
 
 
 def summarize_recommendation_industry_exposure(recommendations: pd.DataFrame) -> pd.DataFrame:
@@ -761,8 +797,60 @@ def summarize_m9_integrity(
             "pass": bool(low_coverage_core == 0),
             "detail": "low coverage fields should be missing-marker-only or ablation-only",
         },
+        # P0-3: 行业集中度检查
+        *_build_m9_industry_concentration_checks(recommendations, report_signal_date),
     ]
     return pd.DataFrame(rows)
+
+
+def _build_m9_industry_concentration_checks(
+    recommendations: pd.DataFrame,
+    report_signal_date: pd.Timestamp,
+) -> list[dict[str, Any]]:
+    """P0-3: 生成推荐集行业集中度 gate 检查项。"""
+    if recommendations.empty:
+        return [
+            {"check": "max_single_industry_share_le_40pct", "value": np.nan, "pass": False,
+             "detail": "推荐集为空，无法检查行业集中度"},
+            {"check": "distinct_industry_count_ge_3", "value": 0, "pass": False,
+             "detail": "推荐集为空，无法检查行业覆盖"},
+        ]
+    # 聚焦报告信号日的 Top-K 推荐
+    main = recommendations
+    if "signal_date" in recommendations.columns and "top_k" in recommendations.columns:
+        main = recommendations[
+            (recommendations["signal_date"] == str(report_signal_date.date()))
+            & (recommendations["top_k"] == recommendations["top_k"].max())
+        ].copy()
+        if main.empty:
+            main = recommendations.copy()
+    if "industry" not in main.columns:
+        return [
+            {"check": "max_single_industry_share_le_40pct", "value": np.nan, "pass": True,
+             "detail": "推荐集缺少 industry 列，跳过行业集中度检查"},
+            {"check": "distinct_industry_count_ge_3", "value": np.nan, "pass": True,
+             "detail": "推荐集缺少 industry 列，跳过行业覆盖检查"},
+        ]
+    n = len(main)
+    max_ind_share = (
+        (main.groupby("industry")["symbol"].nunique() / n).max()
+        if n > 0 and "symbol" in main.columns else 0.0
+    )
+    n_industries = int(main["industry"].nunique()) if n > 0 else 0
+    return [
+        {
+            "check": "max_single_industry_share_le_40pct",
+            "value": round(float(max_ind_share), 4),
+            "pass": bool(max_ind_share <= 0.40),
+            "detail": f"单行业占比 {max_ind_share:.1%}，超 40% 视为集中度过高",
+        },
+        {
+            "check": "distinct_industry_count_ge_3",
+            "value": n_industries,
+            "pass": bool(n_industries >= 3),
+            "detail": f"Top-K 推荐覆盖 {n_industries} 个行业，至少应覆盖 3 个",
+        },
+    ]
 
 
 def _latest_evidence_stem(results_dir: Path) -> str:

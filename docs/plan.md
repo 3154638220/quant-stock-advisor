@@ -1,12 +1,13 @@
 # 量化月度选股主计划
 
 **文档角色**：当前唯一主计划（canonical）  
-**更新时间**：`2026-04-30`  
-**当前阶段**：M10，成本与执行压力  
+**更新时间**：`2026-05-03`  
+**当前阶段**：M10，成本与执行压力（进行中）  
 **研究终点**：每月输出可解释、可回测、PIT-safe、可执行约束清楚的 Top-K 股票推荐名单  
 **生产状态**：无研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前结论**：M8 行业约束自然化已完成，soft industry risk-budget 在 Top20/Top30 上产生 3 个通过 M8 natural gate 的研究候选；但 hard-cap baseline 仍是收益上限更强的 stress 对照，且 M10 真实成本/买入失败/冲击成本尚未完成，因此仍不能 promotion  
-**归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留历史执行记录，不再承担主计划职责
+**当前结论**：M8 行业约束自然化已完成，soft industry risk-budget 在 Top20/Top30 上产生 3 个通过 M8 natural gate 的研究候选；M10 成本敏感性框架已完成（10/30/50 bps 三档），容量分析与涨停/VWAP 压力测试框架已就位；hard-cap baseline 仍是收益上限更强的 stress 对照；披露日历填充（P2-3）与 next_trade_date 边界校验（P2-4）已完成；P0 紧急修复全部完成；仍不能 promotion，待 M10 压力测试结果确认 after-cost excess 在 30bps 下 > 0  
+**归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留历史执行记录，不再承担主计划职责  
+**问题追踪**：`docs/plan-05-03.md`（P0-P3 完整问题清单与修改方案）
 
 ---
 
@@ -267,7 +268,7 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 | M7 推荐报告 | 完成 | 能输出研究名单，但 Top20/30 全为非银金融 |
 | M8 集中度与状态治理 | 完成 | hard cap 诊断与 natural industry soft risk-budget 均已生成；3 个自然化候选通过 M8 natural gate，但仍不 promotion |
 | M9 数据完整性修复 | 完成 | 报告层名称、T+1 可买字段、低覆盖特征治理、ST 名称过滤和 M9 gate 已落地 |
-| M10 成本与执行压力 | 待启动 | 真实成本、买入失败、冲击成本 |
+| M10 成本与执行压力 | 进行中 | 成本敏感性(10/30/50bps)、容量分析、涨停/VWAP压力测试框架已就位 |
 | M11 新数据扩展 | 待启动 | 北向、两融、主题、公告事件 |
 | M12 promotion package | 待启动 | 仅在 M8-M11 gate 通过后进入 |
 
@@ -648,8 +649,10 @@ manifest 明确数据截止日、信号日、下一交易日。
 
 ## 8. M10：成本与执行压力测试
 
-**状态**：待启动。  
-**目标**：验证高换手月度 Top-K 在真实成本下是否仍有意义。
+**状态**：进行中（2026-05-03）。  
+**进度**：成本敏感性网格（10/30/50 bps）已在 `run_monthly_benchmark_suite.py` 实现；容量分析（日均成交额）框架已就位；涨停买入失败（idle/redistribute）与 VWAP 冲击对比框架已就位。披露日历填充（P2-3）与 next_trade_date 边界校验（P2-4）已完成。  
+**目标**：验证高换手月度 Top-K 在真实成本下是否仍有意义。  
+**问题追踪**：详见 `docs/plan-05-03.md` P1-1。
 
 ### 8.1 成本网格
 

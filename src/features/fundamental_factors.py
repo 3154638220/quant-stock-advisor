@@ -13,6 +13,7 @@ from .standardize import fill_missing, winsorize_by_date
 DEFAULT_FUNDAMENTAL_COLS: tuple[str, ...] = (
     "pe_ttm",
     "pb",
+    # P0-2: ev_ebitda 数据覆盖率为 0，运行时由 filter_low_coverage_cols 排除
     "ev_ebitda",
     "roe_ttm",
     "net_profit_yoy",
@@ -27,7 +28,32 @@ DEFAULT_FUNDAMENTAL_COLS: tuple[str, ...] = (
     "margin_buy_ratio",
 )
 
+LOW_COVERAGE_THRESHOLD: float = 0.10  # P0-2: 候选池内覆盖率低于 10% 则排除
+
 DAILY_VALUATION_SOURCES: tuple[str, ...] = ("stock_value_em",)
+
+
+def filter_low_coverage_cols(
+    df: pd.DataFrame,
+    cols: list[str],
+    *,
+    threshold: float = LOW_COVERAGE_THRESHOLD,
+    pool_mask: pd.Series | None = None,
+) -> tuple[list[str], list[str]]:
+    """P0-2: 排除覆盖率过低的特征列。
+
+    返回 (active_cols, dropped_cols)，dropped_cols 仅保留 is_missing 标志。
+    """
+    active: list[str] = []
+    dropped: list[str] = []
+    check = df[pool_mask] if pool_mask is not None else df
+    for col in cols:
+        cov = float(check[col].notna().mean()) if col in check.columns else 0.0
+        if cov >= threshold:
+            active.append(col)
+        else:
+            dropped.append(col)
+    return active, dropped
 
 # P0-1: A 股财报实际披露截止日
 # 年报披露截止 4/30、半年报 8/31、三季报 10/31

@@ -344,3 +344,79 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
     artifact_names = {x["name"] for x in payload["artifacts"]}
     assert artifact_names >= {"recommendations_csv", "leaderboard_csv", "manifest_json", "report_md"}
     assert (tmp_path / "data/experiments/research_results.jsonl").exists()
+
+
+# ── P0-1: 行业上限过滤单元测试 ──────────────────────────────────────────
+
+def test_apply_industry_cap_reduces_concentration():
+    """构造全属同一行业的打分 DataFrame，验证 cap 后单行业占比 ≤ 30%."""
+    import numpy as np
+    from scripts.run_monthly_selection_report import apply_industry_cap
+
+    ranked = pd.DataFrame({
+        "symbol": [f"000{i:03d}" for i in range(20)],
+        "score": np.linspace(0.1, 2.0, 20)[::-1],  # 降序
+        "industry": ["非银金融"] * 20,
+    })
+
+    capped = apply_industry_cap(ranked, top_k=20, max_industry_share=0.30, industry_col="industry", score_col="score")
+
+    # cap = max(1, floor(0.30 * 20)) = 6
+    assert len(capped) <= 6
+    assert (capped["industry"] == "非银金融").all()
+
+
+def test_apply_industry_cap_mixed_industries():
+    """验证多行业场景下行业上限贪心选取正确."""
+    import numpy as np
+    from scripts.run_monthly_selection_report import apply_industry_cap
+
+    ranked = pd.DataFrame({
+        "symbol": [f"000{i:03d}" for i in range(20)],
+        "score": np.linspace(0.1, 2.0, 20)[::-1],
+        "industry": ["电子"] * 10 + ["计算机"] * 10,
+    })
+
+    capped = apply_industry_cap(ranked, top_k=20, max_industry_share=0.30, industry_col="industry", score_col="score")
+
+    # cap = 6 per industry, 应选出 12 只
+    assert len(capped) == 12
+    n_electronics = int((capped["industry"] == "电子").sum())
+    n_computer = int((capped["industry"] == "计算机").sum())
+    assert n_electronics == 6
+    assert n_computer == 6
+
+
+def test_apply_industry_cap_empty_df():
+    """验证空 DataFrame 直接返回."""
+    from scripts.run_monthly_selection_report import apply_industry_cap
+
+    result = apply_industry_cap(pd.DataFrame(), top_k=20)
+    assert result.empty
+
+
+def test_get_active_features_for_fold_excludes_fund_flow_pre_2023():
+    """P1-2: 验证 2023-10 前 fund_flow z-score 被排除."""
+    from src.pipeline.monthly_multisource import get_active_features_for_fold
+
+    features = [
+        "feature_ret_20d_z",
+        "feature_fund_flow_main_inflow_5d_z",
+        "is_missing_feature_fund_flow_main_inflow_5d",
+        "feature_fundamental_pe_ttm_z",
+    ]
+
+    # 训练末尾在 fund_flow 数据起始前
+    active_before = get_active_features_for_fold(
+        features, pd.Timestamp("2022-12-31"),
+    )
+    assert "feature_ret_20d_z" in active_before
+    assert "feature_fund_flow_main_inflow_5d_z" not in active_before  # 排除
+    assert "is_missing_feature_fund_flow_main_inflow_5d" in active_before  # 标志保留
+    assert "feature_fundamental_pe_ttm_z" in active_before
+
+    # 训练末尾在 fund_flow 数据起始后
+    active_after = get_active_features_for_fold(
+        features, pd.Timestamp("2024-01-31"),
+    )
+    assert "feature_fund_flow_main_inflow_5d_z" in active_after

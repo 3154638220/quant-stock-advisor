@@ -142,6 +142,7 @@ class ICMonitor:
         if self._db_path is not None:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = duckdb.connect(str(self._db_path))
+            self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute(IC_MONITOR_DDL)
 
     def _ensure_db(self) -> Optional[duckdb.DuckDBPyConnection]:
@@ -152,6 +153,7 @@ class ICMonitor:
             except Exception:
                 # 连接断开，重连
                 self._conn = duckdb.connect(str(self._db_path))
+                self._conn.execute("PRAGMA journal_mode=WAL;")
                 self._conn.execute(IC_MONITOR_DDL)
                 return self._conn
         return None

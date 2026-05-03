@@ -1,3 +1,6 @@
+# P2-5: 每次修改关键参数时更新此版本号，用于 manifest 追溯
+config_version: "2026-05-03"
+
 paths:
   duckdb_path: data/market.duckdb
   results_dir: data/results
@@ -87,7 +90,7 @@ signals:
     # P1-A 基本面因子（初始小权重）
     pe_ttm: -0.04
     pb: -0.04
-    ev_ebitda: -0.03
+    # ev_ebitda: -0.03  # P0-2 DEPRECATED: 数据覆盖率为 0，已从特征集移除
     roe_ttm: 0.04
     net_profit_yoy: 0.03
     gross_margin_change: 0.03

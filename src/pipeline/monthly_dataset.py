@@ -35,7 +35,7 @@ LABEL_COLS: list[str] = [
     "label_forward_1m_o2o_return",
     "label_forward_1m_excess_vs_market",
     "label_forward_1m_industry_neutral_excess",
-    "label_future_return_percentile",
+    # P2-2: label_future_return_percentile 仅在诊断阶段按需计算，不落盘主 parquet
     "label_future_return_quantile",
     "label_future_top_20pct",
     "label_future_top_10pct",
@@ -343,7 +343,7 @@ def build_monthly_labels(
     pct = labels.groupby("signal_date", sort=False)["label_forward_1m_o2o_return"].rank(
         pct=True, method="average"
     )
-    labels["label_future_return_percentile"] = pct
+    # P2-2: label_future_return_percentile 不再落盘，仅作为中间变量
     labels["label_future_return_quantile"] = np.ceil(
         (pct * 10.0).clip(lower=0.0, upper=10.0)
     ).astype("Int64")

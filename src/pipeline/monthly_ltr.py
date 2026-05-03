@@ -59,9 +59,9 @@ class M6RunConfig:
     halflife_months: float = 36.0   # 扩张窗口样本半衰期（月），0 表示等权
     ltr_models: tuple[str, ...] = (
         "xgboost_rank_ndcg",
-        "xgboost_rank_pairwise",
-        "top20_calibrated",
-        "ranker_top20_ensemble",
+        # "xgboost_rank_pairwise",  # DEPRECATED P1-4: IC 不稳定，移入 ablation
+        # "top20_calibrated",       # DEPRECATED P1-4: after-cost excess 为负
+        # "ranker_top20_ensemble",  # DEPRECATED P1-4: 同上
         # P2-3: Stacking 集成（需 OOF 收集，默认关闭以保持向后兼容）
         # "stacking_ensemble",
     )

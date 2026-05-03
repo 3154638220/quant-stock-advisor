@@ -190,7 +190,11 @@ def resolve_topk_and_cap_grid(
 def attach_trade_dates_to_scores(
     scores: pd.DataFrame, dataset: pd.DataFrame,
 ) -> pd.DataFrame:
-    """将 dataset 中的 next_trade_date 附加到 scores。"""
+    """将 dataset 中的 next_trade_date 附加到 scores。
+
+    P2-4: 当合并后存在 next_trade_date 为 NaT 的行时发出警告，
+    防止 silent NaN 渗入日收益序列。
+    """
     if scores.empty or dataset.empty or "next_trade_date" not in dataset.columns:
         return scores.copy()
     keys = ["signal_date", "candidate_pool_version", "symbol"]
@@ -203,7 +207,23 @@ def attach_trade_dates_to_scores(
     out = scores.drop(columns=["next_trade_date"], errors="ignore").copy()
     out["signal_date"] = pd.to_datetime(out["signal_date"], errors="coerce").dt.normalize()
     out["symbol"] = out["symbol"].astype(str).str.zfill(6)
-    return out.merge(dates, on=keys, how="left")
+    out = out.merge(dates, on=keys, how="left")
+
+    # P2-4: 验证 next_trade_date 完整性
+    if out["next_trade_date"].isna().any():
+        missing_dates = (
+            out.loc[out["next_trade_date"].isna(), "signal_date"]
+            .drop_duplicates()
+            .dropna()
+            .tolist()
+        )
+        import warnings
+        warnings.warn(
+            f"以下月份 signal_date 缺少 next_trade_date: {missing_dates[:10]}. "
+            "请检查日线数据覆盖或日历边界。这些月份的回测收益可能不准确。",
+            stacklevel=2,
+        )
+    return out
 
 
 # ── 受约束月度选股构建 ────────────────────────────────────────────────────
