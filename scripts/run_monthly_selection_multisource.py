@@ -77,6 +77,7 @@ from src.settings import config_path_candidates, load_config, resolve_config_pat
 # ═══════════════════════════════════════════════════════════════════════════
 from src.pipeline.monthly_multisource import (  # noqa: F401
     FeatureSpec,
+    FUNDAMENTAL_RAW_FEATURES as _FUNDAMENTAL_RAW_FEATURES_PIPELINE,  # noqa: F401
     M5RunConfig,
     add_zscore_and_missing_flags,
     attach_enabled_families,
@@ -87,6 +88,7 @@ from src.pipeline.monthly_multisource import (  # noqa: F401
     build_all_m5_scores,
     build_feature_specs,
     build_incremental_delta,
+    industry_neutral_zscore,
     summarize_feature_coverage_by_spec,
     summarize_feature_importance,
     _cap_fit_rows,
@@ -144,6 +146,10 @@ class M5RunConfig:
     halflife_months: float = 36.0
     ml_models: tuple[str, ...] = ("elasticnet", "logistic", "extratrees", "xgboost_excess", "xgboost_top20")
     model_n_jobs: int = 0
+    # P0-1: 对基本面因子使用行业内 z-score 中性化（默认 False，保持向后兼容）
+    use_industry_neutral_zscore: bool = False
+    # P2-1: z-score 后应用 rank transform（将截面秩映射到 [-1,1]，缓解上限堆积）
+    use_rank_transform: bool = False
 
 
 @dataclass(frozen=True)
@@ -535,7 +541,11 @@ def attach_shareholder_features(
     return add_zscore_and_missing_flags(out, SHAREHOLDER_RAW_FEATURES)
 
 
-def build_feature_specs(enabled_families: list[str]) -> list[FeatureSpec]:
+def build_feature_specs(
+    enabled_families: list[str],
+    *,
+    use_industry_neutral_zscore: bool = False,
+) -> list[FeatureSpec]:
     enabled = [x for x in enabled_families if x and x != "price_volume_only"]
     specs = [
         FeatureSpec(
@@ -548,7 +558,10 @@ def build_feature_specs(enabled_families: list[str]) -> list[FeatureSpec]:
     family_cols: dict[str, tuple[str, ...]] = {
         "industry_breadth": tuple(f"{c}_z" for c in INDUSTRY_BREADTH_RAW_FEATURES),
         "fund_flow": tuple(f"{c}_z" for c in FUND_FLOW_RAW_FEATURES),
-        "fundamental": tuple(f"{c}_z" for c in FUNDAMENTAL_RAW_FEATURES),
+        "fundamental": tuple(
+            f"{c}_ind_z" if use_industry_neutral_zscore else f"{c}_z"
+            for c in FUNDAMENTAL_RAW_FEATURES
+        ),
         "shareholder": tuple(f"{c}_z" for c in SHAREHOLDER_RAW_FEATURES),
     }
     family_order = ["industry_breadth", "fund_flow", "fundamental", "shareholder"]
@@ -560,7 +573,8 @@ def build_feature_specs(enabled_families: list[str]) -> list[FeatureSpec]:
         active_families.append(family)
         specs.append(
             FeatureSpec(
-                name="plus_" + "_plus_".join(active_families[1:]),
+                name="plus_" + "_plus_".join(active_families[1:])
+                + ("_ind" if use_industry_neutral_zscore and family == "fundamental" else ""),
                 families=tuple(active_families),
                 feature_cols=tuple(dict.fromkeys(cumulative)),
             )

@@ -5,6 +5,8 @@ import sys
 import pandas as pd
 
 from scripts.fetch_fund_flow import parse_args as parse_fund_flow_args
+from scripts.fetch_only import normalize_max_symbols
+from scripts.fetch_index_benchmarks import IndexFetchSpec, parse_index_specs, standardize_index_daily
 from scripts.fetch_shareholder import (
     _latest_completed_quarter_end,
     _quarter_ends_in_range,
@@ -45,6 +47,32 @@ def test_fetch_fund_flow_parse_args_accepts_limits(monkeypatch):
     assert args.max_symbols == 25
     assert args.sleep_sec == 0.1
     assert args.log_every == 5
+
+
+def test_fetch_only_max_symbols_zero_means_full_universe():
+    assert normalize_max_symbols(None) is None
+    assert normalize_max_symbols(0) is None
+    assert normalize_max_symbols(-1) is None
+    assert normalize_max_symbols(25) == 25
+
+
+def test_fetch_index_benchmarks_standardizes_akshare_daily():
+    spec = IndexFetchSpec("csi1000", "000852", "sh000852")
+    raw = pd.DataFrame(
+        {
+            "date": ["2026-04-29", "2026-04-30"],
+            "open": ["8163.35", "8345.25"],
+            "close": [8343.07, 8381.95],
+        }
+    )
+
+    out = standardize_index_daily(raw, spec)
+
+    assert out[["trade_date", "open", "symbol"]].to_dict(orient="records") == [
+        {"trade_date": pd.Timestamp("2026-04-29"), "open": 8163.35, "symbol": "000852"},
+        {"trade_date": pd.Timestamp("2026-04-30"), "open": 8345.25, "symbol": "000852"},
+    ]
+    assert parse_index_specs([])[0].name == "csi1000"
 
 
 def test_fetch_shareholder_parse_args_accepts_limits(monkeypatch):

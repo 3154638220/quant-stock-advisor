@@ -6,6 +6,7 @@
 
     conda activate quant-system
     python scripts/fetch_only.py --max-symbols 200
+    python scripts/fetch_only.py --max-symbols 0    # 全量更新
     python scripts/fetch_only.py --symbols 600519,000001
     python scripts/fetch_only.py --config /path/to/config.yaml
 """
@@ -30,6 +31,7 @@ EPILOG = """
 参数说明
   --max-symbols N
     仅拉取全市场列表前 N 只（与 AkShare 全市场快照顺序一致）；调试用。
+    传 0 或负数表示不截断，即全量更新。
     与 --symbols 互斥：一旦指定 --symbols，则忽略本项。
 
   --symbols A,B,...
@@ -75,6 +77,13 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def normalize_max_symbols(value: int | None) -> int | None:
+    """CLI compatibility: non-positive max-symbols means full universe."""
+    if value is None:
+        return None
+    return value if value > 0 else None
+
+
 def main() -> int:
     args = _parse_args()
     cfg = load_config(args.config)
@@ -98,7 +107,7 @@ def main() -> int:
         symbols = [s.strip().zfill(6) for s in args.symbols.split(",") if s.strip()]
     else:
         symbols = list_default_universe_symbols(
-            max_symbols=args.max_symbols,
+            max_symbols=normalize_max_symbols(args.max_symbols),
             config_path=args.config,
         )
 

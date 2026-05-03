@@ -89,7 +89,7 @@ signals:
     # P1-A 基本面因子（初始小权重）
     pe_ttm: -0.04
     pb: -0.04
-    ev_ebitda: -0.03
+    # ev_ebitda: -0.03  # P0-2: 已移除 — A 股数据覆盖率为 0，对所有股票产生相同常数偏置
     roe_ttm: 0.04
     net_profit_yoy: 0.03
     gross_margin_change: 0.03

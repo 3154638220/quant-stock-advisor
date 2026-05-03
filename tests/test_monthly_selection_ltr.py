@@ -231,3 +231,72 @@ def test_build_walk_forward_ltr_scores_with_stacking_does_not_crash():
     models = set(scores["model"].unique())
     # 应至少包含基模型，stacking 可能在数据不足时不产出
     assert "M6_xgboost_rank_ndcg" in models or "M6_top20_calibrated" in models
+
+
+# ── P0-1: 行业内特征中性化 ──────────────────────────────────────────────
+
+def test_industry_neutral_zscore_reduces_sector_bias():
+    """P0-1: 行业内 z-score 消除行业间特征分布差异。
+
+    构造一个两行业样本：证券行业 asset_turnover 系统性偏高。
+    验证中性化后同一行业内 z-score 均值为 0，跨行业可比。
+    """
+    from src.pipeline.monthly_multisource import industry_neutral_zscore, FUNDAMENTAL_RAW_FEATURES
+
+    np.random.seed(42)
+    n = 100
+    dates = [pd.Timestamp("2024-01-31")] * n
+    # 证券行业 turnover 偏高（均值 2.0），食品饮料偏低（均值 0.5）
+    industry = ["证券"] * (n // 2) + ["食品饮料"] * (n // 2)
+    asset_turnover_raw = np.concatenate([
+        np.random.normal(2.0, 0.3, n // 2),   # 证券：高 turnover
+        np.random.normal(0.5, 0.1, n // 2),   # 食品饮料：低 turnover
+    ])
+    df = pd.DataFrame({
+        "signal_date": dates,
+        "industry_level1": industry,
+        "symbol": [f"{i:06d}" for i in range(n)],
+        "feature_asset_turnover": asset_turnover_raw,
+    })
+    # 模拟已有全截面 _z 列
+    df["feature_asset_turnover_z"] = (df["feature_asset_turnover"] - df["feature_asset_turnover"].mean()) / df["feature_asset_turnover"].std(ddof=0)
+
+    result = industry_neutral_zscore(df, ["feature_asset_turnover_z"])
+
+    assert "feature_asset_turnover_z_ind_z" in result.columns, "应生成 _ind_z 列"
+
+    # 行业内均值应接近 0
+    for ind in ["证券", "食品饮料"]:
+        ind_mean = result.loc[result["industry_level1"] == ind, "feature_asset_turnover_z_ind_z"].mean()
+        assert abs(ind_mean) < 1e-6, f"{ind} 行业内 _ind_z 均值应接近 0，实际 {ind_mean}"
+
+    # 原 _z 列行业内均值不应为 0（证券偏高，食品饮料偏低）
+    sec_z = result.loc[result["industry_level1"] == "证券", "feature_asset_turnover_z"].mean()
+    food_z = result.loc[result["industry_level1"] == "食品饮料", "feature_asset_turnover_z"].mean()
+    assert sec_z > food_z, f"原 _z 证券行业均值 ({sec_z}) 应高于食品饮料 ({food_z})"
+
+
+def test_industry_neutral_zscore_with_m6_walk_forward():
+    """P0-1: use_industry_neutral_zscore=True 时 M6 walk-forward 正常产出结果。"""
+    pytest.importorskip("xgboost")
+    df = _m6_sample(months=5, symbols=20)
+    # 添加基本面 _z 列（模拟已有全截面 z-score）
+    for feat in ["feature_asset_turnover_z", "feature_roe_ttm_z", "feature_gross_margin_z"]:
+        df[feat] = np.random.randn(len(df))
+    spec = build_m6_feature_spec(
+        ["industry_breadth", "fund_flow", "fundamental"],
+        use_industry_neutral_zscore=True,
+    )
+    cfg = M6RunConfig(
+        top_ks=(2,),
+        candidate_pools=("U1_liquid_tradable",),
+        min_train_months=2,
+        min_train_rows=10,
+        max_fit_rows=0,
+        random_seed=3,
+        use_industry_neutral_zscore=True,
+        ltr_models=("xgboost_rank_ndcg",),
+    )
+    scores, importance = build_walk_forward_ltr_scores(df, spec, cfg)
+    assert not scores.empty, "use_industry_neutral_zscore=True 时应正常产出分数"
+    assert "M6_xgboost_rank_ndcg" in set(scores["model"]), "应包含 xgboost ranker 输出"

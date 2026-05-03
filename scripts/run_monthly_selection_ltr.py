@@ -51,11 +51,13 @@ from scripts.run_monthly_selection_baselines import (
     valid_pool_frame,
 )
 from scripts.run_monthly_selection_multisource import (
+    FUNDAMENTAL_RAW_FEATURES,
     FeatureSpec,
     M5RunConfig,
     _cap_fit_rows,
     attach_enabled_families,
     build_feature_specs,
+    industry_neutral_zscore,
     summarize_feature_coverage_by_spec,
 )
 from src.models.experiment import append_experiment_result
@@ -65,6 +67,8 @@ from src.models.research_contract import (
     ExperimentResult,
     build_result_id,
     config_snapshot,
+    file_sha256,
+    stable_hash,
     utc_now_iso,
     write_research_manifest,
 )
@@ -121,6 +125,8 @@ class M6RunConfig:
     stacking_enabled: bool = False
     stacking_meta_learner: str = "logistic"
     stacking_meta_C: float = 0.1
+    # P0-1: 对基本面因子使用行业内 z-score 中性化（默认 False，保持向后兼容）
+    use_industry_neutral_zscore: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -163,6 +169,12 @@ def parse_args() -> argparse.Namespace:
         default="xgboost_rank_ndcg,xgboost_rank_pairwise,top20_calibrated,ranker_top20_ensemble",
         help="可选 xgboost_rank_ndcg,xgboost_rank_pairwise,top20_calibrated,ranker_top20_ensemble。",
     )
+    p.add_argument(
+        "--use-industry-neutral-zscore",
+        action="store_true",
+        default=False,
+        help="P0-1: 对基本面因子使用行业内 z-score 中性化（生成 _ind_z 列替代 _z）。",
+    )
     return p.parse_args()
 
 
@@ -201,8 +213,16 @@ def _parse_str_list(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
 
 
-def build_m6_feature_spec(enabled_families: list[str]) -> FeatureSpec:
-    specs = build_feature_specs(enabled_families)
+def build_m6_feature_spec(
+    enabled_families: list[str],
+    *,
+    use_industry_neutral_zscore: bool = False,
+) -> FeatureSpec:
+    """构建 M6 LTR 特征规格。P0-1: 支持行业内 z-score 中性化。"""
+    specs = build_feature_specs(
+        enabled_families,
+        use_industry_neutral_zscore=use_industry_neutral_zscore,
+    )
     spec = specs[-1]
     return FeatureSpec(
         name="m6_core_" + "_".join(spec.families),
@@ -434,6 +454,16 @@ def build_walk_forward_ltr_scores(
     cfg: M6RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     valid = valid_pool_frame(dataset)
+
+    # P0-1: 行业内 z-score 中性化（生成 _ind_z 列）
+    if getattr(cfg, 'use_industry_neutral_zscore', False) and "industry_level1" in valid.columns:
+        fundamental_z_cols = [
+            f"{c}_z" for c in FUNDAMENTAL_RAW_FEATURES
+            if f"{c}_z" in valid.columns
+        ]
+        if fundamental_z_cols:
+            valid = industry_neutral_zscore(valid, fundamental_z_cols)
+
     feature_cols = [c for c in spec.feature_cols if c in valid.columns]
     if valid.empty or not feature_cols:
         return pd.DataFrame(), pd.DataFrame()
@@ -695,6 +725,7 @@ def main() -> int:
         relevance_grades=int(args.relevance_grades),
         model_n_jobs=int(args.model_n_jobs),
         ltr_models=ltr_models,
+        use_industry_neutral_zscore=bool(args.use_industry_neutral_zscore),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
     research_config_id = (
@@ -731,9 +762,13 @@ def main() -> int:
         random_seed=cfg.random_seed,
         availability_lag_days=cfg.availability_lag_days,
         model_n_jobs=cfg.model_n_jobs,
+        use_industry_neutral_zscore=cfg.use_industry_neutral_zscore,
     )
     dataset = attach_enabled_families(dataset, db_path, m5_cfg, enabled_families)
-    spec = build_m6_feature_spec(enabled_families)
+    spec = build_m6_feature_spec(
+        enabled_families,
+        use_industry_neutral_zscore=cfg.use_industry_neutral_zscore,
+    )
     feature_coverage = summarize_feature_coverage_by_spec(dataset, [spec])
     scores, raw_importance = build_walk_forward_ltr_scores(dataset, spec, cfg)
     if scores.empty:
@@ -986,7 +1021,20 @@ def main() -> int:
                 "relevance_grades": cfg.relevance_grades,
                 "ltr_models": list(cfg.ltr_models),
                 "model_n_jobs": normalize_model_n_jobs(cfg.model_n_jobs),
+                "use_industry_neutral_zscore": cfg.use_industry_neutral_zscore,
             },
+            "feature_file_hash": file_sha256(dataset_path),
+            "runtime_config_hash": stable_hash({
+                "dataset": str(dataset_path),
+                "max_fit_rows": cfg.max_fit_rows,
+                "min_train_months": cfg.min_train_months,
+                "candidate_pools": list(cfg.candidate_pools),
+                "ltr_models": list(cfg.ltr_models),
+                "cost_bps": cfg.cost_bps,
+                "random_seed": cfg.random_seed,
+                "availability_lag_days": cfg.availability_lag_days,
+                "use_industry_neutral_zscore": cfg.use_industry_neutral_zscore,
+            }),
             "overrides": {
                 key: value
                 for key, value in {

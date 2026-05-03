@@ -92,6 +92,17 @@ def parse_args() -> argparse.Namespace:
         default="stress",
         help="对比用 monthly_long 的标签。",
     )
+    # P0-1: 多成本档位真实回测输入（替代线性缩放）
+    p.add_argument(
+        "--multi-cost-monthly-long",
+        action="append",
+        default=[],
+        help=(
+            "多成本档 monthly_long，格式 cost_bps=path。"
+            "例如 --multi-cost-monthly-long 30=data/results/m8_natural_30bps_monthly_long.csv"
+            " --multi-cost-monthly-long 50=data/results/m8_natural_50bps_monthly_long.csv"
+        ),
+    )
     return p.parse_args()
 
 
@@ -350,11 +361,99 @@ COST_SENSITIVITY_GRID: list[dict[str, Any]] = [
 ]
 
 
-def build_cost_sensitivity(monthly: pd.DataFrame, *, base_cost_bps: float = 10.0) -> pd.DataFrame:
+def build_cost_sensitivity(
+    monthly: pd.DataFrame,
+    *,
+    base_cost_bps: float = 10.0,
+    multi_cost_monthly: dict[float, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
     """P1-1: 计算不同成本档位下的 after-cost excess 表现。
 
-    基于 monthly 中的 cost_drag（按 base_cost_bps 计算），
-    等比缩放得到各档位的成本拖累，输出对比表。
+    优先使用 multi_cost_monthly（真实回测结果），每个 DataFrame 的 cost_drag
+    已包含对应 cost_bps 下的实际交易成本。若未提供，回退为基于 baseline
+    cost_drag 的线性缩放（低估高成本场景，不推荐用于 gate 判断）。
+
+    Parameters
+    ----------
+    monthly : DataFrame
+        baseline (通常 10bps) 的 monthly_long。
+    base_cost_bps : float
+        baseline 对应的 cost_bps。
+    multi_cost_monthly : dict or None
+        {cost_bps: DataFrame} 映射，每个 DataFrame 是完整回测的 monthly_long。
+    """
+    if multi_cost_monthly:
+        return _build_cost_sensitivity_from_real_runs(multi_cost_monthly)
+
+    # 回退：线性缩放（仅用于快速估计，不作为 gate 判断依据）
+    return _build_cost_sensitivity_linear_scale(monthly, base_cost_bps=base_cost_bps)
+
+
+def _build_cost_sensitivity_from_real_runs(
+    multi_cost: dict[float, pd.DataFrame],
+) -> pd.DataFrame:
+    """P0-1: 从真实多成本回测构建 cost sensitivity 表。"""
+    rows: list[dict[str, Any]] = []
+    for bps in sorted(multi_cost.keys()):
+        df = multi_cost[bps]
+        if df.empty:
+            rows.append({"cost_bps": bps, "label": f"real_{bps:.0f}bps",
+                         "after_cost_excess_mean": np.nan,
+                         "after_cost_excess_total": np.nan,
+                         "positive_months_ratio": np.nan, "breakeven": False,
+                         "source": "real_backtest"})
+            continue
+        topk_ret = pd.to_numeric(df["topk_return"], errors="coerce")
+        market_ret = pd.to_numeric(df["market_ew_return"], errors="coerce")
+        cost_drag = pd.to_numeric(df["cost_drag"], errors="coerce").fillna(0.0)
+        after_cost_excess = topk_ret - cost_drag - market_ret
+        excess_valid = after_cost_excess.dropna()
+        if excess_valid.empty:
+            rows.append({"cost_bps": bps, "label": f"real_{bps:.0f}bps",
+                         "after_cost_excess_mean": np.nan,
+                         "after_cost_excess_total": np.nan,
+                         "positive_months_ratio": np.nan, "breakeven": False,
+                         "source": "real_backtest"})
+            continue
+        rows.append({
+            "cost_bps": bps,
+            "label": f"real_{bps:.0f}bps",
+            "after_cost_excess_mean": float(excess_valid.mean()),
+            "after_cost_excess_total": float((1.0 + excess_valid).prod() - 1.0),
+            "positive_months_ratio": float((excess_valid > 0).mean()),
+            "breakeven": bool(excess_valid.mean() > 0),
+            "source": "real_backtest",
+        })
+
+    df = pd.DataFrame(rows)
+    # 估算 breakeven cost bps（线性插值）
+    pos = df[df["after_cost_excess_mean"] > 0]
+    neg = df[df["after_cost_excess_mean"] <= 0]
+    breakeven_bps = np.nan
+    if not pos.empty and not neg.empty:
+        p_low = pos.loc[pos["cost_bps"].idxmin()]
+        n_high = neg.loc[neg["cost_bps"].idxmax()]
+        x0, y0 = float(n_high["cost_bps"]), float(n_high["after_cost_excess_mean"])
+        x1, y1 = float(p_low["cost_bps"]), float(p_low["after_cost_excess_mean"])
+        if abs(y1 - y0) > 1e-12:
+            breakeven_bps = float(x0 - y0 * (x1 - x0) / (y1 - y0))
+    elif not pos.empty:
+        breakeven_bps = float(pos["cost_bps"].max()) * 1.5
+    elif not neg.empty:
+        breakeven_bps = float(neg["cost_bps"].min()) * 0.5
+    df["breakeven_bps"] = breakeven_bps
+    df["method"] = "real_backtest"
+    return df
+
+
+def _build_cost_sensitivity_linear_scale(
+    monthly: pd.DataFrame,
+    *,
+    base_cost_bps: float = 10.0,
+) -> pd.DataFrame:
+    """回退方法：对 baseline cost_drag 做线性缩放。
+
+    ⚠️ 注意：此方法低估高成本场景的实际影响，不应用于 promotion gate 判断。
     """
     if monthly.empty:
         return pd.DataFrame()
@@ -366,14 +465,13 @@ def build_cost_sensitivity(monthly: pd.DataFrame, *, base_cost_bps: float = 10.0
     for entry in COST_SENSITIVITY_GRID:
         bps = float(entry["cost_bps"])
         label = str(entry["label"])
-        # 等比缩放 cost_drag
         scaled_drag = base_drag * (bps / max(float(base_cost_bps), 1e-6))
         after_cost_excess = topk_ret - scaled_drag - market_ret
         excess_valid = after_cost_excess.dropna()
         if excess_valid.empty:
             rows.append({"cost_bps": bps, "label": label, "after_cost_excess_mean": np.nan,
                          "after_cost_excess_total": np.nan, "positive_months_ratio": np.nan,
-                         "breakeven": False})
+                         "breakeven": False, "source": "linear_scale"})
             continue
         rows.append({
             "cost_bps": bps,
@@ -382,15 +480,14 @@ def build_cost_sensitivity(monthly: pd.DataFrame, *, base_cost_bps: float = 10.0
             "after_cost_excess_total": float((1.0 + excess_valid).prod() - 1.0),
             "positive_months_ratio": float((excess_valid > 0).mean()),
             "breakeven": bool(excess_valid.mean() > 0),
+            "source": "linear_scale",
         })
 
-    # 估算 breakeven cost bps（线性插值）
     df = pd.DataFrame(rows)
     pos = df[df["after_cost_excess_mean"] > 0]
     neg = df[df["after_cost_excess_mean"] <= 0]
     breakeven_bps = np.nan
     if not pos.empty and not neg.empty:
-        # 在正负之间线性插值找 breakeven
         p_low = pos.loc[pos["cost_bps"].idxmin()] if not pos.empty else None
         n_high = neg.loc[neg["cost_bps"].idxmax()] if not neg.empty else None
         if p_low is not None and n_high is not None:
@@ -399,11 +496,11 @@ def build_cost_sensitivity(monthly: pd.DataFrame, *, base_cost_bps: float = 10.0
             if abs(y1 - y0) > 1e-12:
                 breakeven_bps = float(x0 - y0 * (x1 - x0) / (y1 - y0))
     elif not pos.empty:
-        breakeven_bps = float(pos["cost_bps"].max()) * 1.5  # 外推估计（乐观）
+        breakeven_bps = float(pos["cost_bps"].max()) * 1.5
     elif not neg.empty:
-        breakeven_bps = float(neg["cost_bps"].min()) * 0.5  # 外推估计（悲观）
-
+        breakeven_bps = float(neg["cost_bps"].min()) * 0.5
     df["breakeven_bps"] = breakeven_bps
+    df["method"] = "linear_scale"
     return df
 
 
@@ -605,8 +702,14 @@ def build_doc(
     )
     # P1-1: 成本敏感性表格格式化
     cost_view = pd.DataFrame()
+    cost_method = "linear_scale (⚠️ 不应用于 promotion gate)"
     if not cost_sensitivity.empty:
         cost_view = cost_sensitivity.copy()
+        cost_method = str(cost_sensitivity["method"].iloc[0]) if "method" in cost_sensitivity.columns else "linear_scale"
+        if cost_method == "linear_scale":
+            cost_method += " (⚠️ 不应用于 promotion gate — 低估高成本影响)"
+        else:
+            cost_method += " (✅ 真实回测 cost_drag)"
         cost_view["after_cost_excess_mean"] = pd.to_numeric(
             cost_view["after_cost_excess_mean"], errors="coerce"
         ).map(lambda x: "" if pd.isna(x) else f"{x:.4%}")
@@ -622,11 +725,12 @@ def build_doc(
         breakeven_str = "N/A"
     cost_section = f"""## Cost Sensitivity (M10)
 
+- 方法: `{cost_method}`
+- 30bps gate: after_cost_excess_mean > 0 是 promotion 前提条件。
 {_format_markdown_table(cost_view[["label", "cost_bps", "after_cost_excess_mean", "after_cost_excess_total", "positive_months_ratio", "breakeven"]], max_rows=10)}
 
 - 估算 Breakeven 成本: `{breakeven_str}`
-- 解释: `after_cost_excess = topk_return - scaled_cost_drag - market_ew_return`
-- 30bps 下 after_cost_excess > 0 是 promotion 前提条件之一。
+- 解释: `after_cost_excess = topk_return - cost_drag - market_ew_return`
 """ if not cost_sensitivity.empty else ""
 
     # P1-1: 容量分析 section
@@ -732,7 +836,39 @@ def main() -> int:
     monthly = load_promoted_monthly(monthly_path, model=args.model, pool=args.candidate_pool, top_k=int(args.top_k))
     index_specs = parse_index_specs(args.index_csv)
     summary, relative, series, index_meta = build_benchmark_suite(monthly, index_specs)
-    cost_sensitivity = build_cost_sensitivity(monthly, base_cost_bps=10.0)
+
+    # P0-1: 优先使用多成本真实回测；否则回退线性缩放
+    multi_cost_monthly: dict[float, pd.DataFrame] | None = None
+    if args.multi_cost_monthly_long:
+        multi_cost_monthly = {}
+        for item in args.multi_cost_monthly_long:
+            if "=" not in item:
+                print(f"[benchmark] 跳过无效 multi-cost 参数: {item}", file=sys.stderr)
+                continue
+            bps_str, path_str = item.split("=", 1)
+            try:
+                bps = float(bps_str)
+            except ValueError:
+                print(f"[benchmark] 跳过无效 cost_bps: {bps_str}", file=sys.stderr)
+                continue
+            cost_path = _resolve_project_path(path_str.strip())
+            if not cost_path.exists():
+                print(f"[benchmark] multi-cost 文件不存在: {cost_path}", file=sys.stderr)
+                continue
+            try:
+                cost_monthly = load_promoted_monthly(
+                    cost_path, model=args.model, pool=args.candidate_pool, top_k=int(args.top_k)
+                )
+                multi_cost_monthly[bps] = cost_monthly
+                print(f"[benchmark] 加载 real cost_bps={bps:.0f} from {cost_path}", flush=True)
+            except Exception as exc:
+                print(f"[benchmark] 加载失败 cost_bps={bps}: {exc}", file=sys.stderr)
+
+    cost_sensitivity = build_cost_sensitivity(
+        monthly,
+        base_cost_bps=10.0,
+        multi_cost_monthly=multi_cost_monthly if multi_cost_monthly else None,
+    )
 
     # P1-1: M10 容量分析 & 涨停/VWAP 压力测试对比
     capacity = build_capacity_analysis(

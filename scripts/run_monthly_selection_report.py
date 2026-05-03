@@ -53,6 +53,8 @@ from src.models.research_contract import (
     ExperimentResult,
     build_result_id,
     config_snapshot,
+    file_sha256,
+    stable_hash,
     utc_now_iso,
     write_research_manifest,
 )
@@ -1367,11 +1369,25 @@ def main() -> int:
                 "candidate_pools": list(cfg.candidate_pools),
                 "min_train_months": cfg.min_train_months,
                 "min_train_rows": cfg.min_train_rows,
+                "max_fit_rows": cfg.max_fit_rows,
                 "cost_bps": cfg.cost_bps,
+                "availability_lag_days": cfg.availability_lag_days,
                 "model_name": cfg.model_name,
                 "min_core_feature_coverage": cfg.min_core_feature_coverage,
                 "model_n_jobs": normalize_model_n_jobs(cfg.model_n_jobs),
             },
+            "feature_file_hash": file_sha256(dataset_path),
+            "runtime_config_hash": stable_hash({
+                "dataset": str(dataset_path),
+                "max_fit_rows": cfg.max_fit_rows,
+                "min_train_months": cfg.min_train_months,
+                "candidate_pools": list(cfg.candidate_pools),
+                "model_name": cfg.model_name,
+                "cost_bps": cfg.cost_bps,
+                "random_seed": cfg.random_seed,
+                "availability_lag_days": cfg.availability_lag_days,
+                "signal_date": str(report_signal_date.date()),
+            }),
             "overrides": {
                 key: value
                 for key, value in {

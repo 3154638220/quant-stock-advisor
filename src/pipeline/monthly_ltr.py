@@ -29,11 +29,13 @@ from src.pipeline.monthly_baselines import (
     valid_pool_frame,
 )
 from src.pipeline.monthly_multisource import (
+    FUNDAMENTAL_RAW_FEATURES,
     FeatureSpec,
     M5RunConfig,
     _cap_fit_rows,
     attach_enabled_families,
     build_feature_specs,
+    industry_neutral_zscore,
 )
 
 
@@ -69,10 +71,24 @@ class M6RunConfig:
     stacking_enabled: bool = False            # 是否启用 OOF Stacking 集成
     stacking_meta_learner: str = "logistic"   # "logistic"（LogisticRegression）
     stacking_meta_C: float = 0.1              # 正则化强度（越小越强）
+    # P0-1: 对基本面因子使用行业内 z-score 中性化（默认 False，保持向后兼容）
+    use_industry_neutral_zscore: bool = False
 
 
-def build_m6_feature_spec(enabled_families: list[str]) -> FeatureSpec:
-    specs = build_feature_specs(enabled_families)
+def build_m6_feature_spec(
+    enabled_families: list[str],
+    *,
+    use_industry_neutral_zscore: bool = False,
+) -> FeatureSpec:
+    """构建 M6 LTR 特征规格。
+
+    P0-1: 当 use_industry_neutral_zscore=True 时，基本面因子使用 _ind_z
+    （行业内 z-score）替代 _z（全截面 z-score），消除行业间分布差异。
+    """
+    specs = build_feature_specs(
+        enabled_families,
+        use_industry_neutral_zscore=use_industry_neutral_zscore,
+    )
     spec = specs[-1]
     return FeatureSpec(
         name="m6_core_" + "_".join(spec.families),
@@ -486,6 +502,16 @@ def build_walk_forward_ltr_scores(
     dataset: pd.DataFrame, spec: FeatureSpec, cfg: M6RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     valid = valid_pool_frame(dataset)
+
+    # P0-1: 行业内 z-score 中性化（生成 _ind_z 列）
+    if getattr(cfg, 'use_industry_neutral_zscore', False) and "industry_level1" in valid.columns:
+        fundamental_z_cols = [
+            f"{c}_z" for c in FUNDAMENTAL_RAW_FEATURES
+            if f"{c}_z" in valid.columns
+        ]
+        if fundamental_z_cols:
+            valid = industry_neutral_zscore(valid, fundamental_z_cols)
+
     feature_cols = [c for c in spec.feature_cols if c in valid.columns]
     if valid.empty or not feature_cols:
         return pd.DataFrame(), pd.DataFrame()

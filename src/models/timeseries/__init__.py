@@ -1,4 +1,10 @@
-"""时序模型：LSTM / GRU / TCN / Transformer 训练与推理工件。"""
+"""时序模型：LSTM / GRU / TCN / Transformer 训练与推理工件。
+
+⚠️ 状态：冻结（2026-05-03）
+- 根据 docs/plan.md 第 11 节停止清单，深度学习不作为当前第一主线。
+- 本模块仅保留推理路径（src/models/inference.py），不进行新模型训练。
+- 若需要恢复开发，请在 M12 promotion 通过后评估作为辅助信号。
+"""
 
 from __future__ import annotations
 
