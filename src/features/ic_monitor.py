@@ -66,23 +66,29 @@ class ICDecayAlert:
 # ---------------------------------------------------------------------------
 
 def _load_store(store_path: Path) -> List[Dict]:
+    """JSONL 格式：每行一条 JSON 记录，流式解析。"""
     if not store_path.exists():
         return []
+    records: List[Dict] = []
     try:
-        with store_path.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, list):
-            return data
+        for line in store_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("IC 监控存储读取失败（将重建）: %s", e)
-    return []
+        return []
+    return records
 
 
 def _save_store(records: List[Dict], store_path: Path) -> None:
+    """JSONL 格式追加写入：每条记录一行，原子写入。"""
     store_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = store_path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(records, fh, ensure_ascii=False, indent=2)
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     tmp.replace(store_path)
 
 
@@ -115,7 +121,7 @@ class ICMonitor:
         overwrite_dates: bool = False,
     ) -> int:
         """
-        将 IC 序列追加到存储文件。
+        将 IC 序列追加到存储文件（JSONL 格式，每行一条记录）。
 
         Parameters
         ----------
@@ -124,20 +130,14 @@ class ICMonitor:
         ic_series
             逐日 IC 序列，索引为交易日（``str`` 或 ``datetime``）。
         overwrite_dates
-            若为 True，则覆盖已存在的同因子同日期记录；默认追加跳过重复。
+            若为 True，则覆盖已存在的同因子同日期记录；默认追加。
 
         Returns
         -------
         int
             实际写入的新记录数。
         """
-        records = _load_store(self.store_path)
         now_str = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-        existing: set[tuple[str, str]] = set()
-        if not overwrite_dates:
-            for r in records:
-                existing.add((r.get("factor", ""), r.get("trade_date", "")))
 
         new_rows: list[Dict] = []
         for dt_raw, ic_val in ic_series.items():
@@ -148,9 +148,6 @@ class ICMonitor:
                 if isinstance(dt_raw, (date, datetime))
                 else str(dt_raw)
             )
-            key = (factor_name, dt_str)
-            if not overwrite_dates and key in existing:
-                continue
             new_rows.append(
                 asdict(
                     ICRecord(
@@ -162,24 +159,32 @@ class ICMonitor:
                 )
             )
 
-        if new_rows:
-            if overwrite_dates:
-                keep = [
-                    r
-                    for r in records
-                    if (r.get("factor"), r.get("trade_date"))
-                    not in {(x["factor"], x["trade_date"]) for x in new_rows}
-                ]
-                records = keep + new_rows
-            else:
-                records.extend(new_rows)
+        if not new_rows:
+            return 0
+
+        if overwrite_dates:
+            records = _load_store(self.store_path)
+            new_keys = {(x["factor"], x["trade_date"]) for x in new_rows}
+            keep = [
+                r
+                for r in records
+                if (r.get("factor"), r.get("trade_date")) not in new_keys
+            ]
+            records = keep + new_rows
             _save_store(records, self.store_path)
-            logger.debug(
-                "IC 监控：因子 %s 写入 %d 条新记录 -> %s",
-                factor_name,
-                len(new_rows),
-                self.store_path,
-            )
+        else:
+            # JSONL 追加模式：直接追加到文件尾部，无需全量读写
+            self.store_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.store_path.open("a", encoding="utf-8") as fh:
+                for row in new_rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        logger.debug(
+            "IC 监控：因子 %s 写入 %d 条新记录 -> %s",
+            factor_name,
+            len(new_rows),
+            self.store_path,
+        )
         return len(new_rows)
 
     def append_many(
@@ -252,7 +257,7 @@ class ICMonitor:
                 g["ic"].rolling(window=window, min_periods=mp).mean()
             )
             g["roll_std"] = (
-                g["ic"].rolling(window=window, min_periods=mp).std(ddof=0)
+                g["ic"].rolling(window=window, min_periods=mp).std(ddof=1)
             )
             g["roll_ir"] = g["roll_mean"] / g["roll_std"].replace(0, np.nan)
             parts.append(g)
@@ -343,7 +348,7 @@ class ICMonitor:
             ic = grp["ic"].dropna()
             n = int(len(ic))
             m = float(ic.mean()) if n else np.nan
-            s = float(ic.std(ddof=0)) if n > 1 else np.nan
+            s = float(ic.std(ddof=1)) if n > 1 else np.nan
             ir = m / s if s and not np.isnan(s) and abs(s) > 1e-15 else np.nan
             hit = float((ic > 0).mean()) if n else np.nan
             recent = float(ic.tail(tail_window).mean()) if n else np.nan

@@ -13,7 +13,6 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from src.models.artifacts import (
@@ -120,9 +119,11 @@ def train_baseline(
     if len(X) < 4:
         raise ValueError("有效样本过少，无法训练")
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=training_seed
-    )
+    # 时序划分：按行顺序切割，避免随机划分引入前视偏差
+    n = len(X)
+    cutoff = max(1, int(n * (1.0 - test_size)))
+    X_train, X_test = X[:cutoff], X[cutoff:]
+    y_train, y_test = y[:cutoff], y[cutoff:]
 
     normalizer: Optional[Tuple[np.ndarray, np.ndarray]] = None
     if normalize == "standard":

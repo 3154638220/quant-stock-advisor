@@ -9,7 +9,12 @@ import pandas as pd
 
 
 def max_drawdown_from_returns(returns: np.ndarray) -> float:
-    """简单收益序列上的最大回撤（非负）。"""
+    """
+    简单收益序列上的最大回撤（非负）。
+
+    注意：此函数仅适用于非杠杆组合（收益 > -1.0 的常规多头策略）。
+    若策略含杠杆，equity 可能为负，回撤计算需额外保护。
+    """
     r = np.asarray(returns, dtype=np.float64).ravel()
     r = r[np.isfinite(r)]
     if r.size == 0:

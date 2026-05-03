@@ -167,9 +167,9 @@ def classify_regime(
     short_rets = s.iloc[-short_w:].to_numpy()
     long_rets = s.iloc[-long_w:].to_numpy()
 
-    # 累积收益（简单近似）
-    short_return = float(np.sum(short_rets))
-    long_return = float(np.sum(long_rets))
+    # 累积收益（复利累积，避免简单求和在长窗口下的累积误差）
+    short_return = float(np.prod(1.0 + short_rets) - 1.0)
+    long_return = float(np.prod(1.0 + long_rets) - 1.0)
 
     # 短期年化波动率
     vol_daily = float(np.std(short_rets, ddof=0))
@@ -264,8 +264,11 @@ def get_regime_weights(
     }
 
     def _pick_multiplier(factor_name: str, mapping: Mapping[str, float]) -> float:
+        # 精确匹配优先，其次前缀匹配（key 后跟 "_" 或完全相等）
+        if factor_name in mapping:
+            return float(mapping[factor_name])
         for key, m in mapping.items():
-            if key in factor_name:
+            if factor_name.startswith(key + "_") or factor_name == key:
                 return float(m)
         return 1.0
 

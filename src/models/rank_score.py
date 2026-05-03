@@ -106,16 +106,28 @@ def cross_section_z_columns(
     raw_names: Sequence[str],
     *,
     rsi_mode: str = "level",
+    mean_revert_center: Optional[Mapping[str, float]] = None,
 ) -> pd.DataFrame:
     """
     在**同一截面**（通常同一 ``trade_date``）上对原始因子列做 z-score，追加 ``z_<name>`` 列。
+
+    Parameters
+    ----------
+    mean_revert_center
+        均值回归型因子的中心值映射，如 ``{"rsi": 50.0, "stoch_rsi": 50.0}``。
+        对匹配的因子使用 ``center - raw`` 后再做 z-score。
     """
     out = df.copy()
+    center_map = dict(mean_revert_center or {})
     for name in raw_names:
         if name not in out.columns:
             raise ValueError(f"缺少因子列: {name!r}")
         raw = pd.to_numeric(out[name], errors="coerce").to_numpy(dtype=np.float64)
-        if name == "rsi":
+        if name in center_map:
+            center = float(center_map[name])
+            z = cross_section_zscore(center - raw)
+        elif name == "rsi":
+            # 保留向后兼容：未在 mean_revert_center 中的 rsi 可按 rsi_mode 处理
             mode = str(rsi_mode).lower()
             if mode == "level":
                 z = cross_section_zscore(raw)
@@ -149,26 +161,35 @@ def composite_extended_linear_score(
     weights: Mapping[str, float],
     weights_override: Optional[Mapping[str, float]] = None,
     rsi_mode: str = "level",
+    mean_revert_center: Optional[Mapping[str, float]] = None,
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """
     多因子截面 z-score 线性组合：键为 ``df`` 列名，含 ``momentum``、``rsi`` 及阶段一扩展列
     （如 ``atr``、``realized_vol``、``turnover_roll_mean``、``vol_ret_corr``、``short_reversal``），
     以及 P1 扩展列（如 ``pe_ttm``、``roe_ttm``、资金流与股东户数因子）。
+
+    Parameters
+    ----------
+    mean_revert_center
+        均值回归型因子的中心值映射，如 ``{"rsi": 50.0, "stoch_rsi": 50.0}``。
     """
     effective_weights = dict(weights)
     if weights_override:
-        # 动态权重仅覆盖同名因子；其余回退静态配置，避免单日缺失导致不可用。
         for k, v in weights_override.items():
             if k in effective_weights:
                 effective_weights[k] = float(v)
     w_norm = _normalize_factor_weights(effective_weights)
+    center_map = dict(mean_revert_center or {})
     score = np.zeros(len(df), dtype=np.float64)
     debug_cols: Dict[str, np.ndarray] = {}
     for name, wc in w_norm.items():
         if name not in df.columns:
             raise ValueError(f"composite_extended 缺少列: {name!r}")
         raw = pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=np.float64)
-        if name == "rsi":
+        if name in center_map:
+            center = float(center_map[name])
+            z = cross_section_zscore(center - raw)
+        elif name == "rsi":
             mode = str(rsi_mode).lower()
             if mode == "level":
                 z = cross_section_zscore(raw)
@@ -192,6 +213,7 @@ def sort_key_for_dataframe(
     w_momentum: float = 0.65,
     w_rsi: float = 0.35,
     rsi_mode: str = "level",
+    mean_revert_center: Optional[Mapping[str, float]] = None,
     composite_extended_weights: Optional[Mapping[str, float]] = None,
     composite_extended_weights_override: Optional[Mapping[str, float]] = None,
     tree_bundle_dir: Optional[Union[str, Path]] = None,
@@ -227,6 +249,7 @@ def sort_key_for_dataframe(
             weights=cw,
             weights_override=composite_extended_weights_override,
             rsi_mode=rsi_mode,
+            mean_revert_center=mean_revert_center,
         )
         for c in dbg.columns:
             out[c] = dbg[c].to_numpy()
@@ -244,7 +267,7 @@ def sort_key_for_dataframe(
         trsi = str(tree_rsi_mode or rsi_mode).lower()
         if trsi not in ("level", "mean_revert"):
             trsi = "level"
-        dbg = cross_section_z_columns(out, raw, rsi_mode=trsi)
+        dbg = cross_section_z_columns(out, raw, rsi_mode=trsi, mean_revert_center=mean_revert_center)
         for c in dbg.columns:
             if c.startswith("z_"):
                 out[c] = dbg[c].to_numpy()

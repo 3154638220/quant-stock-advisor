@@ -255,10 +255,14 @@ def build_result_id(
     identity: ResearchIdentity,
     data_slices: Sequence[DataSlice],
     metrics: Mapping[str, Any],
+    *,
+    created_at: str | None = None,
 ) -> str:
-    primary_slice = data_slices[0].slice_hash()[:12] if data_slices else "noslice"
-    metrics_hash = stable_hash(metrics, prefix_len=12)
-    return f"{identity.research_topic}:{identity.research_config_id}:{primary_slice}:{metrics_hash}"
+    """构建唯一结果 ID，含时间戳片段防止重复运行碰撞。"""
+    primary_slice = data_slices[0].slice_hash()[:10] if data_slices else "noslice"
+    metrics_hash = stable_hash(metrics, prefix_len=10)
+    ts_fragment = (created_at or utc_now_iso())[:16].replace(":", "").replace("-", "")  # 如 "20260503T120000"
+    return f"{identity.research_topic}:{identity.research_config_id}:{primary_slice}:{metrics_hash}:{ts_fragment}"
 
 
 def write_research_manifest(path: str | Path, result: ExperimentResult, *, extra: Mapping[str, Any] | None = None) -> Path:

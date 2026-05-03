@@ -63,11 +63,8 @@ def turnover_cost_drag(
     ``turnover_half_l1`` = 0.5 * sum(|w_new - w_old|)。用于增量换手成本近似。
     """
     t = max(0.0, min(1.0, float(turnover_half_l1)))
-    # 单边：佣金+滑点；卖侧另加印花税（仅卖出腿）
-    one_way = (costs.commission_buy_bps + costs.slippage_bps_per_side) * 1e-4
-    sell_extra = (costs.stamp_duty_sell_bps + costs.commission_sell_bps - costs.commission_buy_bps) * 1e-4
-    # 近似：换手 t 中，一半买侧、一半卖侧；卖侧含印花税
-    per_unit = 2.0 * one_way + max(0.0, sell_extra)
+    # t 为单边换手量（买方或卖方各占 t），双边成本 = t * (buy_cost + sell_cost)
+    per_unit = costs.buy_fraction() + costs.sell_fraction()
     return t * per_unit
 
 

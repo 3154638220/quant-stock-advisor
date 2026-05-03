@@ -128,8 +128,21 @@ def neutralize_size_industry_regression(
         X = np.hstack([ones, X])
 
         m = valid
-        if m.sum() < X.shape[1] + 1:
+        # 至少需要 3 倍特征数的有效样本，且不少于 20 个
+        min_samples = max(20, X.shape[1] * 3)
+        if m.sum() < min_samples:
             residuals.loc[idx] = y - (_safe_nanmean(y[m]) if m.any() else 0.0)
+            continue
+
+        # 检查条件数，避免病态回归
+        try:
+            XtX = X[m].T @ X[m]
+            cond = float(np.linalg.cond(XtX))
+            if cond > 1e8 or not np.isfinite(cond):
+                residuals.loc[idx] = y - _safe_nanmean(y[m])
+                continue
+        except np.linalg.LinAlgError:
+            residuals.loc[idx] = y - _safe_nanmean(y[m])
             continue
 
         try:

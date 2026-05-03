@@ -54,12 +54,20 @@ def zscore_cross_section(
     *,
     eps: float = 1e-12,
 ) -> pd.Series:
-    """单截面向量 z-score（``nan`` 保持 ``nan``）。"""
-    m = s.mean()
-    sd = s.std(ddof=0)
-    if not np.isfinite(sd) or sd < eps:
+    """单截面向量 z-score（``nan`` 保持 ``nan``，使用 np.nanmean/np.nanstd 统一口径）。"""
+    arr = pd.to_numeric(s, errors="coerce").to_numpy(dtype=np.float64)
+    valid = np.isfinite(arr)
+    if not valid.any():
         return pd.Series(np.nan, index=s.index, dtype=float)
-    return (s - m) / sd
+    m = float(np.nanmean(arr))
+    sd = float(np.nanstd(arr, ddof=0))
+    if not np.isfinite(sd) or sd < eps:
+        out = pd.Series(0.0, index=s.index, dtype=float)
+        out[~valid] = np.nan
+        return out
+    result = (arr - m) / sd
+    result[~valid] = np.nan
+    return pd.Series(result, index=s.index, dtype=float)
 
 
 def zscore_by_date(

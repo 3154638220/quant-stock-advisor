@@ -69,7 +69,7 @@ def ic_summary(ic: pd.Series) -> pd.Series:
             {"mean": np.nan, "std": np.nan, "ir": np.nan, "hit_rate": np.nan, "n": 0}
         )
     m = float(x.mean())
-    s = float(x.std(ddof=0))
+    s = float(x.std(ddof=1))
     ir = m / s if s > 1e-15 else float("nan")
     hit = float((x > 0).mean())
     return pd.Series(
@@ -150,7 +150,7 @@ def rolling_ic_stability(
     mp = min_periods or max(2, window // 2)
     s = ic.sort_index()
     roll_mean = s.rolling(window=window, min_periods=mp).mean()
-    roll_std = s.rolling(window=window, min_periods=mp).std(ddof=0)
+    roll_std = s.rolling(window=window, min_periods=mp).std(ddof=1)
     roll_ir = roll_mean / roll_std.replace(0, np.nan)
     return pd.DataFrame(
         {
