@@ -99,15 +99,28 @@ class M6RunConfig:
     max_fit_rows: int = 0
     cost_bps: float = 10.0
     random_seed: int = 42
-    availability_lag_days: int = 30
+    availability_lag_days: int = 45
     relevance_grades: int = 5
     model_n_jobs: int = 0
+    # P1-1: XGBoost 超参数时序感知调优
+    hpo_enabled: bool = False
+    hpo_n_trials: int = 30
+    hpo_cv_folds: int = 3
+    # P1-2: Walk-forward 窗口配置
+    window_type: str = "expanding"  # "rolling" | "expanding"
+    halflife_months: float = 36.0
     ltr_models: tuple[str, ...] = (
         "xgboost_rank_ndcg",
         "xgboost_rank_pairwise",
         "top20_calibrated",
         "ranker_top20_ensemble",
+        # P2-3: Stacking 集成（需 OOF 收集，默认关闭以保持向后兼容）
+        # "stacking_ensemble",
     )
+    # P2-3: OOF meta-learner 配置
+    stacking_enabled: bool = False
+    stacking_meta_learner: str = "logistic"
+    stacking_meta_C: float = 0.1
 
 
 def parse_args() -> argparse.Namespace:
@@ -301,11 +314,16 @@ def _train_predict_top20_calibrated(
     random_seed: int,
     model_n_jobs: int = 1,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
+    x_train = _prepare_ranker_matrix(train, feature_cols)
+    x_test = _prepare_ranker_matrix(test, feature_cols)
     try:
         from xgboost import XGBClassifier
     except Exception as exc:  # pragma: no cover - depends on optional runtime package
-        warnings.warn(f"跳过 XGBoost top20 classifier，import 失败: {exc}", RuntimeWarning)
-        return None, pd.DataFrame()
+        warnings.warn(
+            f"XGBoost top20 classifier 不可用，使用 sklearn LogisticRegression 兜底: {exc}",
+            RuntimeWarning,
+        )
+        XGBClassifier = None  # type: ignore[assignment]
 
     y = pd.to_numeric(train.get(TOP20_COL), errors="coerce")
     if y.notna().sum() == 0:
@@ -316,22 +334,46 @@ def _train_predict_top20_calibrated(
         return None, pd.DataFrame()
     pos = float((y == 1).sum())
     neg = float((y == 0).sum())
-    model = XGBClassifier(
-        n_estimators=120,
-        max_depth=3,
-        learning_rate=0.045,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        objective="binary:logistic",
-        eval_metric="logloss",
-        scale_pos_weight=max(neg / max(pos, 1.0), 1.0),
-        random_state=random_seed,
-        n_jobs=normalize_model_n_jobs(model_n_jobs),
-        tree_method="hist",
-    )
     try:
-        model.fit(_prepare_ranker_matrix(train, feature_cols), y, verbose=False)
-        raw_pred = pd.Series(model.predict_proba(_prepare_ranker_matrix(test, feature_cols))[:, 1], index=test.index)
+        if XGBClassifier is not None:
+            model = XGBClassifier(
+                n_estimators=120,
+                max_depth=3,
+                learning_rate=0.045,
+                subsample=0.85,
+                colsample_bytree=0.85,
+                objective="binary:logistic",
+                eval_metric="logloss",
+                scale_pos_weight=max(neg / max(pos, 1.0), 1.0),
+                random_state=random_seed,
+                n_jobs=normalize_model_n_jobs(model_n_jobs),
+                tree_method="hist",
+            )
+            model.fit(x_train, y, verbose=False)
+            raw_pred = pd.Series(model.predict_proba(x_test)[:, 1], index=test.index)
+            importance_values = model.feature_importances_
+            signed_weights = np.full(len(feature_cols), np.nan)
+        else:
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+
+            model = make_pipeline(
+                StandardScaler(),
+                LogisticRegression(
+                    C=0.5,
+                    penalty="l2",
+                    solver="liblinear",
+                    random_state=random_seed,
+                    max_iter=1000,
+                    class_weight="balanced",
+                ),
+            )
+            model.fit(x_train, y)
+            raw_pred = pd.Series(model.predict_proba(x_test)[:, 1], index=test.index)
+            coef = model.named_steps["logisticregression"].coef_[0]
+            importance_values = np.abs(coef)
+            signed_weights = coef
     except Exception as exc:  # pragma: no cover - defensive for optional model failures
         warnings.warn(f"M6_top20_calibrated 训练失败: {exc}", RuntimeWarning)
         return None, pd.DataFrame()
@@ -349,8 +391,8 @@ def _train_predict_top20_calibrated(
         {
             "model": "M6_top20_calibrated",
             "feature": feature_cols,
-            "importance": model.feature_importances_,
-            "signed_weight": np.nan,
+            "importance": importance_values,
+            "signed_weight": signed_weights,
         }
     )
     return out, importance

@@ -31,8 +31,9 @@ class BacktestConfig:
     # 仅 ``close_to_close`` / ``vwap``：组合收益用 ``w_{t-1-L}^T r_t``（``L`` 为本字段；0=历史默认）。
     execution_lag: int = 0
     # 涨停买入失败处理模式（仅 tplus1_open 模式下有效）：
-    # ``idle``：资金闲置（权重归零，对应收益置 0），等价于原 zero_if_limit_up_open
-    # ``redistribute``：将涨停票权重均匀分配给同日其他可买标的（顺延到下一个标的）
+    # ``idle``：资金闲置（涨停票的新增/增持权重冻结，已有持仓继续获得收益）
+    # ``redistribute``：将涨停票的新增权重均匀分配给同日其他可买标的
+    # P1-4: 两种模式均只冻结新增/增持权重，不冻结已有持仓收益。
     limit_up_mode: str = "idle"
     # 真实开盘涨停不可买 mask，索引为入场日，列为标的。
     # True 表示该日 open / pre_close 触及对应板块涨停；仅影响新增/增持权重。
@@ -122,8 +123,13 @@ def build_open_to_open_returns(
 
     第 ``t`` 行、``s`` 列：``open(t+1,s)/open(t,s)-1``（最后一行全为 ``nan`` 或 0）。
 
-    zero_if_limit_up_open
-        若为 True，当 ``open(t)`` 触及涨停价（相对前收）时将该收益置 0，表示开盘无法买入、该笔不参与。
+    .. warning::
+
+       **P1-4**: ``zero_if_limit_up_open=True`` 会将涨停日收益置 0，这混淆了
+       「当日无法新买入」（买入约束）与「现有持仓在涨停日仍有收益」（持仓收益）。
+       该参数仅适用于评估**新建仓**信号（无存量持仓的场景），**不应用于组合回测**。
+       组合回测请使用 ``run_backtest(..., limit_up_mode='idle')`` 并在引擎层
+       自动区分增量与存量权重。
     """
     if daily_long.empty:
         raise ValueError("daily_long 为空")

@@ -145,8 +145,12 @@ def neutralize_size_industry_regression(
             residuals.loc[idx] = y - _safe_nanmean(y[m])
             continue
 
+        # P0-2: 对 y 做 IQR 截尾后再回归，避免极端收益拉偏 OLS 系数
+        y_valid = y[m]
+        q1, q3 = np.nanpercentile(y_valid, [1, 99])
+        y_clipped = np.clip(y, q1, q3)
         try:
-            beta, _, _, _ = np.linalg.lstsq(X[m], y[m], rcond=None)
+            beta, _, _, _ = np.linalg.lstsq(X[m], y_clipped[m], rcond=None)
             pred = X @ beta
             res = y - pred
         except np.linalg.LinAlgError:

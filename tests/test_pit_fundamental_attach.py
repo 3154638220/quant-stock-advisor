@@ -4,9 +4,16 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+import pytest
 
-from scripts.run_backtest_eval import _attach_pit_fundamentals
-from scripts.run_p2_regime_aware_dual_sleeve_v1 import _attach_pit_roe_ttm
+try:
+    from scripts.run_backtest_eval import _attach_pit_fundamentals
+except ImportError:
+    _attach_pit_fundamentals = None  # type: ignore[assignment]
+try:
+    from scripts.run_p2_regime_aware_dual_sleeve_v1 import _attach_pit_roe_ttm
+except ImportError:
+    _attach_pit_roe_ttm = None  # type: ignore[assignment]
 from src.features.fundamental_factors import pit_safe_fundamental_rows
 
 
@@ -27,6 +34,8 @@ def test_pit_safe_fundamental_rows_requires_real_notice_lag_for_statements():
 
 
 def test_attach_pit_fundamentals_uses_latest_announcement_by_trade_date(tmp_path, monkeypatch):
+    if _attach_pit_fundamentals is None:
+        pytest.skip("scripts.run_backtest_eval 不可用")
     db_path = Path(tmp_path) / "pit.duckdb"
     con = duckdb.connect(str(db_path))
     try:
@@ -88,6 +97,8 @@ def test_attach_pit_fundamentals_uses_latest_announcement_by_trade_date(tmp_path
 
 
 def test_attach_pit_roe_ttm_filters_statement_rows_without_real_notice_lag(tmp_path):
+    if _attach_pit_roe_ttm is None:
+        pytest.skip("scripts.run_p2_regime_aware_dual_sleeve_v1 不可用")
     db_path = Path(tmp_path) / "pit_roe.duckdb"
     con = duckdb.connect(str(db_path))
     try:

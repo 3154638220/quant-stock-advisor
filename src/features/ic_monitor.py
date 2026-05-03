@@ -2,17 +2,18 @@
 因子 IC 衰减滚动监控：持久化记录与告警。
 
 功能：
-- 将每次计算得到的 IC 序列（逐日截面 IC）追加写入 JSON 存储文件。
+- 将每次计算得到的 IC 序列（逐日截面 IC）追加写入 DuckDB 或 JSON 存储文件。
 - 按滚动窗口统计近期 IC 均值，当均值绝对值跌破阈值时触发告警。
-- JSON 格式便于离线分析，也可直接读入 DuckDB。
+- P2-8: DuckDB 主存储（事务保证并发安全），JSONL 保留为可选的向后兼容导出。
 
 典型用法（每日运行结束后调用）::
 
     from src.features.ic_monitor import ICMonitor
 
-    monitor = ICMonitor(store_path="data/logs/ic_monitor.json")
+    monitor = ICMonitor(store_path="data/logs/ic_monitor.json", db_path="data/market.duckdb")
     monitor.append(factor_name="momentum", ic_series=ic_ser)
-    alerts = monitor.check_decay_alerts(window=20, threshold=0.03)
+    alerts = monitor.check_decay_alerts(window=20, threshold=0.03,
+                                        alert_handler=my_webhook_handler)
     for a in alerts:
         print(a)
 """
@@ -24,12 +25,28 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
+import duckdb
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# DuckDB 建表 DDL
+# ---------------------------------------------------------------------------
+
+IC_MONITOR_DDL = """
+CREATE TABLE IF NOT EXISTS ic_monitor (
+    factor       VARCHAR,
+    trade_date   DATE,
+    ic           DOUBLE,
+    recorded_at  TIMESTAMP,
+    PRIMARY KEY (factor, trade_date)
+);
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +79,7 @@ class ICDecayAlert:
 
 
 # ---------------------------------------------------------------------------
-# 存储 I/O
+# 存储 I/O (JSONL，向后兼容)
 # ---------------------------------------------------------------------------
 
 def _load_store(store_path: Path) -> List[Dict]:
@@ -100,14 +117,53 @@ class ICMonitor:
     """
     因子 IC 持久化监控器。
 
+    P2-8: 支持 DuckDB 主存储（事务保证并发安全），JSONL 作为向后兼容的
+    可选导出格式。支持告警回调（如企业微信 Webhook）。
+
     Parameters
     ----------
     store_path
-        JSON 存储文件路径，不存在时自动创建。
+        JSON 存储文件路径（向后兼容），不存在时自动创建。
+        若仅使用 DuckDB 后端可设为 ``None``。
+    db_path
+        DuckDB 数据库路径。若提供，优先使用 DuckDB 存储。
+        默认为 ``None``，仅使用 JSONL。
     """
 
-    def __init__(self, store_path: str | Path) -> None:
-        self.store_path = Path(store_path)
+    def __init__(
+        self,
+        store_path: Optional[str | Path] = None,
+        *,
+        db_path: Optional[str | Path] = None,
+    ) -> None:
+        self.store_path = Path(store_path) if store_path else None
+        self._db_path = Path(db_path) if db_path else None
+        self._conn: Optional[duckdb.DuckDBPyConnection] = None
+        if self._db_path is not None:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = duckdb.connect(str(self._db_path))
+            self._conn.execute(IC_MONITOR_DDL)
+
+    def _ensure_db(self) -> Optional[duckdb.DuckDBPyConnection]:
+        if self._conn is not None:
+            try:
+                self._conn.execute("SELECT 1")
+                return self._conn
+            except Exception:
+                # 连接断开，重连
+                self._conn = duckdb.connect(str(self._db_path))
+                self._conn.execute(IC_MONITOR_DDL)
+                return self._conn
+        return None
+
+    def close(self) -> None:
+        """关闭 DuckDB 连接。"""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     # ------------------------------------------------------------------
     # 写入
@@ -121,7 +177,9 @@ class ICMonitor:
         overwrite_dates: bool = False,
     ) -> int:
         """
-        将 IC 序列追加到存储文件（JSONL 格式，每行一条记录）。
+        将 IC 序列追加到存储（DuckDB 优先，JSONL 作为兼容导出）。
+
+        P2-8: DuckDB 事务保证并发安全，并发写入不丢失数据。
 
         Parameters
         ----------
@@ -162,28 +220,49 @@ class ICMonitor:
         if not new_rows:
             return 0
 
-        if overwrite_dates:
-            records = _load_store(self.store_path)
-            new_keys = {(x["factor"], x["trade_date"]) for x in new_rows}
-            keep = [
-                r
-                for r in records
-                if (r.get("factor"), r.get("trade_date")) not in new_keys
-            ]
-            records = keep + new_rows
-            _save_store(records, self.store_path)
-        else:
-            # JSONL 追加模式：直接追加到文件尾部，无需全量读写
-            self.store_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.store_path.open("a", encoding="utf-8") as fh:
-                for row in new_rows:
-                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # P2-8: DuckDB 优先写入（事务保证原子性）
+        db = self._ensure_db()
+        if db is not None:
+            try:
+                df_new = pd.DataFrame(new_rows)
+                df_new["trade_date"] = pd.to_datetime(df_new["trade_date"], errors="coerce")
+                df_new["recorded_at"] = pd.to_datetime(df_new["recorded_at"], errors="coerce")
+                if overwrite_dates:
+                    # 删除旧记录后写入
+                    dates_to_del = df_new["trade_date"].dropna().dt.date.unique().tolist()
+                    if dates_to_del:
+                        placeholders = ",".join(["?"] * len(dates_to_del))
+                        db.execute(
+                            f"DELETE FROM ic_monitor WHERE factor = ? AND trade_date IN ({placeholders})",
+                            [factor_name] + dates_to_del,
+                        )
+                db.execute("INSERT OR REPLACE INTO ic_monitor SELECT * FROM df_new")
+            except Exception as exc:
+                logger.warning("DuckDB IC 写入失败，回退 JSONL: %s", exc)
+                db = None  # 回退 JSONL
+
+        # JSONL 兼容写入（DuckDB 不可用时或作为额外导出）
+        if db is None and self.store_path is not None:
+            if overwrite_dates:
+                records = _load_store(self.store_path)
+                new_keys = {(x["factor"], x["trade_date"]) for x in new_rows}
+                keep = [
+                    r
+                    for r in records
+                    if (r.get("factor"), r.get("trade_date")) not in new_keys
+                ]
+                records = keep + new_rows
+                _save_store(records, self.store_path)
+            else:
+                self.store_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.store_path.open("a", encoding="utf-8") as fh:
+                    for row in new_rows:
+                        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         logger.debug(
-            "IC 监控：因子 %s 写入 %d 条新记录 -> %s",
+            "IC 监控：因子 %s 写入 %d 条新记录",
             factor_name,
             len(new_rows),
-            self.store_path,
         )
         return len(new_rows)
 
@@ -210,11 +289,35 @@ class ICMonitor:
         """
         读取存储为 DataFrame，列：``factor``、``trade_date``、``ic``、``recorded_at``。
 
+        P2-8: 优先从 DuckDB 读取；若不可用则回退 JSONL。
+
         Parameters
         ----------
         factors
             若指定，仅返回对应因子的记录；``None`` 表示全部。
         """
+        # P2-8: 优先 DuckDB
+        db = self._ensure_db()
+        if db is not None:
+            try:
+                if factors:
+                    placeholders = ",".join(["?"] * len(list(factors)))
+                    df = db.execute(
+                        f"SELECT * FROM ic_monitor WHERE factor IN ({placeholders}) ORDER BY factor, trade_date",
+                        list(factors),
+                    ).df()
+                else:
+                    df = db.execute("SELECT * FROM ic_monitor ORDER BY factor, trade_date").df()
+                if not df.empty:
+                    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+                    df["ic"] = pd.to_numeric(df["ic"], errors="coerce")
+                    return df.reset_index(drop=True)
+            except Exception:
+                pass  # 回退 JSONL
+
+        # JSONL 回退
+        if self.store_path is None:
+            return pd.DataFrame(columns=["factor", "trade_date", "ic", "recorded_at"])
         records = _load_store(self.store_path)
         if not records:
             return pd.DataFrame(
@@ -264,6 +367,37 @@ class ICMonitor:
 
         return pd.concat(parts, ignore_index=True)
 
+    def rolling_icir(
+        self,
+        factor_names: list[str],
+        *,
+        window: int = 20,
+        min_periods: int = 12,
+    ) -> dict[str, float]:
+        """P1-3: 返回各因子最近 window 期的 ICIR = mean(IC) / std(IC)。
+
+        用于动态因子权重：ICIR 越高的因子在合成分中权重越大。
+        若某因子数据不足，返回 0.0。
+
+        Returns
+        -------
+        dict : factor_name -> latest_icir (float)
+        """
+        stats = self.rolling_ic_stats(window=window, factors=factor_names, min_periods=min_periods)
+        if stats.empty:
+            return {f: 0.0 for f in factor_names}
+
+        result: dict[str, float] = {}
+        for fname in factor_names:
+            grp = stats[stats["factor"] == fname]
+            if grp.empty:
+                result[fname] = 0.0
+                continue
+            latest = grp.sort_values("trade_date").iloc[-1]
+            ir = latest.get("roll_ir")
+            result[fname] = float(ir) if ir is not None and np.isfinite(ir) else 0.0
+        return result
+
     # ------------------------------------------------------------------
     # 告警
     # ------------------------------------------------------------------
@@ -275,9 +409,12 @@ class ICMonitor:
         threshold: float = 0.03,
         factors: Optional[Sequence[str]] = None,
         check_date: Optional[str] = None,
+        alert_handler: Optional[Callable[[ICDecayAlert], None]] = None,
     ) -> List[ICDecayAlert]:
         """
         检查最新滚动 IC 均值是否低于阈值，若低则生成告警。
+
+        P2-8: 支持 alert_handler 回调（如企业微信 Webhook），触发告警时调用。
 
         Parameters
         ----------
@@ -289,6 +426,9 @@ class ICMonitor:
             指定要检查的因子子集；默认检查全部。
         check_date
             用于日志显示的检查日期；``None`` 则用今日。
+        alert_handler
+            可选回调，接收 ``ICDecayAlert`` 对象。可用于发送企业微信、
+            钉钉通知等。若未提供，仅记录日志。
 
         Returns
         -------
@@ -311,16 +451,21 @@ class ICMonitor:
                     f"{roll_mean:.4f} 低于阈值 {threshold}（检查日: {today}）"
                 )
                 logger.warning(msg)
-                alerts.append(
-                    ICDecayAlert(
-                        factor=str(fname),
-                        window=window,
-                        threshold=threshold,
-                        rolling_mean_ic=float(roll_mean),
-                        check_date=today,
-                        message=msg,
-                    )
+                alert = ICDecayAlert(
+                    factor=str(fname),
+                    window=window,
+                    threshold=threshold,
+                    rolling_mean_ic=float(roll_mean),
+                    check_date=today,
+                    message=msg,
                 )
+                alerts.append(alert)
+                # P2-8: 调用告警回调（如企业微信 Webhook）
+                if alert_handler is not None:
+                    try:
+                        alert_handler(alert)
+                    except Exception as exc:
+                        logger.error("IC 告警回调执行失败: %s", exc)
         return alerts
 
     def summary(

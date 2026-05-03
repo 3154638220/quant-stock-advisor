@@ -22,8 +22,15 @@ def _risk_contributions(w: np.ndarray, Sigma: np.ndarray) -> np.ndarray:
     return w * (Sigma @ w)
 
 
-def covariance_diagnostics(Sigma: np.ndarray) -> Dict[str, Any]:
-    """输出协方差矩阵稳定性摘要，便于解释优化器是否有足够信号可用。"""
+def covariance_diagnostics(
+    Sigma: np.ndarray,
+    *,
+    shrinkage_intensity: float = float("nan"),
+) -> Dict[str, Any]:
+    """输出协方差矩阵稳定性摘要，便于解释优化器是否有足够信号可用。
+
+    P0-3: 支持外部传入 Ledoit-Wolf 收缩强度 α（0=样本协方差，1=收缩至均值相关）。
+    """
     cov = _symmetrize(np.asarray(Sigma, dtype=np.float64))
     n = int(cov.shape[0]) if cov.ndim == 2 else 0
     if n == 0:
@@ -35,6 +42,7 @@ def covariance_diagnostics(Sigma: np.ndarray) -> Dict[str, Any]:
             "condition_number": float("nan"),
             "min_eigenvalue": float("nan"),
             "max_eigenvalue": float("nan"),
+            "shrinkage_intensity": float(shrinkage_intensity) if np.isfinite(shrinkage_intensity) else float("nan"),
         }
     diag = np.diag(cov).astype(np.float64)
     diag_sum = float(np.nansum(np.abs(diag)))
@@ -59,6 +67,7 @@ def covariance_diagnostics(Sigma: np.ndarray) -> Dict[str, Any]:
         "condition_number": cond,
         "min_eigenvalue": float(np.min(eigvals)) if eigvals.size else float("nan"),
         "max_eigenvalue": float(np.max(eigvals)) if eigvals.size else float("nan"),
+        "shrinkage_intensity": float(shrinkage_intensity) if np.isfinite(shrinkage_intensity) else float("nan"),
     }
 
 
@@ -160,9 +169,13 @@ def optimize_risk_parity(
     *,
     max_iter: int = 3000,
     ftol: float = 1e-11,
+    prev_weights: Optional[np.ndarray] = None,
+    max_turnover: float = 1.0,
 ) -> np.ndarray:
     """
-    等风险贡献（ERC）：最小化各资产风险贡献相对均值的平方偏差，约束 ``sum w = 1``、``w > 0``。
+    等风险贡献（ERC）：最小化各资产风险贡献相对均值的平方偏差，约束 ``sum w = 1``、``w >= 0``。
+
+    P2-6: 可选换手约束 ``max_turnover``（0~1），限制权重与 ``prev_weights`` 的 L1 距离。
     """
     Sigma = _symmetrize(Sigma)
     n = Sigma.shape[0]
@@ -179,8 +192,21 @@ def optimize_risk_parity(
         return float(np.sum((rc - m) ** 2))
 
     x0 = np.ones(n) / n
-    cons = ({"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0},)
+    cons = [{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}]
     bounds = [(1e-8, 1.0)] * n
+
+    # P2-6: 换手约束
+    if prev_weights is not None and max_turnover < 1.0:
+        prev = np.asarray(prev_weights, dtype=np.float64).ravel()
+        if prev.size == n:
+            # 使用线性化：sum(|w_i - prev_i|) <= max_turnover
+            # 引入辅助变量（通过两次约束实现：w - prev <= slack, prev - w <= slack）
+            # 简化处理：用 scipy 的 NonlinearConstraint
+            cons.append({
+                "type": "ineq",
+                "fun": lambda w: float(max_turnover) - float(np.sum(np.abs(w - prev))),
+            })
+
     res = minimize(
         objective,
         x0,
@@ -202,8 +228,13 @@ def optimize_min_variance(
     *,
     max_iter: int = 3000,
     ftol: float = 1e-11,
+    prev_weights: Optional[np.ndarray] = None,
+    max_turnover: float = 1.0,
 ) -> np.ndarray:
-    """长仅最小方差组合：``min w' Σ w``，``sum w = 1``。"""
+    """长仅最小方差组合：``min w' Σ w``，``sum w = 1``。
+
+    P2-6: 可选换手约束 ``max_turnover``。
+    """
     Sigma = _symmetrize(Sigma)
     n = Sigma.shape[0]
     if n == 0:
@@ -220,8 +251,18 @@ def optimize_min_variance(
         return float(w @ Sigma @ w)
 
     x0 = np.ones(n) / n
-    cons = ({"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0},)
+    cons = [{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}]
     bounds = [(0.0, 1.0)] * n
+
+    # P2-6: 换手约束
+    if prev_weights is not None and max_turnover < 1.0:
+        prev = np.asarray(prev_weights, dtype=np.float64).ravel()
+        if prev.size == n:
+            cons.append({
+                "type": "ineq",
+                "fun": lambda w: float(max_turnover) - float(np.sum(np.abs(w - prev))),
+            })
+
     res = minimize(
         objective,
         x0,
@@ -244,9 +285,13 @@ def optimize_mean_variance(
     risk_aversion: float = 1.0,
     max_iter: int = 3000,
     ftol: float = 1e-11,
+    prev_weights: Optional[np.ndarray] = None,
+    max_turnover: float = 1.0,
 ) -> np.ndarray:
     """
     长仅均值–方差：``max mu'w - (λ/2) w'Σw``，等价于最小化 ``(λ/2) w'Σw - mu'w``。
+
+    P2-6: 可选换手约束 ``max_turnover``。
     """
     Sigma = _symmetrize(Sigma)
     mu = np.asarray(mu, dtype=np.float64).ravel()
@@ -269,8 +314,18 @@ def optimize_mean_variance(
         return float(0.5 * lam * (w @ Sigma @ w) - (mu @ w))
 
     x0 = np.ones(n) / n
-    cons = ({"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0},)
+    cons = [{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}]
     bounds = [(0.0, 1.0)] * n
+
+    # P2-6: 换手约束
+    if prev_weights is not None and max_turnover < 1.0:
+        prev = np.asarray(prev_weights, dtype=np.float64).ravel()
+        if prev.size == n:
+            cons.append({
+                "type": "ineq",
+                "fun": lambda w: float(max_turnover) - float(np.sum(np.abs(w - prev))),
+            })
+
     res = minimize(
         objective,
         x0,
@@ -292,16 +347,24 @@ def weights_from_cov_method(
     *,
     mu: Optional[np.ndarray] = None,
     risk_aversion: float = 1.0,
+    prev_weights: Optional[np.ndarray] = None,
+    max_turnover: float = 1.0,
 ) -> np.ndarray:
     m = str(method).lower()
     if m == "risk_parity":
-        return optimize_risk_parity(Sigma)
+        return optimize_risk_parity(Sigma, prev_weights=prev_weights, max_turnover=max_turnover)
     if m == "min_variance":
-        return optimize_min_variance(Sigma)
+        return optimize_min_variance(Sigma, prev_weights=prev_weights, max_turnover=max_turnover)
     if m == "mean_variance":
         if mu is None:
             raise ValueError("mean_variance 需要 expected_returns (mu)")
-        return optimize_mean_variance(Sigma, mu, risk_aversion=risk_aversion)
+        return optimize_mean_variance(
+            Sigma,
+            mu,
+            risk_aversion=risk_aversion,
+            prev_weights=prev_weights,
+            max_turnover=max_turnover,
+        )
     raise ValueError(f"未知协方差优化方法: {method!r}")
 
 
@@ -311,8 +374,13 @@ def solve_weights_from_cov_method(
     *,
     mu: Optional[np.ndarray] = None,
     risk_aversion: float = 1.0,
+    prev_weights: Optional[np.ndarray] = None,
+    max_turnover: float = 1.0,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """求解协方差驱动的组合权重，并返回优化器与协方差诊断。"""
+    """求解协方差驱动的组合权重，并返回优化器与协方差诊断。
+
+    P2-6: 支持换手约束 ``max_turnover`` 和 ``prev_weights``。
+    """
     cov = _symmetrize(np.asarray(Sigma, dtype=np.float64))
     n = int(cov.shape[0]) if cov.ndim == 2 else 0
     if n == 0:
@@ -331,6 +399,13 @@ def solve_weights_from_cov_method(
         "covariance": covariance_diagnostics(cov),
     }
 
+    # P2-6: 验证换手约束参数
+    prev_vec: Optional[np.ndarray] = None
+    if prev_weights is not None:
+        prev_vec = np.asarray(prev_weights, dtype=np.float64).ravel()
+        if prev_vec.size != n:
+            prev_vec = None
+
     if n == 1:
         w = np.ones(1, dtype=np.float64)
         diag["weights"] = weight_diagnostics(w, reference=equal_w)
@@ -346,6 +421,16 @@ def solve_weights_from_cov_method(
         )
         return w, diag
 
+    # 构建约束列表（含换手约束）
+    def _build_cons() -> list:
+        cons_list = [{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}]
+        if prev_vec is not None and max_turnover < 1.0:
+            cons_list.append({
+                "type": "ineq",
+                "fun": lambda w: float(max_turnover) - float(np.sum(np.abs(w - prev_vec))),
+            })
+        return cons_list
+
     res = None
     if m == "risk_parity":
         def objective_rp(w: np.ndarray) -> float:
@@ -356,14 +441,13 @@ def solve_weights_from_cov_method(
             return float(np.sum((rc - m_rc) ** 2))
 
         x0 = np.ones(n) / n
-        cons = ({"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0},)
         bounds = [(1e-8, 1.0)] * n
         res = minimize(
             objective_rp,
             x0,
             method="SLSQP",
             bounds=bounds,
-            constraints=cons,
+            constraints=_build_cons(),
             options={"maxiter": 3000, "ftol": 1e-11},
         )
         w, solver_info = _finalize_solver_result(res, n)
@@ -380,14 +464,13 @@ def solve_weights_from_cov_method(
             return float(w @ cov @ w)
 
         x0 = np.ones(n) / n
-        cons = ({"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0},)
         bounds = [(0.0, 1.0)] * n
         res = minimize(
             objective_mv,
             x0,
             method="SLSQP",
             bounds=bounds,
-            constraints=cons,
+            constraints=_build_cons(),
             options={"maxiter": 3000, "ftol": 1e-11},
         )
         w, solver_info = _finalize_solver_result(res, n)
@@ -408,14 +491,13 @@ def solve_weights_from_cov_method(
             return float(0.5 * lam * (w @ cov @ w) - (mu_vec @ w))
 
         x0 = np.ones(n) / n
-        cons = ({"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0},)
         bounds = [(0.0, 1.0)] * n
         res = minimize(
             objective_meanvar,
             x0,
             method="SLSQP",
             bounds=bounds,
-            constraints=cons,
+            constraints=_build_cons(),
             options={"maxiter": 3000, "ftol": 1e-11},
         )
         w, solver_info = _finalize_solver_result(res, n)

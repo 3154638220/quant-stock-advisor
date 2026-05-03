@@ -18,6 +18,7 @@ database:
   table_fundamental: a_share_fundamental
   table_fund_flow: a_share_fund_flow
   table_shareholder: a_share_shareholder
+  price_adjust: qfq
 
 fundamental:
   # 基本面刷新入口写入后，月度链路按 PIT 口径读取估值/质量因子。
@@ -97,13 +98,14 @@ signals:
     margin_buy_ratio: -0.02
   # 滚动 ICIR 动态权重（可选）
   ic_weighting:
-    enabled: false
+    enabled: true
+    window: 20
+    min_periods: 12
+    softmax_temperature: 2.0  # 越大权重越均匀
     # IC 权重缓存路径；存在时优先读取
     weights_path: data/cache/ic_weights.json
     # 未提供 weights_path 或文件缺失时，可从监控文件在线计算
     monitor_path: data/logs/ic_monitor.json
-    window: 60
-    min_obs: 20
     half_life: 20.0
     clip_abs_weight: 0.25
 
@@ -140,6 +142,12 @@ portfolio:
   max_single_weight: 0.05
   max_industry_weight: null
   industry_col: null
+  # P0-3: 协方差估计方法 —— sample | ledoit_wolf | auto | ewma | factor | industry_factor
+  covariance_method: auto
+  # P0-3: 仅 auto 模式生效，条件数超过阈值自动切换 Ledoit-Wolf
+  condition_number_threshold: 1000
+  # P2-6: 最大月度换手率约束（0.0~1.0，1.0=不约束）
+  max_monthly_turnover: 0.60
   # 月末调仓默认不限制半 L1 换手；1.0 表示允许全买全卖。
   # 如需复现低换手实验，可手动改为 0.3。
   max_turnover: 1.0
@@ -175,6 +183,11 @@ transaction_costs:
   commission_sell_bps: 2.5
   slippage_bps_per_side: 4.5
   stamp_duty_sell_bps: 5.0
+  # P2-1: 市场冲击模型配置
+  # fixed_bps: 固定基点冲击（与 slippage 合并计算）
+  # sqrt_adv: 平方根律模型（按股票 ADV 粒度计算冲击，对小市值更准确）
+  impact_model: sqrt_adv
+  impact_k: 0.10
 
 prefilter:
   # P4-B 关键差异字段：以下过滤阈值会改变候选池组成，需与回测参数保持一致。

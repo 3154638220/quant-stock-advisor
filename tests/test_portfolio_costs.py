@@ -12,7 +12,7 @@ from src.backtest.transaction_costs import (
     net_simple_return_from_long_hold,
 )
 from src.market.regime import RegimeConfig, RegimeResult, get_regime_weights
-from src.portfolio.covariance import mean_cov_returns_from_wide
+from src.portfolio.covariance import estimate_covariance, mean_cov_returns_from_wide
 from src.portfolio.optimizer import (
     optimize_min_variance,
     optimize_risk_parity,
@@ -243,6 +243,21 @@ def test_covariance_ewma_and_industry_factor():
     assert cov_ind.shape == (4, 4)
     assert np.all(np.diag(cov_ind) > 0)
     assert np.allclose(cov_ind, cov_ind.T, atol=1e-10)
+
+
+def test_covariance_factor_method_is_positive_definite():
+    rng = np.random.default_rng(7)
+    factors = rng.normal(0.0, 0.01, size=(80, 3))
+    beta = rng.normal(0.5, 0.2, size=(3, 5))
+    noise = rng.normal(0.0, 0.003, size=(80, 5))
+    returns = (factors @ beta + noise).T
+
+    cov = estimate_covariance(returns, method="factor", factor_returns=factors)
+
+    eigvals = np.linalg.eigvalsh(cov)
+    assert cov.shape == (5, 5)
+    assert np.allclose(cov, cov.T, atol=1e-10)
+    assert float(np.min(eigvals)) > 0.0
 
 
 def test_turnover_cost_weighted_constraint():

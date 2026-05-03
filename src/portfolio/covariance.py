@@ -13,7 +13,105 @@ except ImportError:  # pragma: no cover
     LedoitWolf = None  # type: ignore
 
 
-CovarianceMethod = Literal["ledoit_wolf", "sample", "ewma", "industry_factor"]
+CovarianceMethod = Literal["ledoit_wolf", "sample", "ewma", "factor", "industry_factor", "auto"]
+
+
+def estimate_covariance(
+    returns: np.ndarray,
+    *,
+    method: str = "auto",
+    condition_threshold: float = 1000.0,
+    ridge: float = 1e-6,
+    ewma_halflife: float = 20.0,
+    factor_returns: Optional[np.ndarray] = None,
+    industry_labels: Optional[Sequence[str]] = None,
+    return_meta: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+    """自适应协方差估计：条件数超过阈值时自动切换至 Ledoit-Wolf 收缩。
+
+    P0-3: 20 只股票 × 120 天窗口时样本协方差矩阵条件数轻易超过 1000，
+    均值–方差优化器权重极度集中或求解不稳定。此函数检测到病态矩阵后
+    自动触发 Ledoit-Wolf 收缩估计。
+
+    Parameters
+    ----------
+    returns : ndarray, shape (n_assets, n_periods)
+    method : str
+        ``"sample"`` — 样本协方差
+        ``"ledoit_wolf"`` — Ledoit-Wolf 收缩
+        ``"auto"`` — 先算样本协方差，条件数超阈值则自动切换 Ledoit-Wolf
+    condition_threshold : float
+        仅 method="auto" 时生效，条件数超过该值触发收缩
+    return_meta : bool
+        P0-3: 若为 True，返回 (cov_matrix, meta_dict)，其中 meta_dict 包含
+        ``shrinkage_intensity``（Ledoit-Wolf 收缩强度 α）和 ``method_used`` 等诊断字段。
+    """
+    n, t = returns.shape
+    meta: dict[str, Any] = {"method_used": str(method).lower(), "shrinkage_intensity": float("nan")}
+    if n == 0:
+        cov = np.zeros((0, 0), dtype=np.float64)
+        return (cov, meta) if return_meta else cov
+    if t <= 1:
+        vol = np.std(returns, axis=1, ddof=0)
+        vol = np.where(np.isfinite(vol) & (vol > 1e-12), vol, 1e-4)
+        cov = np.diag(vol**2) + np.eye(n, dtype=np.float64) * float(ridge)
+        return (cov, meta) if return_meta else cov
+
+    m = str(method).lower()
+    cov_sample = np.cov(returns, rowvar=True, ddof=1)
+
+    if m == "sample":
+        cov = cov_sample
+    elif m == "auto":
+        # 检测条件数，判断是否需要收缩
+        eigvals = np.linalg.eigvalsh(cov_sample)
+        abs_eig = np.abs(eigvals)
+        min_abs = float(np.min(abs_eig)) if abs_eig.size else 1e-18
+        max_abs = float(np.max(abs_eig)) if abs_eig.size else 1.0
+        cond = float(max_abs / min_abs) if min_abs > 1e-18 else float("inf")
+        use_shrinkage = cond > float(condition_threshold)
+        if use_shrinkage and LedoitWolf is not None and t >= 2 and n >= 2:
+            Xlw = returns.T.astype(np.float64)
+            lw = LedoitWolf().fit(Xlw)
+            cov = np.asarray(lw.covariance_, dtype=np.float64)
+            meta["method_used"] = "ledoit_wolf"
+            meta["shrinkage_intensity"] = float(getattr(lw, "shrinkage_", float("nan")))
+        else:
+            cov = cov_sample
+            meta["method_used"] = "sample"
+    elif m == "ledoit_wolf" and LedoitWolf is not None and t >= 2 and n >= 2:
+        Xlw = returns.T.astype(np.float64)
+        lw = LedoitWolf().fit(Xlw)
+        cov = np.asarray(lw.covariance_, dtype=np.float64)
+        meta["method_used"] = "ledoit_wolf"
+        meta["shrinkage_intensity"] = float(getattr(lw, "shrinkage_", float("nan")))
+    elif m == "ewma":
+        cov = _ewma_covariance(returns, halflife=ewma_halflife, ridge=ridge)
+        cov = 0.5 * (cov + cov.T)
+        cov = cov + np.eye(n, dtype=np.float64) * float(ridge)
+        meta["method_used"] = "ewma"
+        return (cov.astype(np.float64), meta) if return_meta else cov.astype(np.float64)
+    elif m == "factor":
+        cov = _factor_model_covariance(returns, factor_returns=factor_returns, ridge=ridge)
+        cov = 0.5 * (cov + cov.T)
+        cov = cov + np.eye(n, dtype=np.float64) * float(ridge)
+        meta["method_used"] = "factor"
+        return (cov.astype(np.float64), meta) if return_meta else cov.astype(np.float64)
+    elif m == "industry_factor":
+        if industry_labels is None:
+            raise ValueError("method=industry_factor 需要 industry_labels")
+        cov = _industry_factor_covariance(returns, industry_labels, ridge=ridge)
+        cov = 0.5 * (cov + cov.T)
+        cov = cov + np.eye(n, dtype=np.float64) * float(ridge)
+        meta["method_used"] = "industry_factor"
+        return (cov.astype(np.float64), meta) if return_meta else cov.astype(np.float64)
+    else:
+        cov = cov_sample
+        meta["method_used"] = "sample"
+
+    cov = 0.5 * (cov + cov.T)
+    cov = cov + np.eye(n, dtype=np.float64) * float(ridge)
+    return (cov.astype(np.float64), meta) if return_meta else cov.astype(np.float64)
 
 
 def _returns_matrix_from_wide(
@@ -139,6 +237,59 @@ def _industry_factor_covariance(
     return cov
 
 
+def _factor_model_covariance(
+    R: np.ndarray,
+    *,
+    factor_returns: Optional[np.ndarray],
+    ridge: float,
+) -> np.ndarray:
+    """Low-rank factor covariance: ``Sigma = beta' F beta + D``.
+
+    ``R`` is shaped ``(n_assets, n_periods)``. If explicit factor returns are
+    absent, use a conservative one-factor market proxy from the cross-sectional
+    equal-weight return. Callers with richer data can pass market/size/momentum
+    factor returns as ``(n_periods, n_factors)`` or ``(n_factors, n_periods)``.
+    """
+    n, t = R.shape
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    if t <= 1:
+        vol = np.std(R, axis=1, ddof=0)
+        vol = np.where(np.isfinite(vol) & (vol > 1e-12), vol, 1e-4)
+        return np.diag(vol**2) + np.eye(n, dtype=np.float64) * float(ridge)
+
+    if factor_returns is None:
+        F = np.nanmean(R, axis=0).reshape(-1, 1)
+    else:
+        F = np.asarray(factor_returns, dtype=np.float64)
+        if F.ndim == 1:
+            F = F.reshape(-1, 1)
+        if F.shape[0] != t and F.shape[1] == t:
+            F = F.T
+        if F.shape[0] != t:
+            raise ValueError("factor_returns 的时间维度须与 returns 匹配")
+
+    valid = np.all(np.isfinite(F), axis=1) & np.all(np.isfinite(R.T), axis=1)
+    if valid.sum() <= max(2, F.shape[1]):
+        cov = np.cov(R, rowvar=True, ddof=1)
+        return 0.5 * (cov + cov.T) + np.eye(n, dtype=np.float64) * float(ridge)
+
+    Fv = F[valid]
+    Av = R[:, valid].T
+    F_design = np.column_stack([np.ones(len(Fv), dtype=np.float64), Fv])
+    beta_full = np.linalg.lstsq(F_design, Av, rcond=None)[0]
+    beta = beta_full[1:, :]  # (k, n)
+    resid = Av - F_design @ beta_full
+    factor_cov = np.cov(Fv, rowvar=False, ddof=1)
+    if np.ndim(factor_cov) == 0:
+        factor_cov = np.array([[float(factor_cov)]], dtype=np.float64)
+    spec_var = np.var(resid, axis=0, ddof=1)
+    spec_var = np.where(np.isfinite(spec_var) & (spec_var > 1e-12), spec_var, 1e-8)
+    cov = beta.T @ factor_cov @ beta + np.diag(spec_var)
+    cov = 0.5 * (cov + cov.T)
+    return cov + np.eye(n, dtype=np.float64) * float(ridge)
+
+
 def mean_cov_returns_from_wide(
     wide: pd.DataFrame,
     symbols: Sequence[str],
@@ -200,21 +351,19 @@ def mean_cov_returns_from_wide(
     mu = np.mean(R, axis=1)
     T = R.shape[1]
     method = str(shrinkage).lower()
-    if method == "ledoit_wolf" and LedoitWolf is not None and T >= 2 and n >= 2:
-        # sklearn: 行样本为时间点，列为资产收益
-        Xlw = R.T.astype(np.float64)
-        lw = LedoitWolf().fit(Xlw)
-        cov = np.asarray(lw.covariance_, dtype=np.float64)
-    elif method == "ewma":
-        cov = _ewma_covariance(R, halflife=ewma_halflife, ridge=ridge)
-    elif method == "industry_factor":
-        if industry_labels is None:
-            raise ValueError("shrinkage=industry_factor 需要 industry_labels")
-        cov = _industry_factor_covariance(R, industry_labels, ridge=ridge)
+    if method in ("auto", "ledoit_wolf", "sample", "ewma", "factor", "industry_factor"):
+        cov = estimate_covariance(
+            R,
+            method=method,
+            condition_threshold=1000.0,
+            ridge=ridge,
+            ewma_halflife=ewma_halflife,
+            industry_labels=industry_labels,
+        )
     else:
         cov = np.cov(R, rowvar=True, ddof=1)
-    cov = 0.5 * (cov + cov.T)
-    cov = cov + np.eye(n) * float(ridge)
+        cov = 0.5 * (cov + cov.T)
+        cov = cov + np.eye(n) * float(ridge)
     return mu.astype(np.float64), cov.astype(np.float64)
 
 

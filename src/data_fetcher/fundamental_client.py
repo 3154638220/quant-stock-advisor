@@ -9,12 +9,16 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-import akshare as ak
 import duckdb
 import numpy as np
 import pandas as pd
 
 from ..settings import load_config, project_root
+
+try:  # Schema-only workflows and tests should not require the live data client.
+    import akshare as ak
+except ModuleNotFoundError:  # pragma: no cover - depends on optional runtime package
+    ak = None  # type: ignore[assignment]
 
 _LOG = logging.getLogger(__name__)
 
@@ -269,6 +273,8 @@ class FundamentalClient:
     @staticmethod
     def _load_valuation_history(code6: str) -> pd.DataFrame:
         """日频估值序列（PE-TTM、PB），用于与财报公告日 asof 对齐。"""
+        if ak is None:
+            return pd.DataFrame()
         try:
             raw = ak.stock_value_em(symbol=code6)
         except Exception as exc:  # noqa: BLE001
@@ -421,6 +427,8 @@ class FundamentalClient:
         return out.drop_duplicates(["symbol", "announcement_date", "report_period"], keep="last")
 
     def fetch_symbol_fundamentals(self, symbol: str) -> pd.DataFrame:
+        if ak is None:
+            raise ModuleNotFoundError("缺少 akshare 依赖，无法在线拉取基本面数据。")
         code = _norm_symbol(symbol)
         val_hist = self._load_valuation_history(code)
 

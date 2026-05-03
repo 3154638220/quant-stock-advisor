@@ -9,6 +9,7 @@ import pytest
 from src.models.rank_score import (
     composite_linear_score,
     cross_section_zscore,
+    icir_weighted_score,
     sort_key_for_dataframe,
 )
 
@@ -58,3 +59,16 @@ def test_sort_key_unknown():
     df = pd.DataFrame({"symbol": ["1"], "momentum": [1.0], "rsi": [50.0]})
     with pytest.raises(ValueError):
         sort_key_for_dataframe(df, sort_by="unknown")
+
+
+def test_icir_weighted_score_excludes_zero_icir_when_positive_exists():
+    factors = {
+        "strong": np.array([1.0, 2.0, 3.0]),
+        "flat": np.array([100.0, 100.0, 100.0]),
+    }
+    score = icir_weighted_score(
+        factors,
+        {"strong": 2.0, "flat": 0.0},
+        softmax_temperature=2.0,
+    )
+    assert np.allclose(score, factors["strong"])

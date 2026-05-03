@@ -15,7 +15,19 @@ import pandas as pd
 try:  # 离线研究脚本只读 DuckDB 时，不应被在线抓取依赖阻断导入。
     import akshare as ak
 except ModuleNotFoundError:  # pragma: no cover - 取决于运行环境是否安装 akshare
-    ak = None
+    class _MissingAkShare:
+        def _missing(self, *args, **kwargs):
+            raise ModuleNotFoundError(
+                "缺少 akshare 依赖；在线抓取日线/股票池前请先安装 akshare，"
+                "或使用本地 DuckDB / universe cache。"
+            )
+
+        stock_zh_a_spot_em = _missing
+        stock_info_a_code_name = _missing
+        stock_zh_a_daily = _missing
+        stock_zh_a_hist = _missing
+
+    ak = _MissingAkShare()
 
 try:
     import duckdb
@@ -29,11 +41,6 @@ _LOG = logging.getLogger(__name__)
 
 
 def _require_akshare():
-    if ak is None:
-        raise ModuleNotFoundError(
-            "缺少 akshare 依赖；在线抓取日线/股票池前请先安装 akshare，"
-            "或使用本地 DuckDB / universe cache。"
-        )
     return ak
 
 

@@ -49,6 +49,17 @@ SHAREHOLDER_TABLE_COLS: tuple[str, ...] = (
     "fetched_at",
 )
 
+# P2-4: 除权日历表列定义
+DIVIDEND_CALENDAR_TABLE_COLS: tuple[str, ...] = (
+    "symbol",
+    "ex_dividend_date",
+    "dividend_plan",
+    "source",
+    "fetched_at",
+)
+
+DIVIDEND_CALENDAR_TABLE_NAME: str = "a_share_dividend_calendar"
+
 
 @dataclass(frozen=True)
 class ShareholderUpdateSummary:
@@ -121,6 +132,31 @@ class ShareholderClient:
         existing = {str(r[1]) for r in self._conn.execute(f"PRAGMA table_info('{t}')").fetchall()}
         if "notice_date" not in existing:
             self._conn.execute(f"ALTER TABLE {t} ADD COLUMN notice_date DATE")
+
+        # P2-4: 除权日历表，用于过滤送配股导致的 holder_change_rate 异常值
+        self._ensure_dividend_calendar_schema()
+
+    def _ensure_dividend_calendar_schema(self) -> None:
+        """P2-4: 创建除权日历表（若不存在）。"""
+        dt = DIVIDEND_CALENDAR_TABLE_NAME
+        self._conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {dt} (
+                symbol VARCHAR NOT NULL,
+                ex_dividend_date DATE NOT NULL,
+                dividend_plan VARCHAR,
+                source VARCHAR,
+                fetched_at TIMESTAMP,
+                PRIMARY KEY (symbol, ex_dividend_date)
+            )
+            """
+        )
+        self._conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{dt}_symbol_exdiv
+            ON {dt}(symbol, ex_dividend_date)
+            """
+        )
 
     @staticmethod
     def _prepare_shareholder_frame(raw: pd.DataFrame) -> pd.DataFrame:

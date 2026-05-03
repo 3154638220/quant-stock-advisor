@@ -20,7 +20,16 @@ from typing import Any
 
 import pandas as pd
 import requests
-from akshare.utils.cons import headers
+
+try:  # AkShare is only needed for live fetching; unit tests use local helpers.
+    from akshare.utils.cons import headers
+except ModuleNotFoundError:  # pragma: no cover - depends on optional runtime package
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

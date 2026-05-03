@@ -86,6 +86,7 @@ def _train_predict_sklearn(
     feature_cols: list[str],
     random_seed: int,
     model_n_jobs: int = 1,
+    sample_weight: pd.Series | np.ndarray | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     from sklearn.ensemble import ExtraTreesRegressor
     from sklearn.impute import SimpleImputer
@@ -95,6 +96,10 @@ def _train_predict_sklearn(
 
     x_train = train[feature_cols]
     x_test = test[feature_cols]
+    sw = None
+    if sample_weight is not None:
+        sw = np.asarray(sample_weight, dtype=np.float64)
+        sw = np.where(np.isfinite(sw), sw, 1.0)
     y_reg = pd.to_numeric(train[EXCESS_COL], errors="coerce")
     if y_reg.notna().sum() == 0:
         y_reg = pd.to_numeric(train[LABEL_COL], errors="coerce")
@@ -108,7 +113,10 @@ def _train_predict_sklearn(
                 ElasticNet(alpha=0.002, l1_ratio=0.15, random_state=random_seed, max_iter=5000),
             )
             m = y_reg.notna()
-            model.fit(x_train.loc[m], y_reg.loc[m])
+            fit_kwargs = {}
+            if sw is not None and len(sw) == len(train):
+                fit_kwargs["elasticnet__sample_weight"] = sw[m.to_numpy()]
+            model.fit(x_train.loc[m], y_reg.loc[m], **fit_kwargs)
             pred = model.predict(x_test)
             coefs = model.named_steps["elasticnet"].coef_
             importance = pd.DataFrame(
@@ -130,7 +138,10 @@ def _train_predict_sklearn(
                     class_weight="balanced",
                 ),
             )
-            model.fit(x_train, y_cls)
+            fit_kwargs = {}
+            if sw is not None and len(sw) == len(train):
+                fit_kwargs["logisticregression__sample_weight"] = sw
+            model.fit(x_train, y_cls, **fit_kwargs)
             pred = model.predict_proba(x_test)[:, 1]
             coefs = model.named_steps["logisticregression"].coef_[0]
             importance = pd.DataFrame(
@@ -148,7 +159,10 @@ def _train_predict_sklearn(
                 ),
             )
             m = y_reg.notna()
-            model.fit(x_train.loc[m], y_reg.loc[m])
+            fit_kwargs = {}
+            if sw is not None and len(sw) == len(train):
+                fit_kwargs["extratreesregressor__sample_weight"] = sw[m.to_numpy()]
+            model.fit(x_train.loc[m], y_reg.loc[m], **fit_kwargs)
             pred = model.predict(x_test)
             imp = model.named_steps["extratreesregressor"].feature_importances_
             importance = pd.DataFrame(
@@ -174,6 +188,8 @@ def _train_predict_xgboost(
     feature_cols: list[str],
     random_seed: int,
     model_n_jobs: int = 1,
+    hpo_params: dict | None = None,
+    sample_weight: pd.Series | np.ndarray | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
     try:
         from xgboost import XGBClassifier, XGBRegressor
@@ -183,6 +199,11 @@ def _train_predict_xgboost(
 
     x_train = train[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     x_test = test[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    params = hpo_params or {}
+    sw = None
+    if sample_weight is not None:
+        sw = np.asarray(sample_weight, dtype=np.float64)
+        sw = np.where(np.isfinite(sw), sw, 1.0)
     importance = pd.DataFrame()
     try:
         if model_name == "M4_xgboost_excess":
@@ -191,17 +212,21 @@ def _train_predict_xgboost(
                 y = pd.to_numeric(train[LABEL_COL], errors="coerce")
             m = y.notna()
             model = XGBRegressor(
-                n_estimators=80,
-                max_depth=3,
-                learning_rate=0.05,
-                subsample=0.85,
-                colsample_bytree=0.85,
+                n_estimators=params.get("n_estimators", 80),
+                max_depth=params.get("max_depth", 3),
+                learning_rate=params.get("learning_rate", 0.05),
+                subsample=params.get("subsample", 0.85),
+                colsample_bytree=params.get("colsample_bytree", 0.85),
+                min_child_weight=params.get("min_child_weight", 1),
+                reg_alpha=params.get("reg_alpha", 0.0),
+                reg_lambda=params.get("reg_lambda", 1.0),
                 objective="reg:squarederror",
                 random_state=random_seed,
                 n_jobs=normalize_model_n_jobs(model_n_jobs),
                 tree_method="hist",
             )
-            model.fit(x_train.loc[m], y.loc[m], verbose=False)
+            fit_sw = sw[m.to_numpy()] if sw is not None and len(sw) == len(train) else None
+            model.fit(x_train.loc[m], y.loc[m], verbose=False, sample_weight=fit_sw)
             pred = model.predict(x_test)
         elif model_name == "M4_xgboost_top20":
             y = _ensure_top20_target(train)
@@ -210,11 +235,14 @@ def _train_predict_xgboost(
             pos = float((y == 1).sum())
             neg = float((y == 0).sum())
             model = XGBClassifier(
-                n_estimators=80,
-                max_depth=3,
-                learning_rate=0.05,
-                subsample=0.85,
-                colsample_bytree=0.85,
+                n_estimators=params.get("n_estimators", 80),
+                max_depth=params.get("max_depth", 3),
+                learning_rate=params.get("learning_rate", 0.05),
+                subsample=params.get("subsample", 0.85),
+                colsample_bytree=params.get("colsample_bytree", 0.85),
+                min_child_weight=params.get("min_child_weight", 1),
+                reg_alpha=params.get("reg_alpha", 0.0),
+                reg_lambda=params.get("reg_lambda", 1.0),
                 objective="binary:logistic",
                 eval_metric="logloss",
                 scale_pos_weight=max(neg / max(pos, 1.0), 1.0),
@@ -222,7 +250,8 @@ def _train_predict_xgboost(
                 n_jobs=normalize_model_n_jobs(model_n_jobs),
                 tree_method="hist",
             )
-            model.fit(x_train, y, verbose=False)
+            fit_sw = sw if sw is not None and len(sw) == len(train) else None
+            model.fit(x_train, y, verbose=False, sample_weight=fit_sw)
             pred = model.predict_proba(x_test)[:, 1]
         else:
             raise ValueError(f"unsupported xgboost model: {model_name}")

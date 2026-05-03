@@ -135,7 +135,13 @@ class M5RunConfig:
     cost_bps: float = 10.0
     random_seed: int = 42
     include_xgboost: bool = True
-    availability_lag_days: int = 30
+    availability_lag_days: int = 45
+    pit_fallback_lag_days: int = 45
+    hpo_enabled: bool = False
+    hpo_n_trials: int = 30
+    hpo_cv_folds: int = 3
+    window_type: str = "expanding"
+    halflife_months: float = 36.0
     ml_models: tuple[str, ...] = ("elasticnet", "logistic", "extratrees", "xgboost_excess", "xgboost_top20")
     model_n_jobs: int = 0
 
@@ -344,17 +350,29 @@ def _merge_asof_by_symbol(signal: pd.DataFrame, raw: pd.DataFrame, *, left_date:
     )
 
 
-def _filter_pit_safe_fundamental_rows(raw: pd.DataFrame) -> pd.DataFrame:
+def _filter_pit_safe_fundamental_rows(
+    raw: pd.DataFrame,
+    *,
+    signal_date: pd.Timestamp | None = None,
+    fallback_lag_days: int = 45,
+    disclosure_calendar: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Drop statement rows whose announcement date is not after the report period.
 
-    Daily valuation rows use the trade date as both report period and availability date,
-    so they are retained. Statement rows without a real announcement date are not PIT-safe.
+    P0-1: 优先使用实际披露日历，缺失时回退为法定截止日保守估计，
+    最后兜底为 fallback_lag_days 固定延迟。
     """
     if raw.empty:
         return raw
     out = raw.copy()
     return out[
-        pit_safe_fundamental_rows(out, announcement_col="_fund_announcement_date")
+        pit_safe_fundamental_rows(
+            out,
+            announcement_col="_fund_announcement_date",
+            signal_date=signal_date,
+            fallback_lag_days=fallback_lag_days,
+            disclosure_calendar=disclosure_calendar,
+        )
     ].copy()
 
 
@@ -621,7 +639,12 @@ def build_walk_forward_scores_for_spec(
     for pool, pool_df in valid.groupby("candidate_pool_version", sort=True):
         months = sorted(pd.to_datetime(pool_df["signal_date"]).dropna().unique())
         for test_month in months:
-            train = pool_df[pool_df["signal_date"] < test_month].copy()
+            if str(cfg.window_type).lower() == "rolling":
+                prev_months = [m for m in months if m < test_month]
+                keep_months = prev_months[-int(cfg.min_train_months):]
+                train = pool_df[pool_df["signal_date"].isin(keep_months)].copy()
+            else:
+                train = pool_df[pool_df["signal_date"] < test_month].copy()
             test = pool_df[pool_df["signal_date"] == test_month].copy()
             if train["signal_date"].nunique() < cfg.min_train_months or len(train) < cfg.min_train_rows or test.empty:
                 continue
@@ -632,6 +655,30 @@ def build_walk_forward_scores_for_spec(
                 flush=True,
             )
             train_fit = _cap_fit_rows(train, max_rows=cfg.max_fit_rows, random_seed=cfg.random_seed)
+            sample_weight = None
+            if cfg.halflife_months > 0:
+                age_months = (
+                    (pd.Timestamp(test_month).normalize() - pd.to_datetime(train_fit["signal_date"]).dt.normalize())
+                    .dt.days
+                    / 30.0
+                )
+                sample_weight = np.exp(-np.log(2) * age_months / float(cfg.halflife_months))
+                sample_weight = sample_weight.clip(lower=0.01)
+            hpo_params: dict | None = None
+            if cfg.hpo_enabled and train_fit["signal_date"].nunique() >= 4:
+                try:
+                    from src.pipeline.hpo_utils import tune_xgboost_regressor
+
+                    hpo_params = tune_xgboost_regressor(
+                        train_fit,
+                        feature_cols,
+                        n_trials=cfg.hpo_n_trials,
+                        cv_folds=cfg.hpo_cv_folds,
+                        random_seed=cfg.random_seed,
+                        model_n_jobs=cfg.model_n_jobs,
+                    )
+                except Exception:
+                    hpo_params = None
             for base_model_name, model_type in model_specs:
                 if base_model_name.startswith("M4_xgboost"):
                     scores, imp = _train_predict_xgboost(
@@ -642,6 +689,8 @@ def build_walk_forward_scores_for_spec(
                         feature_cols=feature_cols,
                         random_seed=cfg.random_seed,
                         model_n_jobs=cfg.model_n_jobs,
+                        hpo_params=hpo_params,
+                        sample_weight=sample_weight,
                     )
                 else:
                     scores, imp = _train_predict_sklearn(
@@ -652,6 +701,7 @@ def build_walk_forward_scores_for_spec(
                         feature_cols=feature_cols,
                         random_seed=cfg.random_seed,
                         model_n_jobs=cfg.model_n_jobs,
+                        sample_weight=sample_weight,
                     )
                 model_name = f"M5_{spec.name}_{base_model_name.replace('M4_', '')}"
                 if scores is not None and not scores.empty:

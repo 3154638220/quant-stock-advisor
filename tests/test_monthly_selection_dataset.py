@@ -118,3 +118,84 @@ def test_build_research_config_id_records_core_dataset_contract():
     assert "rb_m_exec_tplus1_open_sell_mend_open_label_o2o" in out
     assert "hist_120" in out
     assert "amt20m_50" in out
+
+
+# ── P3-3: 复权校验单测 ──────────────────────────────────────────────────
+
+def _make_check_split_jump_df(
+    symbols: list[str],
+    pct_chgs: list[float],
+    volumes: list[float],
+    closes: list[float] | None = None,
+) -> "pd.DataFrame":
+    import pandas as pd
+
+    n = len(symbols)
+    if closes is None:
+        closes = [10.0] * n
+    return pd.DataFrame(
+        {
+            "symbol": symbols,
+            "trade_date": pd.to_datetime(["2024-06-01"] * n),
+            "pct_chg": pct_chgs,
+            "volume": volumes,
+            "close": closes,
+        }
+    )
+
+
+def test_check_split_jump_detects_large_jump_with_volume():
+    """P3-3: 单日涨跌幅 >50% 且成交量 >0 应触发告警。"""
+    from src.data_fetcher.data_quality import check_split_jump
+
+    df = _make_check_split_jump_df(
+        symbols=["000001"],
+        pct_chgs=[0.65],
+        volumes=[1e6],
+    )
+    alerts = check_split_jump(df)
+    assert len(alerts) >= 1
+    assert "000001" in alerts[0]
+    assert "+65" in alerts[0] or "0.65" in alerts[0]
+
+
+def test_check_split_jump_no_alert_for_normal_data():
+    """P3-3: 正常前复权日线不应触发告警。"""
+    from src.data_fetcher.data_quality import check_split_jump
+
+    df = _make_check_split_jump_df(
+        symbols=["000001", "000002"],
+        pct_chgs=[0.03, -0.05],
+        volumes=[1e6, 2e5],
+    )
+    alerts = check_split_jump(df)
+    assert len(alerts) == 0
+
+
+def test_check_split_jump_no_alert_for_suspended_stock():
+    """P3-3: 停牌股（volume=0）即使涨跌幅大也不应触发告警。"""
+    from src.data_fetcher.data_quality import check_split_jump
+
+    df = _make_check_split_jump_df(
+        symbols=["000001"],
+        pct_chgs=[0.99],
+        volumes=[0.0],
+        closes=[0.0],
+    )
+    alerts = check_split_jump(df)
+    assert len(alerts) == 0
+
+
+def test_check_split_jump_alerts_for_multiple_suspicious_rows():
+    """P3-3: 多只股票同时出现跳变时应逐一告警。"""
+    from src.data_fetcher.data_quality import check_split_jump
+
+    df = _make_check_split_jump_df(
+        symbols=["000001", "000002", "000003"],
+        pct_chgs=[-0.52, 0.03, 0.75],
+        volumes=[5e5, 1e6, 3e5],
+    )
+    alerts = check_split_jump(df)
+    assert len(alerts) == 2
+    assert any("000001" in a for a in alerts)
+    assert any("000003" in a for a in alerts)

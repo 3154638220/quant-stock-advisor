@@ -83,7 +83,17 @@ class M5RunConfig:
     cost_bps: float = 10.0
     random_seed: int = 42
     include_xgboost: bool = True
-    availability_lag_days: int = 30
+    # P0-1: 已弃用，保留向后兼容。新逻辑优先使用实际披露日历，
+    # 缺失时回退为 pit_fallback_lag_days（默认 45 天，比旧的 30 天更保守）。
+    availability_lag_days: int = 45
+    pit_fallback_lag_days: int = 45
+    # P1-1: XGBoost 超参数时序感知调优
+    hpo_enabled: bool = False
+    hpo_n_trials: int = 30
+    hpo_cv_folds: int = 3
+    # P1-2: Walk-forward 窗口配置
+    window_type: str = "expanding"  # "rolling" | "expanding"
+    halflife_months: float = 36.0   # 扩张窗口样本半衰期（月），0 表示等权
     ml_models: tuple[str, ...] = ("elasticnet", "logistic", "extratrees", "xgboost_excess", "xgboost_top20")
     model_n_jobs: int = 0
 
@@ -189,12 +199,24 @@ def _merge_asof_by_symbol(
     )
 
 
-def _filter_pit_safe_fundamental_rows(raw: pd.DataFrame) -> pd.DataFrame:
+def _filter_pit_safe_fundamental_rows(
+    raw: pd.DataFrame,
+    *,
+    signal_date: pd.Timestamp | None = None,
+    fallback_lag_days: int = 45,
+    disclosure_calendar: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if raw.empty:
         return raw
     out = raw.copy()
     return out[
-        pit_safe_fundamental_rows(out, announcement_col="_fund_announcement_date")
+        pit_safe_fundamental_rows(
+            out,
+            announcement_col="_fund_announcement_date",
+            signal_date=signal_date,
+            fallback_lag_days=fallback_lag_days,
+            disclosure_calendar=disclosure_calendar,
+        )
     ].copy()
 
 
@@ -281,6 +303,8 @@ def attach_fund_flow_features(
 
 def attach_fundamental_features(
     dataset: pd.DataFrame, db_path: Path, *, table: str = "a_share_fundamental",
+    disclosure_calendar: pd.DataFrame | None = None,
+    fallback_lag_days: int = 45,
 ) -> pd.DataFrame:
     signal = dataset[["signal_date", "symbol"]].drop_duplicates(["signal_date", "symbol"]).copy()
     raw_cols = [
@@ -298,7 +322,10 @@ def attach_fundamental_features(
     raw = _normalize_symbol_date(raw, date_col="_fund_announcement_date")
     raw["report_period"] = pd.to_datetime(raw.get("report_period"), errors="coerce").dt.normalize()
     raw = raw[raw["_fund_announcement_date"].notna()].copy()
-    raw = _filter_pit_safe_fundamental_rows(raw)
+    # P0-1: 按信号日逐批过滤，优先使用实际披露日历
+    raw = _filter_pit_safe_fundamental_rows(
+        raw, fallback_lag_days=fallback_lag_days, disclosure_calendar=disclosure_calendar,
+    )
     raw = raw.sort_values(["symbol", "_fund_announcement_date", "report_period"], kind="mergesort")
     raw = raw.drop_duplicates(["symbol", "_fund_announcement_date", "report_period"], keep="last")
     rename_map = {c.replace("feature_fundamental_", ""): c for c in FUNDAMENTAL_RAW_FEATURES}
@@ -399,7 +426,10 @@ def attach_enabled_families(
     if "fund_flow" in enabled_families:
         out = attach_fund_flow_features(out, db_path)
     if "fundamental" in enabled_families:
-        out = attach_fundamental_features(out, db_path)
+        out = attach_fundamental_features(
+            out, db_path,
+            fallback_lag_days=cfg.pit_fallback_lag_days if hasattr(cfg, 'pit_fallback_lag_days') else cfg.availability_lag_days,
+        )
     if "shareholder" in enabled_families:
         out = attach_shareholder_features(out, db_path, availability_lag_days=cfg.availability_lag_days)
     return out
@@ -493,23 +523,55 @@ def build_walk_forward_scores_for_spec(
     for pool, pool_df in valid.groupby("candidate_pool_version", sort=True):
         months = sorted(pd.to_datetime(pool_df["signal_date"]).dropna().unique())
         for test_month in months:
-            train = pool_df[pool_df["signal_date"] < test_month].copy()
+            if str(cfg.window_type).lower() == "rolling":
+                prev_months = [m for m in months if m < test_month]
+                keep_months = prev_months[-int(cfg.min_train_months):]
+                train = pool_df[pool_df["signal_date"].isin(keep_months)].copy()
+            else:
+                train = pool_df[pool_df["signal_date"] < test_month].copy()
             test = pool_df[pool_df["signal_date"] == test_month].copy()
             if train["signal_date"].nunique() < cfg.min_train_months or len(train) < cfg.min_train_rows or test.empty:
                 continue
             train_fit = _cap_fit_rows(train, max_rows=cfg.max_fit_rows, random_seed=cfg.random_seed)
+            sample_weight = None
+            if cfg.halflife_months > 0:
+                age_months = (
+                    (pd.Timestamp(test_month).normalize() - pd.to_datetime(train_fit["signal_date"]).dt.normalize())
+                    .dt.days
+                    / 30.0
+                )
+                sample_weight = np.exp(-np.log(2) * age_months / float(cfg.halflife_months))
+                sample_weight = sample_weight.clip(lower=0.01)
+            hpo_params: dict | None = None
+            if cfg.hpo_enabled and train_fit["signal_date"].nunique() >= 4:
+                try:
+                    from src.pipeline.hpo_utils import tune_xgboost_regressor
+
+                    hpo_params = tune_xgboost_regressor(
+                        train_fit,
+                        feature_cols,
+                        n_trials=cfg.hpo_n_trials,
+                        cv_folds=cfg.hpo_cv_folds,
+                        random_seed=cfg.random_seed,
+                        model_n_jobs=cfg.model_n_jobs,
+                    )
+                except Exception:
+                    hpo_params = None
             for base_model_name, model_type in model_specs:
                 if base_model_name.startswith("M4_xgboost"):
                     scores, imp = _train_predict_xgboost(
                         model_name=base_model_name, model_type=model_type,
                         train=train_fit, test=test, feature_cols=feature_cols,
                         random_seed=cfg.random_seed, model_n_jobs=cfg.model_n_jobs,
+                        hpo_params=hpo_params,
+                        sample_weight=sample_weight,
                     )
                 else:
                     scores, imp = _train_predict_sklearn(
                         model_name=base_model_name, model_type=model_type,
                         train=train_fit, test=test, feature_cols=feature_cols,
                         random_seed=cfg.random_seed, model_n_jobs=cfg.model_n_jobs,
+                        sample_weight=sample_weight,
                     )
                 model_name = f"M5_{spec.name}_{base_model_name.replace('M4_', '')}"
                 if scores is not None and not scores.empty:

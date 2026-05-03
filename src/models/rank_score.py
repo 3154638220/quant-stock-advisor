@@ -101,6 +101,84 @@ def _normalize_factor_weights(weights: Mapping[str, float]) -> Dict[str, float]:
     return {k: v / s for k, v in w.items()}
 
 
+def icir_weighted_score(
+    factor_values: dict[str, np.ndarray],
+    icir_dict: dict[str, float],
+    *,
+    softmax_temperature: float = 1.0,
+    min_weight: float = 0.0,
+) -> np.ndarray:
+    """P1-3: 以 softmax(ICIR) 归一化后的权重线性合成因子得分。
+
+    因子 ICIR 越高，在合成分中权重越大；ICIR 接近 0 的因子权重接近 0。
+    动态权重随市场状态自适应调整，替代固定权重合成。
+
+    Parameters
+    ----------
+    factor_values : dict
+        key 为因子名，value 为 (n,) 或 (n,1) 的预标准化因子值 ndarray。
+    icir_dict : dict
+        key 为因子名，value 为对应的最新 ICIR 值。
+    softmax_temperature : float
+        softmax 温度，越大权重越均匀。默认 1.0。
+    min_weight : float
+        最小权重截断（softmax 后小于此值的置 0 并重新归一化）。默认 0.0。
+
+    Returns
+    -------
+    score : ndarray, shape (n,)
+    """
+    if not factor_values or not icir_dict:
+        raise ValueError("factor_values 和 icir_dict 不能为空")
+
+    # 取交集因子
+    common = [k for k in factor_values if k in icir_dict]
+    if not common:
+        raise ValueError("factor_values 和 icir_dict 无交集因子")
+
+    n = len(next(iter(factor_values.values())))
+    # 对齐各因子数组形状
+    aligned: dict[str, np.ndarray] = {}
+    for k in common:
+        v = np.asarray(factor_values[k], dtype=np.float64).ravel()
+        if len(v) != n:
+            raise ValueError(f"因子 {k!r} 长度 {len(v)} 与期望 {n} 不一致")
+        aligned[k] = v
+
+    # softmax(positive ICIR) → 权重. Non-positive or invalid ICIR means the
+    # factor currently has no proven edge, so exclude it unless every factor is
+    # non-positive, in which case fall back to equal weights.
+    icirs = np.array([float(icir_dict[k]) for k in common], dtype=np.float64)
+    positive = np.isfinite(icirs) & (icirs > 0)
+    if positive.any():
+        active_idx = np.flatnonzero(positive)
+        active_icirs = icirs[active_idx]
+    else:
+        active_idx = np.arange(len(common))
+        active_icirs = np.zeros(len(common), dtype=np.float64)
+    t = max(float(softmax_temperature), 1e-8)
+    shifted = active_icirs - np.max(active_icirs)
+    exp_icir = np.exp(shifted / t)
+    w_active = exp_icir / exp_icir.sum()
+    w_raw = np.zeros(len(common), dtype=np.float64)
+    w_raw[active_idx] = w_active
+
+    # 最小权重截断
+    if min_weight > 0:
+        w_raw = np.where(w_raw >= min_weight, w_raw, 0.0)
+        s = w_raw.sum()
+        if s > 1e-15:
+            w_raw = w_raw / s
+        else:
+            w_raw = np.ones_like(w_raw) / len(w_raw)
+
+    score = np.zeros(n, dtype=np.float64)
+    for i, k in enumerate(common):
+        score += w_raw[i] * aligned[k]
+
+    return score
+
+
 def cross_section_z_columns(
     df: pd.DataFrame,
     raw_names: Sequence[str],

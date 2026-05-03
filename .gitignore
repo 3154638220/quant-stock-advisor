@@ -46,6 +46,11 @@ tmp/
 *.duckdb
 *.duckdb.wal
 
+# —— 非 Python 源码文件（如临时 C++ 原型）——
+*.cpp
+*.c
+*.h
+
 # —— 密钥与本地覆盖配置 ——
 .env
 .env.*

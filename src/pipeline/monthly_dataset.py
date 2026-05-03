@@ -207,7 +207,35 @@ def attach_signal_features(daily: pd.DataFrame, cfg: MonthlySelectionConfig) -> 
     df["feature_limit_move_hits_20d"] = g["_limit_move_hit"].transform(
         lambda s: s.rolling(cfg.limit_move_lookback, min_periods=1).sum()
     )
+    # P0-2: 对特征列做截面 Winsorization，消除退市/复牌极端值污染
+    df = winsorize_features(df, FEATURE_COLS, date_col="trade_date")
     return df
+
+
+def winsorize_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    date_col: str = "signal_date",
+    q_low: float = 0.01,
+    q_high: float = 0.99,
+) -> pd.DataFrame:
+    """对每个截面日期，将 feature_cols 中的值截尾至 [q_low, q_high] 分位数。
+
+    P0-2: 消除退市整理期、复牌后极端收益（±100%）对 XGBoost 分裂节点
+    和 OLS 回归系数的污染。
+    """
+    out = df.copy()
+    for col in feature_cols:
+        if col not in out.columns:
+            continue
+        out[col] = out.groupby(date_col, sort=False)[col].transform(
+            lambda s: s.clip(
+                lower=s.quantile(q_low),
+                upper=s.quantile(q_high),
+            )
+        )
+    return out
 
 
 # ── T+1 可买性 ───────────────────────────────────────────────────────────

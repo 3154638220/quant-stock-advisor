@@ -18,6 +18,9 @@ database:
   table_fundamental: a_share_fundamental
   table_fund_flow: a_share_fund_flow
   table_shareholder: a_share_shareholder
+  # P2-7: 价格复权类型 —— qfq=前复权 | hfq=后复权 | none=不复权
+  # 确认数据库存储的价格已按此方式复权，避免除权日产生虚假信号
+  price_adjust: qfq
 
 fundamental:
   # 基本面刷新入口写入后，月度链路按 PIT 口径读取估值/质量因子。
@@ -102,15 +105,16 @@ signals:
     remove_if_t1_and_t21_negative: true
     zero_if_abs_t1_below: 0.0
     flip_if_t1_negative_and_t21_above: 0.005
-  # P2-A：滚动 ICIR 动态权重（可选）
+  # P1-3：滚动 ICIR 动态权重。enabled=true 时优先使用 ICMonitor 的滚动 ICIR 替代固定权重。
   ic_weighting:
-    enabled: false
+    enabled: true
+    window: 20
+    min_periods: 12
+    softmax_temperature: 2.0
     # update_ic_weights.py 输出路径；存在时优先读取
     weights_path: data/cache/ic_weights.json
     # 未提供 weights_path 或文件缺失时，可从监控文件在线计算
     monitor_path: data/logs/ic_monitor.json
-    window: 60
-    min_obs: 20
     half_life: 20.0
     clip_abs_weight: 0.25
   tree_model:
@@ -197,6 +201,12 @@ portfolio:
   max_single_weight: 0.05
   max_industry_weight: null
   industry_col: null
+  # P0-3: 协方差估计方法 —— sample（样本）| ledoit_wolf（收缩）| auto（自适应）
+  covariance_method: auto
+  # P0-3: 仅 auto 模式生效，条件数超过阈值自动切换 Ledoit-Wolf
+  condition_number_threshold: 1000
+  # P2-6: 月度换手率上限（0~1，1=不约束），在优化层约束降低摩擦
+  max_monthly_turnover: 0.60
   # 月末调仓默认不限制半 L1 换手；1.0 表示允许全买全卖。
   # 如需复现低换手实验，可手动改为 0.3。
   max_turnover: 1.0
@@ -232,6 +242,10 @@ transaction_costs:
   commission_sell_bps: 2.5
   slippage_bps_per_side: 4.5
   stamp_duty_sell_bps: 5.0
+  # P2-1: 市场冲击成本模型 —— fixed_bps（固定）| sqrt_adv（平方根律）
+  impact_model: sqrt_adv
+  # P2-1: 平方根律系数 k（参与率 1% 冲击 ≈ k * 0.1 * 10000 bps）
+  impact_k: 0.10
 
 prefilter:
   # P4-B 关键差异字段：以下过滤阈值会改变候选池组成，需与回测参数保持一致。

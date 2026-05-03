@@ -93,6 +93,21 @@ python scripts/diagnose_factor_ic.py --config config.yaml.backtest \
   --out-json data/results/factor_ic_f1_pipeline.json \
   --out-csv data/results/factor_ic_f1_pipeline.csv
 
+echo "=== Step5: IC 衰减监控 ==="
+python - <<'PY'
+from src.features.ic_monitor import ICMonitor
+
+monitor = ICMonitor(store_path="data/logs/ic_monitor.json", db_path="data/market.duckdb")
+try:
+    alerts = monitor.check_decay_alerts(window=20, threshold=0.03)
+finally:
+    monitor.close()
+if alerts:
+    print(f"[pipeline] IC 衰减告警: {len(alerts)} 个因子")
+    raise SystemExit(1)
+print("[pipeline] IC 衰减检查通过。")
+PY
+
 echo "[pipeline] 全部步骤完成。"
 echo "  网格: data/results/topk_grid_M_pipeline.csv"
 echo "  Universe 回测: data/results/universe_m24_topk_pipeline.json"

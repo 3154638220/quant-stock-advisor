@@ -549,3 +549,71 @@ def run_shareholder_quality_checks(
         effective_factor_dates_ge_min_width=effective_factor_dates_ge_min_width,
         notes=notes,
     )
+
+
+# ── P2-7: 复权检测 ──────────────────────────────────────────────────────
+
+def check_split_jump(
+    df: pd.DataFrame,
+    *,
+    symbol_col: str = "symbol",
+    date_col: str = "trade_date",
+    pct_chg_col: str = "pct_chg",
+    close_col: str = "close",
+    volume_col: str = "volume",
+    jump_threshold: float = 0.50,
+) -> list[str]:
+    """P2-7: 检测单日涨跌幅绝对值超过阈值但非停牌的非复权数据跳变。
+
+    除权除息日价格会出现断崖式跳变（不复权数据），表现为单日涨跌幅绝对值
+    远超涨跌停限制且成交量正常（非停牌）。此函数检测这类异常并返回警告列表。
+
+    Parameters
+    ----------
+    df : 日线数据，须含 symbol_col, date_col, pct_chg_col 等列
+    jump_threshold : 单日涨幅绝对值阈值（默认 50%，超出涨跌停限制）
+
+    Returns
+    -------
+    list[str] : 告警消息列表，每项描述一个可疑跳变
+    """
+    alerts: list[str] = []
+    need = {symbol_col, date_col, pct_chg_col, close_col, volume_col}
+    missing = need - set(df.columns)
+    if missing:
+        alerts.append(f"check_split_jump: 缺少列 {missing}")
+        return alerts
+
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce").dt.normalize()
+    d[pct_chg_col] = pd.to_numeric(d[pct_chg_col], errors="coerce")
+    d[volume_col] = pd.to_numeric(d[volume_col], errors="coerce")
+    d[close_col] = pd.to_numeric(d[close_col], errors="coerce")
+
+    # 非停牌（volume > 0）且涨跌幅绝对值 > threshold
+    suspicious = d[
+        (d[volume_col].notna() & (d[volume_col] > 0))
+        & d[pct_chg_col].notna()
+        & (d[pct_chg_col].abs() > jump_threshold)
+        & d[close_col].notna()
+        & (d[close_col] > 0)
+    ]
+
+    if suspicious.empty:
+        return alerts
+
+    for _, row in suspicious.iterrows():
+        sym = str(row[symbol_col]).zfill(6)
+        dt = row[date_col]
+        pct = float(row[pct_chg_col])
+        alerts.append(
+            f"[复权警告] {sym} @ {dt.date()}: "
+            f"单日涨跌幅 {pct:+.2%}，成交量正常，疑似未复权数据跳变"
+        )
+
+    import logging
+    _log = logging.getLogger(__name__)
+    for alert in alerts:
+        _log.warning(alert)
+
+    return alerts
