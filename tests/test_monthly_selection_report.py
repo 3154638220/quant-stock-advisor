@@ -351,7 +351,7 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
 def test_apply_industry_cap_reduces_concentration():
     """构造全属同一行业的打分 DataFrame，验证 cap 后单行业占比 ≤ 30%."""
     import numpy as np
-    from scripts.run_monthly_selection_report import apply_industry_cap
+    from src.reporting.monthly_report import apply_industry_cap
 
     ranked = pd.DataFrame({
         "symbol": [f"000{i:03d}" for i in range(20)],
@@ -369,7 +369,7 @@ def test_apply_industry_cap_reduces_concentration():
 def test_apply_industry_cap_mixed_industries():
     """验证多行业场景下行业上限贪心选取正确."""
     import numpy as np
-    from scripts.run_monthly_selection_report import apply_industry_cap
+    from src.reporting.monthly_report import apply_industry_cap
 
     ranked = pd.DataFrame({
         "symbol": [f"000{i:03d}" for i in range(20)],
@@ -389,7 +389,7 @@ def test_apply_industry_cap_mixed_industries():
 
 def test_apply_industry_cap_empty_df():
     """验证空 DataFrame 直接返回."""
-    from scripts.run_monthly_selection_report import apply_industry_cap
+    from src.reporting.monthly_report import apply_industry_cap
 
     result = apply_industry_cap(pd.DataFrame(), top_k=20)
     assert result.empty

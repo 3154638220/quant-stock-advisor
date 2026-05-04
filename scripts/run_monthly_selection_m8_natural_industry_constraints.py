@@ -28,15 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
-from scripts.run_monthly_selection_baselines import (
-    EXCESS_COL,
-    INDUSTRY_EXCESS_COL,
-    LABEL_COL,
-    MARKET_COL,
-    POOL_RULES,
-    TOP20_COL,
-    _format_markdown_table,
-    _json_sanitize,
+from src.pipeline.monthly_baselines import (
     _rank_pct_score,
     build_quantile_spread,
     build_rank_ic,
@@ -51,7 +43,16 @@ from scripts.run_monthly_selection_baselines import (
     summarize_year_slice,
     valid_pool_frame,
 )
-from scripts.run_monthly_selection_concentration_regime import summarize_industry_concentration
+from src.reporting.markdown_report import format_markdown_table, json_sanitize
+from src.research.gates import (
+    EXCESS_COL,
+    INDUSTRY_EXCESS_COL,
+    LABEL_COL,
+    MARKET_COL,
+    POOL_RULES,
+    TOP20_COL,
+)
+from src.pipeline.monthly_concentration import summarize_industry_concentration
 from scripts.run_monthly_selection_multisource import (
     M5RunConfig,
     attach_enabled_families,
@@ -73,6 +74,10 @@ from src.models.research_contract import (
     write_research_manifest,
 )
 from src.settings import config_path_candidates, load_config, resolve_config_path
+
+# 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
+_format_markdown_table = format_markdown_table
+_json_sanitize = json_sanitize
 
 BASE_M5_ELASTICNET = "M5_plus_industry_breadth_plus_fund_flow_plus_fundamental_elasticnet_excess"
 BASE_M5_EXTRATREES = "M5_plus_industry_breadth_plus_fund_flow_plus_fundamental_extratrees_excess"

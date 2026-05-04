@@ -750,22 +750,8 @@ def build_regime_weight_overrides(
 # ── Top-K 权重构建 ───────────────────────────────────────────────────────
 
 def _rebalance_dates(all_dates: Iterable[pd.Timestamp], rule: str) -> list[pd.Timestamp]:
-    dates = sorted(pd.to_datetime(list(all_dates)))
-    if not dates:
-        return []
-    arr = np.array(dates, dtype="datetime64[ns]")
-    freq = rule
-    if str(rule).upper() == "M":
-        freq = "ME"
-    elif str(rule).upper() == "BM":
-        freq = "2BME"
-    anchors = pd.date_range(dates[0], dates[-1], freq=freq)
-    out: list[pd.Timestamp] = []
-    for a in anchors:
-        pos = np.searchsorted(arr, np.datetime64(a), side="right") - 1
-        if pos >= 0:
-            out.append(pd.Timestamp(arr[pos]))
-    return sorted(set(out))
+    from src.pipeline.monthly_dataset import select_month_end_signal_dates
+    return select_month_end_signal_dates(list(all_dates), rebalance_rule=rule)
 
 
 def _pick_topk_with_industry_cap(

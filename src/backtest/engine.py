@@ -42,6 +42,8 @@ class BacktestConfig:
     # extra_drag = turnover * (vwap_slippage_bps_per_side + vwap_impact_bps * turnover) / 1e4
     vwap_slippage_bps_per_side: float = 3.0
     vwap_impact_bps: float = 8.0
+    # 换仓频率：W=周, M=月, BM=双月, Q=季（H2 参数化）
+    rebalance_rule: str = "M"
 
 
 @dataclass
@@ -314,6 +316,7 @@ def run_backtest(
     - ``limit_up_mode="redistribute"``：将冻结的新增资金按可买标的当前权重比例重分配。
     """
     cfg = config or BacktestConfig()
+    rebalance = rebalance_rule if rebalance_rule is not None else cfg.rebalance_rule
     cost = cfg.cost_params
     exe = str(cfg.execution_mode).lower().strip()
     if exe not in ("close_to_close", "tplus1_open", "vwap"):
@@ -331,9 +334,8 @@ def run_backtest(
     ws.index = pd.to_datetime(ws.index).normalize()
     ws = _align_weights_columns(ws, sym_cols)
 
-    if rebalance_rule is not None:
-        # 将用户给定权重序列重采样到规则锚点（取该周期内最后一行）
-        rs = ws.resample(rebalance_rule).last().dropna(how="all")
+    if rebalance is not None and rebalance:
+        rs = ws.resample(rebalance).last().dropna(how="all")
         rs = rs[rs.index.isin(ar.index)]
         ws = rs
 

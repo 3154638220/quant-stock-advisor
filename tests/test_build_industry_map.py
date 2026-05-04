@@ -4,7 +4,7 @@ import json
 
 import pandas as pd
 
-from scripts.build_industry_map import (
+from src.data_fetcher.industry_map import (
     FALLBACK_SOURCE,
     align_to_universe,
     deduplicate_mapping,

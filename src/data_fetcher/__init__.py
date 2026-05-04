@@ -12,6 +12,27 @@ __all__ = [
     "FundamentalClient",
     "FundFlowClient",
     "ShareholderClient",
+    "DailyDataSource",
+    "FundamentalDataSource",
+    "FundFlowDataSource",
+    "AkShareDailyDataSource",
+    "AkShareFundamentalDataSource",
+    "AkShareFundFlowDataSource",
+    "DataSourceSet",
+    "FetchResult",
+    "resolve_sources",
+    "register_daily_source",
+    "register_fundamental_source",
+    "register_fund_flow_source",
+    "IndustryMapQuality",
+    "FALLBACK_SOURCE",
+    "align_to_universe",
+    "deduplicate_mapping",
+    "fetch_industry_mapping",
+    "fetch_mapping_by_source",
+    "load_current_universe",
+    "normalize_symbol",
+    "quality_summary",
 ]
 
 
@@ -41,4 +62,35 @@ def __getattr__(name: str):
         from .shareholder_client import ShareholderClient
 
         return ShareholderClient
+    if name in {
+        "DailyDataSource",
+        "FundamentalDataSource",
+        "FundFlowDataSource",
+        "AkShareDailyDataSource",
+        "AkShareFundamentalDataSource",
+        "AkShareFundFlowDataSource",
+        "DataSourceSet",
+        "FetchResult",
+        "resolve_sources",
+        "register_daily_source",
+        "register_fundamental_source",
+        "register_fund_flow_source",
+    }:
+        from . import adapter
+
+        return getattr(adapter, name)
+    if name in {
+        "IndustryMapQuality",
+        "FALLBACK_SOURCE",
+        "align_to_universe",
+        "deduplicate_mapping",
+        "fetch_industry_mapping",
+        "fetch_mapping_by_source",
+        "load_current_universe",
+        "normalize_symbol",
+        "quality_summary",
+    }:
+        from . import industry_map
+
+        return getattr(industry_map, name)
     raise AttributeError(name)

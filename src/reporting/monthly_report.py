@@ -196,3 +196,32 @@ def apply_m9_feature_coverage_policy(
                      "candidate_pool_pass_coverage_ratio": cov,
                      "m9_feature_policy": policy, "active_feature": active_feature})
     return list(dict.fromkeys(active)), pd.DataFrame(rows)
+
+
+def apply_industry_cap(
+    ranked: pd.DataFrame,
+    *,
+    top_k: int,
+    max_industry_share: float = 0.30,
+    industry_col: str = "industry",
+    score_col: str = "score",
+) -> pd.DataFrame:
+    """贪心选取：按 score 降序遍历，当某行业已达上限时跳过。
+
+    保证最终推荐集大小 <= top_k。
+    max_industry_share = 0.30 表示 Top20 中单行业最多 6 只。
+    """
+    if ranked.empty:
+        return ranked
+    cap = max(1, int(np.floor(max_industry_share * top_k)))
+    industry_counts: dict[str, int] = {}
+    selected = []
+    for _, row in ranked.sort_values(score_col, ascending=False).iterrows():
+        ind = str(row.get(industry_col, "") or "")
+        if industry_counts.get(ind, 0) >= cap:
+            continue
+        selected.append(row)
+        industry_counts[ind] = industry_counts.get(ind, 0) + 1
+        if len(selected) >= top_k:
+            break
+    return pd.DataFrame(selected)

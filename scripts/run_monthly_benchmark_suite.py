@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
-from scripts.run_monthly_selection_baselines import _format_markdown_table
+from src.reporting.markdown_report import format_markdown_table as _format_markdown_table
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
     ArtifactRef,

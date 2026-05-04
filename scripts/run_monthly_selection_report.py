@@ -27,17 +27,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
-from scripts.run_monthly_selection_baselines import (
-    LABEL_COL,
-    POOL_RULES,
-    _format_markdown_table,
-    _json_sanitize,
-    _project_relative,
+from src.pipeline.monthly_baselines import (
     load_baseline_dataset,
     model_n_jobs_token,
     normalize_model_n_jobs,
     summarize_candidate_pool_reject_reason,
     summarize_candidate_pool_width,
+)
+from src.reporting.markdown_report import format_markdown_table, json_sanitize, project_relative
+from src.research.gates import (
+    LABEL_COL,
+    POOL_RULES,
 )
 from scripts.run_monthly_selection_ltr import (
     _tag_importance,
@@ -46,6 +46,11 @@ from scripts.run_monthly_selection_ltr import (
     summarize_ltr_feature_importance,
 )
 from scripts.run_monthly_selection_multisource import M5RunConfig, _cap_fit_rows, attach_enabled_families
+
+# 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
+_format_markdown_table = format_markdown_table
+_json_sanitize = json_sanitize
+_project_relative = project_relative
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
     ArtifactRef,
@@ -68,28 +73,12 @@ from src.settings import load_config, resolve_config_path
 # ═══════════════════════════════════════════════════════════════════════════
 from src.reporting.monthly_report import (  # noqa: F401
     M7RunConfig,
+    apply_industry_cap,
     apply_m9_feature_coverage_policy,
     build_full_fit_report_scores,
     select_report_signal_date,
     summarize_report_feature_coverage,
 )
-
-
-@dataclass(frozen=True)
-class M7RunConfig:
-    top_ks: tuple[int, ...] = (20, 30)
-    report_top_k: int = 20
-    candidate_pools: tuple[str, ...] = ("U2_risk_sane",)
-    min_train_months: int = 24
-    min_train_rows: int = 500
-    max_fit_rows: int = 0
-    cost_bps: float = 10.0
-    random_seed: int = 42
-    availability_lag_days: int = 30
-    relevance_grades: int = 5
-    model_name: str = "M6_xgboost_rank_ndcg"
-    min_core_feature_coverage: float = 0.30
-    model_n_jobs: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -156,105 +145,6 @@ def _parse_str_list(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
 
 
-def select_report_signal_date(
-    dataset: pd.DataFrame,
-    *,
-    candidate_pools: tuple[str, ...],
-    requested: str | pd.Timestamp | None = None,
-) -> pd.Timestamp:
-    df = dataset[dataset["candidate_pool_version"].isin(candidate_pools)].copy()
-    if requested:
-        target = pd.Timestamp(requested).normalize()
-        part = df[df["signal_date"] == target]
-        if part.empty:
-            raise ValueError(f"报告信号日不存在于 dataset: {target.date()}")
-        if not part["candidate_pool_pass"].astype(bool).any():
-            raise ValueError(f"报告信号日无 candidate_pool_pass 标的: {target.date()}")
-        passed = part[part["candidate_pool_pass"].astype(bool)]
-        if "next_trade_date" in passed.columns and not passed["next_trade_date"].notna().all():
-            raise ValueError(f"报告信号日存在 candidate_pool_pass 但缺少 next_trade_date: {target.date()}")
-        return target
-    eligible = df[df["candidate_pool_pass"].astype(bool)].copy()
-    if "next_trade_date" in eligible.columns:
-        eligible = eligible[eligible["next_trade_date"].notna()].copy()
-    if eligible.empty:
-        raise ValueError("没有可用于 M7 推荐的 candidate_pool_pass 信号月。")
-    return pd.Timestamp(eligible["signal_date"].max()).normalize()
-
-
-def build_full_fit_report_scores(
-    dataset: pd.DataFrame,
-    spec: Any,
-    cfg: M7RunConfig,
-    *,
-    report_signal_date: pd.Timestamp,
-    feature_cols: list[str] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    active_feature_cols = list(feature_cols) if feature_cols is not None else [c for c in spec.feature_cols if c in dataset.columns]
-    active_feature_cols = [c for c in active_feature_cols if c in dataset.columns]
-    if not active_feature_cols:
-        return pd.DataFrame(), pd.DataFrame()
-    score_frames: list[pd.DataFrame] = []
-    importance_frames: list[pd.DataFrame] = []
-
-    for pool in cfg.candidate_pools:
-        pool_df = dataset[dataset["candidate_pool_version"] == pool].copy()
-        train = pool_df[
-            pool_df["candidate_pool_pass"].astype(bool)
-            & (pool_df["signal_date"] < report_signal_date)
-            & pool_df[LABEL_COL].notna()
-        ].copy()
-        test = pool_df[
-            pool_df["candidate_pool_pass"].astype(bool) & (pool_df["signal_date"] == report_signal_date)
-        ].copy()
-        if "name" in test.columns:
-            st_mask = _is_st_name(_name_column(test))
-            if st_mask.any():
-                warnings.warn(
-                    f"M9 pool={pool} signal_date={report_signal_date.date()} 剔除 ST 名称标的 {int(st_mask.sum())} 只。",
-                    RuntimeWarning,
-                )
-                test = test[~st_mask].copy()
-        if test.empty:
-            warnings.warn(f"M7 pool={pool} signal_date={report_signal_date.date()} 无可推荐标的。", RuntimeWarning)
-            continue
-        if train["signal_date"].nunique() < cfg.min_train_months or len(train) < cfg.min_train_rows:
-            warnings.warn(
-                f"M7 pool={pool} 训练窗不足：months={train['signal_date'].nunique()} rows={len(train)}",
-                RuntimeWarning,
-            )
-            continue
-        train_fit = _cap_fit_rows(train, max_rows=cfg.max_fit_rows, random_seed=cfg.random_seed)
-        print(
-            "[monthly-m7] "
-            f"pool={pool} report_signal_date={report_signal_date.date()} "
-            f"train_months={train['signal_date'].nunique()} train_rows={len(train_fit)} target_rows={len(test)}",
-            flush=True,
-        )
-        scores, imp = _train_predict_xgboost_ranker(
-            model_name=cfg.model_name,
-            objective="rank:ndcg",
-            train=train_fit,
-            test=test,
-            feature_cols=active_feature_cols,
-            random_seed=cfg.random_seed,
-            relevance_grades=cfg.relevance_grades,
-            model_n_jobs=cfg.model_n_jobs,
-        )
-        if scores is not None and not scores.empty:
-            scores = scores.copy()
-            scores["feature_spec"] = spec.name
-            scores["feature_families"] = ",".join(spec.families)
-            scores["score_percentile"] = pd.to_numeric(scores["score"], errors="coerce")
-            score_frames.append(scores)
-        if imp is not None and not imp.empty:
-            importance_frames.append(_tag_importance(imp, spec, pool, report_signal_date))
-
-    scores_out = pd.concat(score_frames, ignore_index=True) if score_frames else pd.DataFrame()
-    imp_out = pd.concat(importance_frames, ignore_index=True) if importance_frames else pd.DataFrame()
-    return scores_out, imp_out
-
-
 def _display_symbol(symbol: Any) -> str:
     raw = str(symbol)
     digits = "".join(ch for ch in raw if ch.isdigit())
@@ -312,114 +202,6 @@ def attach_stock_names(dataset: pd.DataFrame, names: pd.DataFrame) -> pd.DataFra
         out["name"] = out["name"].fillna(old_name).replace({"UNKNOWN": ""})
     out["name"] = out["name"].fillna("").astype(str).str.strip()
     return out
-
-
-def summarize_report_feature_coverage(
-    dataset: pd.DataFrame,
-    spec: Any,
-    *,
-    candidate_pools: tuple[str, ...],
-) -> pd.DataFrame:
-    base = dataset[dataset["candidate_pool_version"].isin(candidate_pools)].copy()
-    if base.empty:
-        return pd.DataFrame()
-    rows: list[dict[str, Any]] = []
-    pool_pass = base["candidate_pool_pass"].astype(bool)
-    for pool, pool_df in base.groupby("candidate_pool_version", sort=True):
-        pool_pass_part = pool_df["candidate_pool_pass"].astype(bool)
-        for col in spec.feature_cols:
-            raw_col = col[:-2] if col.endswith("_z") else col
-            vals = (
-                pd.to_numeric(pool_df[raw_col], errors="coerce")
-                if raw_col in pool_df.columns
-                else pd.Series(np.nan, index=pool_df.index)
-            )
-            rows.append(
-                {
-                    "candidate_pool_version": pool,
-                    "feature_spec": spec.name,
-                    "families": ",".join(spec.families),
-                    "feature": col,
-                    "raw_feature": raw_col,
-                    "rows": int(len(pool_df)),
-                    "candidate_pool_pass_rows": int(pool_pass_part.sum()),
-                    "non_null": int(vals.notna().sum()),
-                    "coverage_ratio": float(vals.notna().mean()) if len(pool_df) else np.nan,
-                    "candidate_pool_pass_coverage_ratio": float(vals.loc[pool_pass_part].notna().mean())
-                    if pool_pass_part.any()
-                    else np.nan,
-                    "first_signal_date": str(pool_df.loc[vals.notna(), "signal_date"].min().date())
-                    if vals.notna().any()
-                    else "",
-                    "last_signal_date": str(pool_df.loc[vals.notna(), "signal_date"].max().date())
-                    if vals.notna().any()
-                    else "",
-                }
-            )
-    out = pd.DataFrame(rows)
-    if out.empty and pool_pass.any():
-        return out
-    return out
-
-
-def apply_m9_feature_coverage_policy(
-    dataset: pd.DataFrame,
-    spec: Any,
-    feature_coverage: pd.DataFrame,
-    *,
-    candidate_pools: tuple[str, ...],
-    min_core_coverage: float = 0.30,
-) -> tuple[list[str], pd.DataFrame]:
-    rows: list[dict[str, Any]] = []
-    active: list[str] = []
-    coverage = feature_coverage.copy()
-    if coverage.empty:
-        active = [c for c in spec.feature_cols if c in dataset.columns]
-        return active, pd.DataFrame()
-    coverage["candidate_pool_pass_coverage_ratio"] = pd.to_numeric(
-        coverage.get("candidate_pool_pass_coverage_ratio"), errors="coerce"
-    )
-    for feature in spec.feature_cols:
-        if feature not in dataset.columns:
-            rows.append(
-                {
-                    "feature": feature,
-                    "raw_feature": feature[:-2] if feature.endswith("_z") else feature,
-                    "candidate_pool_pass_coverage_ratio": np.nan,
-                    "m9_feature_policy": "missing_from_dataset",
-                    "active_feature": "",
-                }
-            )
-            continue
-        raw_feature = feature[:-2] if feature.endswith("_z") else feature
-        part = coverage[
-            (coverage["feature"] == feature)
-            & (coverage["candidate_pool_version"].isin(candidate_pools) if "candidate_pool_version" in coverage.columns else True)
-        ].copy()
-        cov = float(part["candidate_pool_pass_coverage_ratio"].min()) if not part.empty else np.nan
-        missing_flag = f"is_missing_{raw_feature}"
-        if np.isfinite(cov) and cov < float(min_core_coverage):
-            if missing_flag in dataset.columns:
-                active.append(missing_flag)
-                policy = "missing_flag_only_low_coverage"
-                active_feature = missing_flag
-            else:
-                policy = "dropped_low_coverage_no_missing_flag"
-                active_feature = ""
-        else:
-            active.append(feature)
-            policy = "core_feature"
-            active_feature = feature
-        rows.append(
-            {
-                "feature": feature,
-                "raw_feature": raw_feature,
-                "candidate_pool_pass_coverage_ratio": cov,
-                "m9_feature_policy": policy,
-                "active_feature": active_feature,
-            }
-        )
-    return list(dict.fromkeys(active)), pd.DataFrame(rows)
 
 
 def _build_previous_rank_map(
@@ -631,36 +413,6 @@ def build_recommendation_table(
         rec["last_month_rank"] = pd.to_numeric(rec["last_month_rank"], errors="coerce").astype("Int64")
     contrib_df = pd.DataFrame(contrib_rows)
     return rec, contrib_df
-
-
-def apply_industry_cap(
-    ranked: pd.DataFrame,
-    *,
-    top_k: int,
-    max_industry_share: float = 0.30,
-    industry_col: str = "industry",
-    score_col: str = "score",
-) -> pd.DataFrame:
-    """贪心选取：按 score 降序遍历，当某行业已达上限时跳过。
-
-    保证最终推荐集大小 <= top_k。
-    max_industry_share = 0.30 表示 Top20 中单行业最多 6 只。
-    """
-    if ranked.empty:
-        return ranked
-    cap = max(1, int(np.floor(max_industry_share * top_k)))
-    # 如果 top_k 本身很小（如 5），cap 至少为 1
-    industry_counts: dict[str, int] = {}
-    selected = []
-    for _, row in ranked.sort_values(score_col, ascending=False).iterrows():
-        ind = str(row.get(industry_col, "") or "")
-        if industry_counts.get(ind, 0) >= cap:
-            continue
-        selected.append(row)
-        industry_counts[ind] = industry_counts.get(ind, 0) + 1
-        if len(selected) >= top_k:
-            break
-    return pd.DataFrame(selected)
 
 
 def summarize_recommendation_industry_exposure(recommendations: pd.DataFrame) -> pd.DataFrame:

@@ -6,13 +6,13 @@ import sys
 import pandas as pd
 import pytest
 
-import scripts.run_monthly_selection_concentration_regime as concentration
-from scripts.run_monthly_selection_baselines import (
+from src.pipeline.monthly_baselines import (
     build_quantile_spread,
     build_rank_ic,
     summarize_regime_slice,
 )
-from scripts.run_monthly_selection_concentration_regime import (
+from src.cli.monthly_concentration import run_monthly_concentration_regime
+from src.pipeline.monthly_concentration import (
     EXCESS_COL,
     INDUSTRY_EXCESS_COL,
     LABEL_COL,
@@ -192,35 +192,34 @@ def test_resolve_topk_and_cap_grid_auto_fills_manual_top10_top5():
 def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
     dataset_path = tmp_path / "monthly_selection_features.parquet"
     _score_sample(months=4).to_parquet(dataset_path, index=False)
-    monkeypatch.setattr(concentration, "ROOT", tmp_path)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "run_monthly_selection_concentration_regime.py",
-            "--dataset",
-            str(dataset_path),
-            "--results-dir",
-            "results",
-            "--output-prefix",
-            "m8_contract_test",
-            "--as-of-date",
-            "2026-05-02",
-            "--top-k",
-            "2",
-            "--candidate-pools",
-            "U2_risk_sane",
-            "--min-train-months",
-            "2",
-            "--min-train-rows",
-            "10",
-            "--families",
-            "industry_breadth",
-            "--skip-m6",
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", ["run_monthly_selection_concentration_regime.py"])
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "docs" / "reports" / "2026-05").mkdir(parents=True, exist_ok=True)
 
-    assert concentration.main() == 0
+    assert run_monthly_concentration_regime(
+        config=None,
+        dataset=str(dataset_path),
+        duckdb_path="",
+        output_prefix="m8_contract_test",
+        as_of_date="2026-05-02",
+        results_dir=str(tmp_path / "results"),
+        topk_preset="default",
+        top_k="2",
+        cap_grid="",
+        candidate_pools="U2_risk_sane",
+        bucket_count=5,
+        min_train_months=2,
+        min_train_rows=10,
+        max_fit_rows=0,
+        cost_bps=10.0,
+        random_seed=42,
+        availability_lag_days=30,
+        model_n_jobs=0,
+        min_state_history_months=2,
+        families="industry_breadth",
+        skip_m6=True,
+        root=tmp_path,
+    ) == 0
 
     manifests = sorted((tmp_path / "results").glob("m8_contract_test_*_manifest.json"))
     assert len(manifests) == 1

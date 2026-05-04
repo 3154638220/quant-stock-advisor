@@ -143,25 +143,14 @@ def _daily_asset_return_matrix(
     return out.sort_index().astype(np.float64)
 
 
+from src.pipeline.monthly_dataset import select_month_end_signal_dates
+
+
 def select_rebalance_dates(
     all_dates: Iterable[pd.Timestamp], rebalance_rule: str
 ) -> pd.DataFrame:
-    dates = sorted(pd.to_datetime(list(all_dates)))
-    if not dates:
-        return pd.DataFrame(columns=["trade_date"])
-    arr = np.array(dates, dtype="datetime64[ns]")
-    freq = rule
-    if str(rebalance_rule).upper() == "M":
-        freq = "ME"
-    elif str(rebalance_rule).upper() == "BM":
-        freq = "2BME"
-    anchors = pd.date_range(dates[0], dates[-1], freq=freq)
-    out: list[pd.Timestamp] = []
-    for a in anchors:
-        pos = np.searchsorted(arr, np.datetime64(a), side="right") - 1
-        if pos >= 0:
-            out.append(pd.Timestamp(arr[pos]))
-    return pd.DataFrame({"trade_date": sorted(set(out))})
+    dates = select_month_end_signal_dates(list(all_dates), rebalance_rule=rebalance_rule)
+    return pd.DataFrame({"trade_date": sorted(set(dates))})
 
 
 def build_investable_period_return_panel(

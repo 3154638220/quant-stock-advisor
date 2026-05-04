@@ -36,10 +36,20 @@ from src.models.research_contract import (
     utc_now_iso,
     write_research_manifest,
 )
+from src.pipeline.monthly_baselines import (
+    _safe_qcut,
+    build_realized_market_states,
+    summarize_candidate_pool_width,
+    valid_pool_frame,
+)
+from src.reporting.markdown_report import format_markdown_table, json_sanitize, project_relative
+from src.research.gates import LABEL_COL, MARKET_COL
 from src.settings import load_config, resolve_config_path
 
-LABEL_COL = "label_forward_1m_o2o_return"
-MARKET_COL = "label_market_ew_o2o_return"
+# 别名：scripts 历史使用下划线前缀
+_format_markdown_table = format_markdown_table
+_json_sanitize = json_sanitize
+_project_relative = project_relative
 
 FEATURE_SPECS: tuple[tuple[str, str, int], ...] = (
     ("momentum_20d", "feature_ret_20d_z", 1),
@@ -92,23 +102,6 @@ def _parse_str_list(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
 
 
-def _json_sanitize(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {str(k): _json_sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_json_sanitize(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [_json_sanitize(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating, float)):
-        val = float(obj)
-        return val if np.isfinite(val) else None
-    if isinstance(obj, (pd.Timestamp,)):
-        return obj.isoformat()
-    return obj
-
-
 def _markdown_cell(value: object) -> str:
     if value is None:
         return ""
@@ -120,20 +113,6 @@ def _markdown_cell(value: object) -> str:
     if isinstance(value, float):
         return f"{value:.6g}"
     return str(value).replace("|", "\\|").replace("\n", "<br>")
-
-
-def _format_markdown_table(df: pd.DataFrame, *, max_rows: int = 30) -> str:
-    if df.empty:
-        return "_无记录_"
-    view = df.head(max_rows).copy()
-    header = "| " + " | ".join(str(c) for c in view.columns) + " |"
-    sep = "| " + " | ".join("---" for _ in view.columns) + " |"
-    rows = [
-        "| " + " | ".join(_markdown_cell(row[col]) for col in view.columns) + " |"
-        for _, row in view.iterrows()
-    ]
-    suffix = [f"\n_仅展示前 {max_rows} 行，共 {len(df)} 行。_"] if len(df) > max_rows else []
-    return "\n".join([header, sep, *rows, *suffix])
 
 
 def load_oracle_dataset(path: Path, *, candidate_pools: list[str] | None = None) -> pd.DataFrame:
@@ -153,11 +132,6 @@ def load_oracle_dataset(path: Path, *, candidate_pools: list[str] | None = None)
     if candidate_pools:
         out = out[out["candidate_pool_version"].isin(candidate_pools)].copy()
     return out
-
-
-def valid_pool_frame(dataset: pd.DataFrame) -> pd.DataFrame:
-    m = dataset["candidate_pool_pass"].astype(bool) & dataset[LABEL_COL].notna()
-    return dataset.loc[m].copy()
 
 
 def _top_by_return(part: pd.DataFrame, k: int) -> pd.DataFrame:
@@ -237,33 +211,6 @@ def summarize_oracle_by_candidate_pool(monthly: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
-
-
-def summarize_candidate_pool_width(dataset: pd.DataFrame) -> pd.DataFrame:
-    if dataset.empty:
-        return pd.DataFrame()
-    out = (
-        dataset.groupby(["signal_date", "candidate_pool_version"], dropna=False)
-        .agg(
-            raw_universe_width=("symbol", "nunique"),
-            candidate_pool_width=("candidate_pool_pass", "sum"),
-            label_valid_count=(LABEL_COL, lambda s: pd.to_numeric(s, errors="coerce").notna().sum()),
-        )
-        .reset_index()
-    )
-    out["candidate_pool_pass_ratio"] = out["candidate_pool_width"] / out["raw_universe_width"].replace(0, np.nan)
-    return out
-
-
-def _safe_qcut(values: pd.Series, bucket_count: int) -> pd.Series:
-    x = pd.to_numeric(values, errors="coerce")
-    if x.notna().sum() < bucket_count or x.nunique(dropna=True) < 2:
-        return pd.Series(pd.NA, index=values.index, dtype="Int64")
-    try:
-        b = pd.qcut(x, bucket_count, labels=False, duplicates="drop")
-    except ValueError:
-        return pd.Series(pd.NA, index=values.index, dtype="Int64")
-    return (b + 1).astype("Int64")
 
 
 def summarize_feature_bucket_monotonicity(
@@ -403,29 +350,6 @@ def summarize_baseline_overlap(
         )
         .reset_index()
     )
-
-
-def build_realized_market_states(dataset: pd.DataFrame) -> pd.DataFrame:
-    base = dataset[dataset[LABEL_COL].notna()].copy()
-    if base.empty:
-        return pd.DataFrame(columns=["signal_date", "market_ew_return", "realized_market_state"])
-    monthly = (
-        base.groupby("signal_date", sort=True)[MARKET_COL]
-        .first()
-        .reset_index()
-        .rename(columns={MARKET_COL: "market_ew_return"})
-    )
-    vals = pd.to_numeric(monthly["market_ew_return"], errors="coerce")
-    lo = vals.quantile(0.20)
-    hi = vals.quantile(0.80)
-    monthly["realized_market_state"] = np.select(
-        [vals <= lo, vals >= hi],
-        ["strong_down", "strong_up"],
-        default="neutral",
-    )
-    monthly["state_p20"] = float(lo) if np.isfinite(lo) else np.nan
-    monthly["state_p80"] = float(hi) if np.isfinite(hi) else np.nan
-    return monthly
 
 
 def summarize_regime_oracle_capacity(monthly_oracle: pd.DataFrame, market_states: pd.DataFrame) -> pd.DataFrame:
