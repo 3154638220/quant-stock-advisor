@@ -6,7 +6,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "configs" / "promoted" / "promoted_registry.json"
-ACTIVE_CONFIG_ID = "monthly_selection_u1_top20_indcap3_hardcap_baseline"
+ACTIVE_CONFIG_ID = "monthly_selection_u1_top20_m8_natural_soft_gamma0_20"
 
 
 def load_registry() -> dict:
@@ -18,13 +18,13 @@ def test_promoted_registry_records_active_monthly_selection_default() -> None:
 
     assert registry["current_state"]["has_promoted_research_candidates"] is True
     assert registry["current_state"]["active_promoted_config_id"] == ACTIVE_CONFIG_ID
-    assert len(registry["promoted_configs"]) == 1
-    promoted = registry["promoted_configs"][0]
+    assert len(registry["promoted_configs"]) == 2
+    promoted = next(p for p in registry["promoted_configs"] if p["config_id"] == ACTIVE_CONFIG_ID)
     assert promoted["config_id"] == ACTIVE_CONFIG_ID
     assert promoted["production_method"]["candidate_pool_version"] == "U1_liquid_tradable"
     assert promoted["production_method"]["top_k"] == 20
-    assert promoted["production_method"]["selection_policy"] == "industry_names_cap"
-    assert promoted["production_method"]["max_industry_names"] == 3
+    assert promoted["production_method"]["selection_policy"] == "soft_industry_risk_budget"
+    assert promoted["production_method"]["max_industry_names"] is None
     assert promoted["production_method"]["buy_timing"] == "next_month_first_trading_day_open"
     assert promoted["production_method"]["sell_timing"] == "holding_month_last_trading_day_open"
 
@@ -82,17 +82,16 @@ def test_production_template_points_to_active_monthly_selection_config() -> None
     assert default_method["config_id"] == registry["current_state"]["active_promoted_config_id"]
     assert default_method["candidate_pool_version"] == "U1_liquid_tradable"
     assert default_method["top_k"] == 20
-    assert default_method["selection_policy"] == "industry_names_cap"
-    assert default_method["max_industry_names"] == 3
+    assert default_method["selection_policy"] == "soft_industry_risk_budget"
+    assert default_method["max_industry_names"] is None
     assert default_method["buy_timing"] == "next_month_first_trading_day_open"
     assert default_method["sell_timing"] == "holding_month_last_trading_day_open"
     assert cfg["signals"]["top_k"] == 20
-    assert cfg["portfolio"]["industry_cap_count"] == 3
 
 
 def test_active_promoted_config_snapshot_matches_registry_method() -> None:
     registry = load_registry()
-    promoted = registry["promoted_configs"][0]
+    promoted = next(p for p in registry["promoted_configs"] if p["config_id"] == ACTIVE_CONFIG_ID)
     snapshot_path = ROOT / promoted["config_path"]
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
 

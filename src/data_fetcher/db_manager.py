@@ -447,6 +447,7 @@ class DuckDBManager:
             WHERE change IS NULL OR pct_chg IS NULL OR amplitude_pct IS NULL
             """
         ).fetchone()
+        assert row is not None, "COUNT(*) 查询不应返回 None"
         n_before = int(row[0] or 0)
         if n_before == 0:
             return 0
@@ -486,6 +487,7 @@ class DuckDBManager:
             WHERE change IS NULL OR pct_chg IS NULL OR amplitude_pct IS NULL
             """
         ).fetchone()
+        assert row2 is not None, "COUNT(*) 查询不应返回 None"
         n_after = int(row2[0] or 0)
         fixed = n_before - n_after
         _LOG.info(
@@ -526,15 +528,14 @@ class DuckDBManager:
         )
         self._conn.execute("BEGIN TRANSACTION")
         try:
+            payloads: list[SymbolFetchPayload] = []
             if self._fetch_workers <= 1 or len(plans) <= 1:
-                payloads: list[SymbolFetchPayload] = []
                 for plan in plans:
                     payloads.append(self._fetch_symbol_payload(plan))
                     if self._sleep > 0:
                         time.sleep(self._sleep)
                 self._write_payload_batch(payloads, counts)
             else:
-                payloads: list[SymbolFetchPayload] = []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=self._fetch_workers) as executor:
                     future_map = {
                         executor.submit(self._fetch_symbol_payload, plan): plan.symbol for plan in plans

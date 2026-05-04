@@ -170,14 +170,16 @@ signals:
 
 monthly_selection:
   default_method:
-    config_id: monthly_selection_u1_top20_indcap3_hardcap_baseline
-    config_path: configs/promoted/monthly_selection_u1_top20_indcap3_hardcap_baseline.json
+    config_id: monthly_selection_u1_top20_m8_natural_soft_gamma0_20
+    config_path: configs/promoted/monthly_selection_u1_top20_m8_natural_soft_gamma0_20.json
     candidate_pool_version: U1_liquid_tradable
     top_k: 20
-    base_model: M8_regime_aware_fixed_policy
-    model: M8_regime_aware_fixed_policy__indcap3
-    selection_policy: industry_names_cap
-    max_industry_names: 3
+    base_model: M8_natural_industry_constraints
+    model: elasticnet_market_excess_soft_risk_budget_gamma0_2
+    selection_policy: soft_industry_risk_budget
+    max_industry_names: null
+    soft_gamma: 0.20
+    cost_bps: 30.0
     buy_timing: next_month_first_trading_day_open
     sell_timing: holding_month_last_trading_day_open
     transition_policy: sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day

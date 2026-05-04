@@ -95,3 +95,27 @@ def has_explicit_asof_trade_date(paths: Optional[Dict[str, Any]] = None) -> bool
     paths = paths or {}
     raw = paths.get("asof_trade_date")
     return bool(raw is not None and str(raw).strip())
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """递归深合并：override 中的值完全覆盖 base 中对应键。
+
+    对于嵌套字典，整表替换（不逐键合并），确保 composite_extended 等配置节的
+    覆盖语义为"全量替换"而非"增量补丁"。
+    """
+    result = {**base}
+    for key, value in override.items():
+        result[key] = value
+    return result
+
+
+# 默认配置骨架（不含 composite_extended 等需用户显式配置的节）
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "signals": {
+        "top_k": 20,
+    },
+    "portfolio": {
+        "industry_cap_count": 3,
+        "weight_method": "risk_parity",
+    },
+}
