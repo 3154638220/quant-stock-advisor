@@ -32,7 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - 取决于运行环境是否安
 try:
     import duckdb
 except ModuleNotFoundError:  # pragma: no cover - 取决于运行环境是否安装 duckdb
-    duckdb = None
+    duckdb = None  # type: ignore[assignment]
 
 from .akshare_resilience import call_with_timeout, install_akshare_requests_resilience
 from ..settings import load_config, project_root

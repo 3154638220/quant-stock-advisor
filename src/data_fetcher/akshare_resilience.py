@@ -121,8 +121,8 @@ def install_akshare_requests_resilience(cfg: Optional[dict] = None) -> None:
                 )
             return _ORIG_SESSION_REQUEST(self, method, url, *args, **kwargs)
 
-        requests.sessions.Session.__init__ = _patched_init
-        requests.sessions.Session.request = _patched_request
+        requests.sessions.Session.__init__ = _patched_init  # type: ignore[method-assign]
+        requests.sessions.Session.request = _patched_request  # type: ignore[method-assign]
         _PATCHED = True
 
 

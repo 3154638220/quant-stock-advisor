@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from .factor_eval import (
     ic_summary,
     information_coefficient,
@@ -31,7 +35,13 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - 轻量测试环境可不装 duckdb
     DEFAULT_FUND_FLOW_WINDOWS = (5, 10, 20)
 
-    def attach_fund_flow(*args, **kwargs):
+    def attach_fund_flow(
+        factors: Any,
+        db_path: str,
+        *,
+        table_name: str = "a_share_fund_flow",
+        windows: tuple[int, ...] = DEFAULT_FUND_FLOW_WINDOWS,
+    ) -> Any:
         raise ModuleNotFoundError("attach_fund_flow 需要安装 duckdb")
 
 
@@ -43,7 +53,14 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - 轻量测试环境可不装 duckdb
     DEFAULT_SHAREHOLDER_AVAILABILITY_LAG_DAYS = 30
 
-    def attach_shareholder_factors(*args, **kwargs):
+    def attach_shareholder_factors(
+        factors: Any,
+        db_path: str,
+        *,
+        table_name: str = "a_share_shareholder",
+        availability_lag_days: int = DEFAULT_SHAREHOLDER_AVAILABILITY_LAG_DAYS,
+        exdiv_table: str = "a_share_dividend_calendar",
+    ) -> Any:
         raise ModuleNotFoundError("attach_shareholder_factors 需要安装 duckdb")
 
 __all__ = [

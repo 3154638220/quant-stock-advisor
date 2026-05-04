@@ -36,7 +36,7 @@ class PerformancePanel:
 
 def _finite_returns(returns: np.ndarray) -> np.ndarray:
     r = np.asarray(returns, dtype=np.float64).ravel()
-    return r[np.isfinite(r)]
+    return r[np.isfinite(r)]  # type: ignore[no-any-return]
 
 
 def total_return_from_simple_returns(returns: np.ndarray) -> float:
@@ -44,7 +44,7 @@ def total_return_from_simple_returns(returns: np.ndarray) -> float:
     r = _finite_returns(returns)
     if r.size == 0:
         return float("nan")
-    return float(np.prod(1.0 + r) - 1.0)
+    return float(np.prod(1.0 + r) - 1.0)  # type: ignore[no-any-return]
 
 
 def annualized_return_cagr(

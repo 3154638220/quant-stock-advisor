@@ -31,48 +31,22 @@ from src.features.fundamental_factors import (
     filter_low_coverage_cols,
     pit_safe_fundamental_rows,
 )
-
-# ── 特征列常量 ───────────────────────────────────────────────────────────
-
-PRICE_VOLUME_FEATURES: tuple[str, ...] = (
-    "feature_ret_5d",
-    "feature_ret_20d",
-    "feature_ret_60d",
-    "feature_realized_vol_20d",
-    "feature_amount_20d_log",
-    "feature_turnover_20d",
-    "feature_price_position_250d",
-    "feature_limit_move_hits_20d",
+from src.features.registry import (  # D1: 统一因子注册中心（单一权威来源）
+    FUND_FLOW_FEATURES_REGISTRY,
+    FUNDAMENTAL_FEATURES_REGISTRY,
+    INDUSTRY_BREADTH_FEATURES_REGISTRY,
+    PRICE_VOLUME_FEATURES_REGISTRY,
+    SHAREHOLDER_FEATURES_REGISTRY,
 )
 
-INDUSTRY_BREADTH_RAW_FEATURES: tuple[str, ...] = (
-    "feature_industry_ret20_mean",
-    "feature_industry_ret60_mean",
-    "feature_industry_positive_ret20_ratio",
-    "feature_industry_amount20_mean",
-    "feature_industry_low_vol20_mean",
-)
+# ── 特征列常量（D1: 迁移至 FeatureRegistry 单一来源）─────────────────────
+# 以下常量现在是 registry 生成的别名，保留旧名称以保持向后兼容。
 
-FUND_FLOW_RAW_FEATURES: tuple[str, ...] = (
-    "feature_fund_flow_main_inflow_5d",
-    "feature_fund_flow_main_inflow_10d",
-    "feature_fund_flow_main_inflow_20d",
-    "feature_fund_flow_super_inflow_10d",
-    "feature_fund_flow_divergence_20d",
-    "feature_fund_flow_main_inflow_streak",
-)
-
-FUNDAMENTAL_RAW_FEATURES: tuple[str, ...] = tuple(
-    f"feature_fundamental_{c}"
-    for c in DEFAULT_FUNDAMENTAL_COLS
-    if c not in {"northbound_net_inflow", "margin_buy_ratio"}
-)
-
-SHAREHOLDER_RAW_FEATURES: tuple[str, ...] = (
-    "feature_shareholder_holder_count_log",
-    "feature_shareholder_holder_change_rate",
-    "feature_shareholder_concentration_proxy",
-)
+PRICE_VOLUME_FEATURES: tuple[str, ...] = PRICE_VOLUME_FEATURES_REGISTRY
+INDUSTRY_BREADTH_RAW_FEATURES: tuple[str, ...] = INDUSTRY_BREADTH_FEATURES_REGISTRY
+FUND_FLOW_RAW_FEATURES: tuple[str, ...] = FUND_FLOW_FEATURES_REGISTRY
+FUNDAMENTAL_RAW_FEATURES: tuple[str, ...] = FUNDAMENTAL_FEATURES_REGISTRY
+SHAREHOLDER_RAW_FEATURES: tuple[str, ...] = SHAREHOLDER_FEATURES_REGISTRY
 
 
 # ── P1-2: 特征家族数据起始日期（用于 walk-forward 分期训练）─────────────

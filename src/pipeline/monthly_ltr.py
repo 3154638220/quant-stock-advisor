@@ -64,8 +64,8 @@ class M6RunConfig:
         # "xgboost_rank_pairwise",  # DEPRECATED P1-4: IC 不稳定，移入 ablation
         # "top20_calibrated",       # DEPRECATED P1-4: after-cost excess 为负
         # "ranker_top20_ensemble",  # DEPRECATED P1-4: 同上
-        # "lightgbm_rank_ndcg",     # H1: LightGBM Ranker (per docs/plan-05-04.md)
-        # "ranker_ensemble",        # H1: XGBoost+LightGBM 简单平均集成
+        "lightgbm_rank_ndcg",     # H1: LightGBM Ranker (per docs/plan-05-04.md)
+        # "ranker_ensemble",        # H1: XGBoost+LightGBM 简单平均集成（M12 验证）
         # P2-3: Stacking 集成（需 OOF 收集，默认关闭以保持向后兼容）
         # "stacking_ensemble",
     )
@@ -123,7 +123,7 @@ def _sort_for_query_groups(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _query_group_sizes(df: pd.DataFrame) -> np.ndarray:
-    return df.groupby("signal_date", sort=False).size().to_numpy(dtype=np.uint32)
+    return df.groupby("signal_date", sort=False).size().to_numpy(dtype=np.uint32)  # type: ignore[no-any-return]
 
 
 def _train_predict_xgboost_ranker(
@@ -373,7 +373,7 @@ def _train_predict_top20_calibrated(
             f"XGBoost top20 classifier 不可用，使用 sklearn LogisticRegression 兜底: {exc}",
             RuntimeWarning,
         )
-        XGBClassifier = None  # type: ignore[assignment]
+        XGBClassifier = None  # type: ignore[assignment,misc]
 
     y = pd.to_numeric(train.get(TOP20_COL), errors="coerce")
     if y.notna().sum() == 0:
@@ -552,7 +552,7 @@ def _train_stacking_meta_learner(
         model.fit(X, y)
     except Exception:
         return None
-    return model
+    return model  # type: ignore[no-any-return]
 
 
 def _predict_stacking_ensemble(
@@ -587,7 +587,7 @@ def _predict_stacking_ensemble(
 
     X = merged[available].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
     try:
-        proba = meta_learner.predict_proba(X)[:, 1]
+        proba = meta_learner.predict_proba(X)[:, 1]  # type: ignore[attr-defined]
     except Exception:
         return pd.DataFrame()
 

@@ -117,6 +117,8 @@ def _duplicate_pk_count(conn: duckdb.DuckDBPyConnection, table: str) -> int:
     ) t
     """
     row = conn.execute(q).fetchone()
+    if row is None:
+        return 0
     return int(row[0] or 0)
 
 
@@ -139,6 +141,8 @@ def _ohlc_invalid_count(
       )
     """
     row = conn.execute(q).fetchone()
+    if row is None:
+        return 0
     return int(row[0] or 0)
 
 
@@ -162,6 +166,8 @@ def _large_gap_count(
       AND date_diff('day', prev_d, trade_date) > {int(max_gap_days)}
     """
     row = conn.execute(q).fetchone()
+    if row is None:
+        return 0
     return int(row[0] or 0)
 
 
@@ -186,6 +192,8 @@ def _null_ratio_checks(
 ) -> List[str]:
     violations: List[str] = []
     total = conn.execute(f"SELECT COUNT(*)::BIGINT FROM {table}").fetchone()
+    if total is None:
+        return violations
     n = int(total[0] or 0)
     if n == 0:
         return violations
@@ -199,6 +207,8 @@ def _null_ratio_checks(
             FROM {table}
             """,
         ).fetchone()
+        if row is None:
+            continue
         nulls = int(row[0] or 0)
         ratio = nulls / n
         if ratio > threshold:

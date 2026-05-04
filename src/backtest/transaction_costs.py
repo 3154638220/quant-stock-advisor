@@ -114,7 +114,7 @@ def sqrt_adv_impact_bps(
     participation = float(trade_value) / float(adv)
     if participation <= 0:
         return 0.0
-    return float(impact_k) * np.sqrt(participation) * 10000.0
+    return float(float(impact_k) * np.sqrt(participation) * 10000.0)  # type: ignore[no-any-return]
 
 
 def per_stock_impact_drag(
@@ -167,7 +167,7 @@ def per_stock_impact_drag(
     return float(total_drag)
 
 
-def cost_params_dict_for_logging(costs: TransactionCostParams) -> Dict[str, float]:
+def cost_params_dict_for_logging(costs: TransactionCostParams) -> Dict[str, Any]:
     return {
         "buy_fraction": costs.buy_fraction(),
         "sell_fraction": costs.sell_fraction(),

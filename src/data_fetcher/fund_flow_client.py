@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover
 try:
     import duckdb
 except ModuleNotFoundError:  # pragma: no cover
-    duckdb = None
+    duckdb = None  # type: ignore[assignment]
 
 from ..settings import load_config, project_root
 
