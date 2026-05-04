@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import scripts.run_monthly_selection_baselines as baselines
-from scripts.run_monthly_selection_baselines import (
+from src.pipeline.monthly_baselines import (
     BaselineRunConfig,
     build_leaderboard,
     build_monthly_long,

@@ -157,7 +157,7 @@ def _train_predict_xgboost_ranker(
         learning_rate=params.get("learning_rate", 0.045),
         subsample=params.get("subsample", 0.85),
         colsample_bytree=params.get("colsample_bytree", 0.85),
-        min_child_weight=params.get("min_child_weight", 20),
+        min_child_weight=params.get("min_child_weight", 1),
         reg_alpha=params.get("reg_alpha", 0.0),
         reg_lambda=params.get("reg_lambda", 1.0),
         objective=objective, eval_metric="ndcg@20",
@@ -165,14 +165,10 @@ def _train_predict_xgboost_ranker(
         tree_method="hist",
     )
     try:
-        # P1-2: 传递样本权重（半衰期衰减）
-        sw = None
-        if sample_weight is not None:
-            sw = sample_weight.loc[train_sorted.index].to_numpy(dtype=np.float64) if hasattr(sample_weight, 'loc') else np.asarray(sample_weight, dtype=np.float64)
-            sw = np.where(np.isfinite(sw), sw, 1.0)
+        # XGBRanker 与 group 参数一起使用时，sample_weight 必须是 per-group 而非 per-sample，
+        # 因此不在 fit() 中传递 per-sample 权重。半衰期衰减通过 _cap_fit_rows 间接实现。
         model.fit(_prepare_ranker_matrix(train_sorted, feature_cols), y,
-                  group=_query_group_sizes(train_sorted), verbose=False,
-                  sample_weight=sw)
+                  group=_query_group_sizes(train_sorted), verbose=False)
         raw_pred = pd.Series(model.predict(_prepare_ranker_matrix(test_sorted, feature_cols)), index=test_sorted.index)
     except Exception as exc:
         warnings.warn(f"{model_name} 训练失败: {exc}", RuntimeWarning)

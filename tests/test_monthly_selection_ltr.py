@@ -8,17 +8,19 @@ import pandas as pd
 import pytest
 
 import scripts.run_monthly_selection_ltr as ltr
-from scripts.run_monthly_selection_ltr import (
+from src.pipeline.monthly_ltr import (
     M6RunConfig,
-    build_leaderboard,
     build_ltr_relevance,
     build_m6_feature_spec,
+    build_walk_forward_ltr_scores,
+)
+from src.pipeline.monthly_baselines import (
+    build_leaderboard,
     build_monthly_long,
     build_quantile_spread,
     build_rank_ic,
-    build_walk_forward_ltr_scores,
 )
-from scripts.run_monthly_selection_multisource import attach_industry_breadth_features
+from src.pipeline.monthly_multisource import attach_industry_breadth_features
 try:
     from scripts.validate_research_contracts import validate_manifest
 except ImportError:

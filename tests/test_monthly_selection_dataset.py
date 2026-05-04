@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.run_monthly_selection_dataset import (
+from src.pipeline.monthly_dataset import (
     MonthlySelectionConfig,
     build_monthly_selection_dataset,
     build_research_config_id,
