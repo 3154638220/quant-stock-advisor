@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /home/x12dpg/hjx/lh && python3 -c \"\nimport json\nwith open\\('data/results/monthly_selection_m6_ltr_indzneutral_2026_05_04_summary\\.json'\\) as f:\n    d = json\\.load\\(f\\)\nprint\\('=== M6 LTR indzneutral ==='\\)\nfor k in \\['rank_ic_mean', 'rank_ic_ir', 'model_name', 'candidate_pool'\\]:\n    print\\(f'  \\{k\\}: \\{d\\.get\\(k, \\\\\"N/A\\\\\"\\)\\}'\\)\n\n# Also check manifest\nwith open\\('data/results/monthly_selection_m6_ltr_indzneutral_2026_05_04_manifest\\.json'\\) as f:\n    m = json\\.load\\(f\\)\nprint\\('=== M6 manifest keys ==='\\)\nprint\\('  top-level keys:', list\\(m\\.keys\\(\\)\\)\\)\nif 'params' in m:\n    print\\('  params keys:', list\\(m\\['params'\\]\\.keys\\(\\)\\)\\)\n    print\\('  feature_file_hash:', m\\['params'\\]\\.get\\('feature_file_hash', 'N/A'\\)\\[:40\\] if m\\['params'\\]\\.get\\('feature_file_hash'\\) else 'N/A'\\)\n    print\\('  runtime_config_hash:', m\\['params'\\]\\.get\\('runtime_config_hash', 'N/A'\\)\\[:40\\] if m\\['params'\\]\\.get\\('runtime_config_hash'\\) else 'N/A'\\)\n\"\n$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

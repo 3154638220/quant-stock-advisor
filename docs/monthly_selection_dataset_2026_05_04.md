@@ -1,6 +1,6 @@
 # Monthly Selection Dataset
 
-- 生成时间：`2026-05-03T16:17:00.749994+00:00`
+- 生成时间：`2026-05-04T03:41:40.852870+00:00`
 - 结果类型：`monthly_selection_dataset`
 - 研究主题：`monthly_selection_dataset`
 - 研究配置：`rb_m_exec_tplus1_open_sell_mend_open_label_o2o_start_2021_01_01_end_latest_hist_120_amt20m_50_lmmax_3_daily_a_share_daily`

@@ -77,7 +77,6 @@ from src.settings import config_path_candidates, load_config, resolve_config_pat
 # ═══════════════════════════════════════════════════════════════════════════
 from src.pipeline.monthly_multisource import (  # noqa: F401
     FeatureSpec,
-    FUNDAMENTAL_RAW_FEATURES as _FUNDAMENTAL_RAW_FEATURES_PIPELINE,  # noqa: F401
     M5RunConfig,
     add_zscore_and_missing_flags,
     attach_enabled_families,

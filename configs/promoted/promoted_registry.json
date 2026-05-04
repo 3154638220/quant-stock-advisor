@@ -1,6 +1,6 @@
 {
   "registry_version": "r5_config_governance_2026-04-28",
-  "updated_at": "2026-04-30",
+  "updated_at": "2026-05-04",
   "purpose": "Production promotion registry for monthly selection configs. Research configs are not production inputs unless an entry is added here after the full promotion gate passes.",
   "production_policy": {
     "monthly_selection_rule": "Monthly selection must use only configs recorded in promoted_configs.",
@@ -27,8 +27,8 @@
   ],
   "current_state": {
     "has_promoted_research_candidates": true,
-    "active_promoted_config_id": "monthly_selection_u1_top20_indcap3_hardcap_baseline",
-    "decision": "Monthly selection default promoted on 2026-04-30: U1_liquid_tradable + Top20 + indcap3 hard-cap baseline.",
+    "active_promoted_config_id": "monthly_selection_u1_top20_m8_natural_soft_gamma0_20",
+    "decision": "M8 natural candidate promoted on 2026-05-04: U1_liquid_tradable + ElasticNet + market_excess + Top20 + soft_risk_budget_gamma0_20. Passed M10 cost gate at 30bps.",
     "default_action": "Use the active promoted config for monthly selection; do not write any other unpromoted research result into config.yaml.example or local production config.yaml."
   },
   "research_candidate_status": [
@@ -73,6 +73,12 @@
       "status": "promoted",
       "production_eligible": true,
       "evidence": "Owner decision on 2026-04-30 promotes U1_liquid_tradable + Top20 + M8_regime_aware_fixed_policy__indcap3 hard-cap baseline as the monthly selection default."
+    },
+    {
+      "candidate_id": "monthly_selection_u1_top20_m8_natural_soft_gamma0_20",
+      "status": "promoted",
+      "production_eligible": true,
+      "evidence": "M8 natural candidate promoted on 2026-05-04: Passed M10 cost gate at 30bps (after-cost excess 0.51%). U1_liquid_tradable + ElasticNet + market_excess + Top20 + soft_risk_budget_gamma0_20."
     }
   ],
   "promoted_configs": [
@@ -98,7 +104,31 @@
         "buy_timing": "next_month_first_trading_day_open",
         "sell_timing": "holding_month_last_trading_day_open",
         "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day",
-        "cost_bps": 10.0
+      }
+    },
+    {
+      "config_id": "monthly_selection_u1_top20_m8_natural_soft_gamma0_20",
+      "config_path": "configs/promoted/monthly_selection_u1_top20_m8_natural_soft_gamma0_20.json",
+      "promotion_date": "2026-05-04",
+      "full_backtest_report": "docs/monthly_selection_m10_cost_pressure_2026-05-04.md",
+      "oos_report": "data/results/monthly_selection_m8_natural_industry_constraints_30bps_2026_05_04_leaderboard.csv",
+      "state_slice_report": "data/results/monthly_selection_m8_natural_industry_constraints_30bps_2026_05_04_regime_slice.csv",
+      "boundary_report": "data/results/monthly_selection_m8_natural_industry_constraints_30bps_2026_05_04_gate.csv",
+      "owner_decision": "M8 natural candidate promoted on 2026-05-04: Passed M10 cost gate at 30bps. U1_liquid_tradable + ElasticNet + market_excess + Top20 + soft_risk_budget_gamma0_20.",
+      "production_method": {
+        "research_topic": "monthly_selection",
+        "candidate_pool_version": "U1_liquid_tradable",
+        "top_k": 20,
+        "base_model": "M8_natural_industry_constraints",
+        "model": "elasticnet_market_excess_soft_risk_budget_gamma0_2",
+        "selection_policy": "soft_industry_risk_budget",
+        "max_industry_names": null,
+        "execution_mode": "tplus1_open",
+        "rebalance_rule": "M",
+        "buy_timing": "next_month_first_trading_day_open",
+        "sell_timing": "holding_month_last_trading_day_open",
+        "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day",
+        "cost_bps": 30.0
       }
     }
   ]
