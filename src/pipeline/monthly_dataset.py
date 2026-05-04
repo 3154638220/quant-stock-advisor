@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ import pandas as pd
 from src.backtest.engine import build_open_to_open_returns
 from src.market.tradability import is_open_limit_up_unbuyable, is_row_suspended_like, limit_up_ratio
 from src.research.gates import POOL_RULES
+
+_LOG = logging.getLogger(__name__)
 
 # ── 特征 & 标签列定义 ────────────────────────────────────────────────────
 
@@ -121,15 +124,20 @@ def normalize_daily_frame(daily: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"daily 缺少列: {missing}")
     df = daily.copy()
-    df["symbol"] = (
-        df["symbol"].astype(str).str.extract(r"(\d{1,6})", expand=False).fillna("").str.zfill(6)
-    )
+    extracted = df["symbol"].astype(str).str.extract(r"(\d{6})", expand=False)
+    invalid_mask = extracted.isna()
+    if invalid_mask.any():
+        _LOG.warning("发现 %d 行无法提取6位symbol，已丢弃（原始值示例: %s）",
+                     invalid_mask.sum(),
+                     df.loc[invalid_mask, "symbol"].head(5).tolist())
+    df = df[~invalid_mask].copy()
+    df["symbol"] = extracted[~invalid_mask]
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.normalize()
     for col in ["open", "close", "high", "low", "volume", "amount", "turnover", "pct_chg"]:
         if col not in df.columns:
             df[col] = np.nan
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df[(df["symbol"].str.len() == 6) & df["trade_date"].notna()].copy()
+    df = df[df["trade_date"].notna()].copy()
     return df.sort_values(["symbol", "trade_date"]).drop_duplicates(["symbol", "trade_date"], keep="last")
 
 

@@ -103,7 +103,7 @@
         "rebalance_rule": "M",
         "buy_timing": "next_month_first_trading_day_open",
         "sell_timing": "holding_month_last_trading_day_open",
-        "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day",
+        "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day"
       }
     },
     {

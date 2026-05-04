@@ -27,7 +27,8 @@ dependencies = [
 dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,10 +51,16 @@ exclude_lines = [
 line-length = 110
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = ["E", "F", "W", "I", "TID"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # 独立可执行脚本通过 sys.path.insert 后才能 import src.*，E402 为预期行为
 "models/*.py" = ["E402"]
 "scripts/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+disallow_untyped_defs = true
+ignore_missing_imports = true

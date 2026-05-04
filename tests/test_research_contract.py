@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.research_identity import make_research_identity
+from src.cli.research_identity import make_research_identity
 try:
     from scripts.validate_research_contracts import validate_manifest
 except ImportError:

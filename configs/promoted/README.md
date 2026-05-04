@@ -38,3 +38,35 @@
 
 新增记录前必须确认正式 full backtest、OOS、状态切片、执行口径、成本、universe、换手与
 boundary diagnostic 均可追溯。
+
+## Promotion Gate 量化通过标准
+
+候选策略须**同时满足**以下所有量化条件，方可通过 Promotion Gate 进入生产：
+
+| 指标 | 阈值 | 说明 |
+|------|------|------|
+| 年化超额收益（after-cost） | > 5 bps | 扣除交易成本（30–50 bps）后的样本外年化超额，取 3 年 sliding window 最小值 |
+| Sharpe Ratio（after-cost） | > 0.3 | 基于 T+1 开盘执行价计算的 O2O 日收益序列年化 Sharpe |
+| 最大回撤（excess） | < 8% | 超额累计收益的最大回撤幅度，含成本 |
+| 月度胜率 | > 55% | 月度超额 > 0 的比例，基于样本外回测窗口 |
+| Calmar Ratio（excess） | > 0.4 | 年化超额 / 最大回撤 |
+| 样本外 Rank IC 均值 | > 0.03 | 样本外各月截面 Rank IC（Spearman）均值 |
+| M10 成本压力测试 | 通过 | 30/50 bps 两档 after-cost excess 均为正；成本上升 20 bps 后超额下降 < 50% |
+| 最大单票权重 | ≤ 12% | 回测期间任意换仓日的单票权重上限 |
+| 换手率（单边） | < 40% | 月均单向换手率 |
+
+**Gate 评估流程**：
+
+1. **全量回测**：至少覆盖 36 个月样本外窗口（最近 12 个月为纯 OOS，不参与训练）。
+2. **M10 成本复核**：30 bps / 50 bps 两档 cost 下 after-cost excess 均须保持正。
+3. **边界诊断**：Top20 边界替换测试（replace-1 / replace-3）稳定性通过。
+4. **状态切片**：strong-up / choppy / strong-down 三种市场状态下超额均为正（或 at least not worse than baseline）。
+5. **Owner 人工确认**：以上全部通过后，由 Owner 在 `promoted_registry.json` 中写入 ``owner_decision`` 字段确认 promotion。
+
+**降级触发条件（OOS 自动监控）**：
+
+- 连续 3 个月实现超额低于回测均值的 50%
+- 单月超额 < -2%
+- 月换手率 > 50%
+
+触发任一条件后，自动将策略标记为 ``oos_degraded``，需重新走 Gate 评估流程。

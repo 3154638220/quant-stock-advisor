@@ -83,10 +83,24 @@ def _time_series_cv_folds(
     train: pd.DataFrame,
     n_folds: int = 3,
     date_col: str = "signal_date",
+    gap: int = 1,
 ) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
-    """时序交叉验证：早期数据训练，后期数据验证，逐折滚动。"""
+    """时序交叉验证：早期数据训练，后期数据验证，逐折滚动。
+
+    使用 sklearn ``TimeSeriesSplit`` 对按月份聚合后的截面进行划分，
+    确保验证集始终在训练集之后，避免未来数据泄露。
+
+    Parameters
+    ----------
+    train : 训练数据，须含 ``date_col`` 列
+    n_folds : 交叉验证折数
+    date_col : 日期列名
+    gap : 训练集与验证集之间的月份间隔数（默认 1，即留 1 个月 gap）
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
     months = sorted(pd.to_datetime(train[date_col]).dropna().unique())
-    if len(months) < n_folds + 1:
+    if len(months) < n_folds + gap + 1:
         # 数据不足，退化为单折（最后一个月验证）
         split_point = max(1, len(months) - 1)
         train_months = months[:split_point]
@@ -95,13 +109,13 @@ def _time_series_cv_folds(
         val_part = train[train[date_col].isin(val_months)]
         return [(train_part, val_part)]
 
+    # 将 months 数组作为输入，由 TimeSeriesSplit 划分
+    month_indices = np.arange(len(months))
+    tscv = TimeSeriesSplit(n_splits=n_folds, max_train_size=None, gap=gap)
     folds: list[tuple[pd.DataFrame, pd.DataFrame]] = []
-    fold_size = len(months) // (n_folds + 1)
-    for i in range(n_folds):
-        train_end_idx = (i + 1) * fold_size
-        val_end_idx = min((i + 2) * fold_size, len(months))
-        train_months = months[:train_end_idx]
-        val_months = months[train_end_idx:val_end_idx]
+    for train_idx, val_idx in tscv.split(month_indices):
+        train_months = months[train_idx]
+        val_months = months[val_idx]
         if len(val_months) == 0:
             continue
         train_part = train[train[date_col].isin(train_months)]

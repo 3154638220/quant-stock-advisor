@@ -470,6 +470,47 @@ class ICMonitor:
                         logger.error("IC 告警回调执行失败: %s", exc)
         return alerts
 
+    def get_decayed_factors(
+        self,
+        *,
+        window: int = 20,
+        threshold: float = 0.03,
+        factors: Optional[Sequence[str]] = None,
+    ) -> list[str]:
+        """
+        返回滚动 IC 均值绝对值低于阈值的因子名称列表。
+
+        与 ``check_decay_alerts`` 共享同一统计逻辑，但不触发告警回调，
+        仅返回因子名称，供月度数据集构建阶段自动排除衰减因子。
+
+        Parameters
+        ----------
+        window
+            用于计算滚动均值的观测数（交易日数）。
+        threshold
+            |滚动 IC 均值| 低于此值时视为衰减。
+        factors
+            指定要检查的因子子集；默认检查全部。
+
+        Returns
+        -------
+        list[str]
+            已衰减的因子名称列表；无衰减时为空列表。
+        """
+        stats = self.rolling_ic_stats(window=window, factors=factors)
+        if stats.empty:
+            return []
+
+        decayed: list[str] = []
+        for fname, grp in stats.groupby("factor"):
+            latest = grp.sort_values("trade_date").iloc[-1]
+            roll_mean = latest.get("roll_mean")
+            if roll_mean is None or np.isnan(roll_mean):
+                continue
+            if abs(float(roll_mean)) < threshold:
+                decayed.append(str(fname))
+        return decayed
+
     def summary(
         self,
         *,

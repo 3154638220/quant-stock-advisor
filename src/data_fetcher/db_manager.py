@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -90,6 +91,7 @@ class DuckDBManager:
         abs_db.parent.mkdir(parents=True, exist_ok=True)
 
         self._conn = duckdb.connect(str(abs_db))
+        self._write_lock = threading.Lock()
         self._ensure_schema()
         self._ensure_audit_schema()
         self._auto_backfill_derived_columns_if_needed()
@@ -200,7 +202,8 @@ class DuckDBManager:
         duration_ms: int,
     ) -> None:
         """写入一次拉取审计记录（幂等：同一 ``run_id`` 仅应插入一次）。"""
-        self._conn.execute(
+        with self._write_lock:
+            self._conn.execute(
             f"""
             INSERT OR REPLACE INTO {self._table_audit}
             (run_id, started_at, finished_at, symbol_count, rows_written, failures, duration_ms)
@@ -362,12 +365,13 @@ class DuckDBManager:
 
         self._conn.register("df_incr", df)
         try:
-            self._conn.execute(
-                f"""
-                INSERT OR REPLACE INTO {self._table}
-                SELECT * FROM df_incr
-                """
-            )
+            with self._write_lock:
+                self._conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO {self._table}
+                    SELECT * FROM df_incr
+                    """
+                )
         finally:
             self._conn.unregister("df_incr")
         return SymbolUpdateResult(len(df), False)
@@ -420,12 +424,13 @@ class DuckDBManager:
         )
         self._conn.register("df_incr_batch", batch)
         try:
-            self._conn.execute(
-                f"""
-                INSERT OR REPLACE INTO {self._table}
-                SELECT * FROM df_incr_batch
-                """
-            )
+            with self._write_lock:
+                self._conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO {self._table}
+                    SELECT * FROM df_incr_batch
+                    """
+                )
         finally:
             self._conn.unregister("df_incr_batch")
 
@@ -445,7 +450,8 @@ class DuckDBManager:
         n_before = int(row[0] or 0)
         if n_before == 0:
             return 0
-        self._conn.execute(
+        with self._write_lock:
+            self._conn.execute(
             f"""
             WITH w AS (
               SELECT
