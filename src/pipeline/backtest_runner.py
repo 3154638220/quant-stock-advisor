@@ -754,7 +754,11 @@ def _rebalance_dates(all_dates: Iterable[pd.Timestamp], rule: str) -> list[pd.Ti
     if not dates:
         return []
     arr = np.array(dates, dtype="datetime64[ns]")
-    freq = "ME" if str(rule).upper() == "M" else rule
+    freq = rule
+    if str(rule).upper() == "M":
+        freq = "ME"
+    elif str(rule).upper() == "BM":
+        freq = "2BME"
     anchors = pd.date_range(dates[0], dates[-1], freq=freq)
     out: list[pd.Timestamp] = []
     for a in anchors:

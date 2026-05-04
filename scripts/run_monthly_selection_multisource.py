@@ -198,6 +198,12 @@ def parse_args() -> argparse.Namespace:
         default="industry_breadth,fund_flow,fundamental,shareholder",
         help="要启用的增量家族，逗号分隔。price_volume_only 始终作为 baseline。",
     )
+    # H2: 换仓频率参数化
+    p.add_argument(
+        "--rebalance-rule", type=str, default="",
+        choices=["", "W", "M", "BM", "Q", "W-FRI"],
+        help="换仓频率（空字符串=从 dataset 自动检测，默认 M）",
+    )
     return p.parse_args()
 
 
@@ -1141,6 +1147,13 @@ def main() -> int:
     best_after_cost = best_row.get("topk_excess_after_cost_mean")
     best_after_cost_float = float(best_after_cost) if pd.notna(best_after_cost) else None
     feature_columns = tuple(dict.fromkeys(col for spec in specs for col in spec.feature_cols))
+    # H2: 换仓频率——CLI 显式指定优先，否则从 dataset 自动检测
+    if args.rebalance_rule:
+        rebalance_rule = args.rebalance_rule
+    elif not dataset.empty and "rebalance_rule" in dataset.columns:
+        rebalance_rule = str(dataset["rebalance_rule"].iloc[0]).strip().upper() or "M"
+    else:
+        rebalance_rule = "M"
     data_slice = DataSlice(
         dataset_name="monthly_selection_m5_multisource",
         source_tables=(_project_relative(dataset_path), _project_relative(db_path)),
@@ -1150,7 +1163,7 @@ def main() -> int:
         signal_date_col="signal_date",
         symbol_col="symbol",
         candidate_pool_version=",".join(pools),
-        rebalance_rule="M",
+        rebalance_rule=rebalance_rule,
         execution_mode="tplus1_open",
         label_return_mode="open_to_open",
         feature_set_id="m5_" + "_".join(["price_volume_only", *enabled_families]),

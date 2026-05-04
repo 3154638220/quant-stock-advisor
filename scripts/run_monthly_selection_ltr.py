@@ -175,6 +175,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="P0-1: 对基本面因子使用行业内 z-score 中性化（生成 _ind_z 列替代 _z）。",
     )
+    # H2: 换仓频率参数化
+    p.add_argument(
+        "--rebalance-rule", type=str, default="",
+        choices=["", "W", "M", "BM", "Q", "W-FRI"],
+        help="换仓频率（空字符串=从 dataset 自动检测，默认 M）",
+    )
     return p.parse_args()
 
 
@@ -877,6 +883,13 @@ def main() -> int:
     rank_ic_observations = int(pd.to_numeric(rank_ic.get("rank_ic"), errors="coerce").notna().sum()) if not rank_ic.empty else 0
     best_after_cost = best_row.get("topk_excess_after_cost_mean")
     best_after_cost_float = float(best_after_cost) if pd.notna(best_after_cost) else None
+    # H2: 换仓频率——CLI 显式指定优先，否则从 dataset 自动检测
+    if args.rebalance_rule:
+        rebalance_rule = args.rebalance_rule
+    elif not dataset.empty and "rebalance_rule" in dataset.columns:
+        rebalance_rule = str(dataset["rebalance_rule"].iloc[0]).strip().upper() or "M"
+    else:
+        rebalance_rule = "M"
     data_slice = DataSlice(
         dataset_name="monthly_selection_m6_ltr",
         source_tables=(_project_relative(dataset_path), _project_relative(db_path)),
@@ -886,7 +899,7 @@ def main() -> int:
         signal_date_col="signal_date",
         symbol_col="symbol",
         candidate_pool_version=",".join(pools),
-        rebalance_rule="M",
+        rebalance_rule=rebalance_rule,
         execution_mode="tplus1_open",
         label_return_mode="open_to_open",
         feature_set_id=spec.name,

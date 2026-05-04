@@ -165,6 +165,12 @@ def parse_args() -> argparse.Namespace:
         help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
     )
     p.add_argument("--skip-xgboost", action="store_true", help="跳过 XGBoost baseline，便于快速烟雾测试")
+    # H2: 换仓频率参数化
+    p.add_argument(
+        "--rebalance-rule", type=str, default="M",
+        choices=["W", "M", "BM", "Q", "W-FRI"],
+        help="换仓频率：W=周 M=月 BM=双月 Q=季 (默认: M)",
+    )
     return p.parse_args()
 
 
@@ -1277,7 +1283,7 @@ def main() -> int:
         signal_date_col="signal_date",
         symbol_col="symbol",
         candidate_pool_version=",".join(pools),
-        rebalance_rule="M",
+        rebalance_rule=args.rebalance_rule,
         execution_mode="tplus1_open",
         label_return_mode="open_to_open",
         feature_set_id="price_volume_only_v1",

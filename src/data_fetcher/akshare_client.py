@@ -722,3 +722,13 @@ def fetch_many_daily(
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def normalize_max_symbols(value: int | None) -> int | None:
+    """CLI compatibility: non-positive max-symbols means full universe.
+
+    Migrated from scripts/fetch_only.py (A3: tests should import from src/).
+    """
+    if value is None:
+        return None
+    return value if value > 0 else None

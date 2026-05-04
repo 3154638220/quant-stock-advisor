@@ -301,3 +301,40 @@ class ShareholderClient:
                 sql += f" AND symbol IN ({placeholders})"
                 params.extend(sym_list)
         return self._conn.execute(sql, params).df()
+
+
+# ── 季度末日期工具（A3: 从 scripts/fetch_shareholder.py 迁入 src/） ──
+
+
+def _latest_completed_quarter_end(asof: str | pd.Timestamp | None = None) -> pd.Timestamp:
+    """返回最近一个已完成的季度末日。"""
+    latest = pd.Timestamp.today().normalize() if asof is None else pd.Timestamp(asof).normalize()
+    quarter_end = latest.to_period("Q").end_time.normalize()
+    if latest < quarter_end:
+        quarter_end = (quarter_end - pd.offsets.QuarterEnd()).normalize()
+    return quarter_end
+
+
+def _recent_quarter_ends(latest_n: int) -> list[str]:
+    """返回最近 N 个季度末日列表（YYYYMMDD 字符串）。"""
+    quarter_end = _latest_completed_quarter_end()
+    dates: list[str] = []
+    cur = quarter_end
+    for _ in range(max(1, int(latest_n))):
+        dates.append(cur.strftime("%Y%m%d"))
+        cur = (cur - pd.offsets.QuarterEnd()).normalize()
+    return dates
+
+
+def _quarter_ends_in_range(start_date: str, end_date: str = "") -> list[str]:
+    """返回指定日期范围内的所有季度末日列表（YYYYMMDD 字符串）。"""
+    start = pd.Timestamp(start_date).normalize()
+    end = _latest_completed_quarter_end(end_date or None)
+    if start > end:
+        return []
+    cur = start.to_period("Q").end_time.normalize()
+    dates: list[str] = []
+    while cur <= end:
+        dates.append(cur.strftime("%Y%m%d"))
+        cur = (cur + pd.offsets.QuarterEnd()).normalize()
+    return dates

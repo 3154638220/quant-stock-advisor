@@ -4,15 +4,25 @@ import sys
 
 import pandas as pd
 
-from scripts.fetch_fund_flow import parse_args as parse_fund_flow_args
-from scripts.fetch_only import normalize_max_symbols
-from scripts.fetch_index_benchmarks import IndexFetchSpec, parse_index_specs, standardize_index_daily
-from scripts.fetch_shareholder import (
+# A3: 迁移到 src/ 导入（消除 tests → scripts 硬依赖）
+from src.data_fetcher.akshare_client import normalize_max_symbols
+from src.data_fetcher.index_benchmarks import IndexFetchSpec, parse_index_specs, standardize_index_daily
+from src.data_fetcher.shareholder_client import (
     _latest_completed_quarter_end,
     _quarter_ends_in_range,
     _recent_quarter_ends,
-    parse_args as parse_shareholder_args,
 )
+
+# parse_args 函数仍在 scripts/ 中（薄层 CLI），测试它们需要 scripts 导入
+# （这些是 CLI 参数解析测试，属于合理依赖）
+try:
+    from scripts.fetch_fund_flow import parse_args as parse_fund_flow_args
+except ImportError:
+    parse_fund_flow_args = None  # type: ignore[assignment]
+try:
+    from scripts.fetch_shareholder import parse_args as parse_shareholder_args
+except ImportError:
+    parse_shareholder_args = None  # type: ignore[assignment]
 
 
 def test_fetch_fund_flow_parse_args_accepts_limits(monkeypatch):

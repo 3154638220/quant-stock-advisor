@@ -21,36 +21,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _latest_completed_quarter_end(asof: str | pd.Timestamp | None = None) -> pd.Timestamp:
-    latest = pd.Timestamp.today().normalize() if asof is None else pd.Timestamp(asof).normalize()
-    quarter_end = latest.to_period("Q").end_time.normalize()
-    if latest < quarter_end:
-        quarter_end = (quarter_end - pd.offsets.QuarterEnd()).normalize()
-    return quarter_end
-
-
-def _recent_quarter_ends(latest_n: int) -> list[str]:
-    quarter_end = _latest_completed_quarter_end()
-    dates: list[str] = []
-    cur = quarter_end
-    for _ in range(max(1, int(latest_n))):
-        dates.append(cur.strftime("%Y%m%d"))
-        cur = (cur - pd.offsets.QuarterEnd()).normalize()
-    return dates
-
-
-def _quarter_ends_in_range(start_date: str, end_date: str = "") -> list[str]:
-    start = pd.Timestamp(start_date).normalize()
-    end = _latest_completed_quarter_end(end_date or None)
-    if start > end:
-        return []
-
-    cur = start.to_period("Q").end_time.normalize()
-    dates: list[str] = []
-    while cur <= end:
-        dates.append(cur.strftime("%Y%m%d"))
-        cur = (cur + pd.offsets.QuarterEnd()).normalize()
-    return dates
+# （A3 迁移：季度末日期工具已迁入 src/data_fetcher/shareholder_client.py，
+#  此处从 src/ 重新导出以保持向后兼容。）
+from src.data_fetcher.shareholder_client import (  # noqa: F401
+    _latest_completed_quarter_end,
+    _quarter_ends_in_range,
+    _recent_quarter_ends,
+)
 
 
 def parse_args() -> argparse.Namespace:

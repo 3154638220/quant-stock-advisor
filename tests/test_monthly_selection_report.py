@@ -6,18 +6,22 @@ import sys
 import pandas as pd
 import pytest
 
-import scripts.run_monthly_selection_report as m7_report
-from scripts.run_monthly_selection_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
-from scripts.run_monthly_selection_multisource import attach_industry_breadth_features
-from scripts.run_monthly_selection_report import (
+# A3: 优先从 src/ 导入已迁移函数；未迁移函数仍从 scripts/ 导入（E1 待处理）
+import scripts.run_monthly_selection_report as m7_report  # CLI main() 仍在 scripts
+from src.pipeline.monthly_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
+from src.pipeline.monthly_multisource import attach_industry_breadth_features
+from src.reporting.monthly_report import (
     M7RunConfig,
     apply_m9_feature_coverage_policy,
-    attach_stock_names,
     build_full_fit_report_scores,
-    build_recommendation_table,
     select_report_signal_date,
-    summarize_m9_integrity,
     summarize_report_feature_coverage,
+)
+# E1 待迁移：以下函数仍在 scripts/run_monthly_selection_report.py 中
+from scripts.run_monthly_selection_report import (  # noqa: E402
+    attach_stock_names,
+    build_recommendation_table,
+    summarize_m9_integrity,
 )
 from src.research.contracts import validate_manifest
 

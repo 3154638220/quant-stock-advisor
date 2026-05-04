@@ -150,7 +150,11 @@ def select_rebalance_dates(
     if not dates:
         return pd.DataFrame(columns=["trade_date"])
     arr = np.array(dates, dtype="datetime64[ns]")
-    freq = "ME" if str(rebalance_rule).upper() == "M" else rebalance_rule
+    freq = rule
+    if str(rebalance_rule).upper() == "M":
+        freq = "ME"
+    elif str(rebalance_rule).upper() == "BM":
+        freq = "2BME"
     anchors = pd.date_range(dates[0], dates[-1], freq=freq)
     out: list[pd.Timestamp] = []
     for a in anchors:

@@ -77,11 +77,9 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def normalize_max_symbols(value: int | None) -> int | None:
-    """CLI compatibility: non-positive max-symbols means full universe."""
-    if value is None:
-        return None
-    return value if value > 0 else None
+# （A3 迁移：normalize_max_symbols 已迁入 src/data_fetcher/akshare_client.py，
+#  此处从 src/ 重新导出以保持向后兼容。）
+from src.data_fetcher.akshare_client import normalize_max_symbols  # noqa: F401
 
 
 def main() -> int:

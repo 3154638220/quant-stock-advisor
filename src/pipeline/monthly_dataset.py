@@ -58,6 +58,8 @@ class MonthlySelectionConfig:
     turnover_high_pct: float = 0.98
     price_position_high_pct: float = 0.95
     price_position_lookback: int = 250
+    # H2: 换仓频率参数化，支持 "W" (周) / "M" (月) / "BM" (双月) / "Q" (季)
+    rebalance_rule: str = "M"
 
 
 # ── 研究配置 ID ──────────────────────────────────────────────────────────
@@ -162,7 +164,13 @@ def select_month_end_signal_dates(
     *,
     start: str | None = None,
     end: str | None = None,
+    rebalance_rule: str = "M",
 ) -> list[pd.Timestamp]:
+    """选择信号日：按换仓频率取每个周期内最后交易日。
+
+    H2: 参数化 rebalance_rule，支持 "W" / "M" / "BM" / "Q" 等 pandas 频率别名。
+    "M" 内部映射为 "ME"（月最后交易日）。
+    """
     d = pd.Series(pd.to_datetime(pd.Series(dates), errors="coerce")).dropna().dt.normalize()
     if start:
         d = d[d >= pd.Timestamp(start).normalize()]
@@ -170,10 +178,41 @@ def select_month_end_signal_dates(
         d = d[d <= pd.Timestamp(end).normalize()]
     if d.empty:
         return []
+    rule = str(rebalance_rule).upper().strip()
+    freq = rule
+    period_key = rule
+    if rule == "M":
+        freq = "ME"
+        period_key = "M"
+    elif rule == "BM":
+        freq = "2BME"  # 双月（每 2 个生意月末）
+        period_key = "BM"
+    elif rule in ("W",):
+        freq = "W"  # pd.Grouper 会自动处理，周锚点为周日
+        period_key = "W"
     unique = pd.DataFrame({"trade_date": sorted(d.unique())})
-    unique["period"] = unique["trade_date"].dt.to_period("M")
+    try:
+        unique["period"] = unique["trade_date"].dt.to_period(period_key)
+    except Exception:
+        # 非标准频率：使用 pd.Grouper 按频率分组
+        out = (
+            unique.set_index("trade_date")
+            .groupby(pd.Grouper(freq=freq))
+            .max()
+            .dropna()
+            .index.tolist()
+        )
+        return [pd.Timestamp(x).normalize() for x in out]
     out = unique.groupby("period", sort=True)["trade_date"].max().tolist()
     return [pd.Timestamp(x).normalize() for x in out]
+
+
+def read_rebalance_rule_from_dataset(dataset: pd.DataFrame, default: str = "M") -> str:
+    """H2: 从 dataset 读取 rebalance_rule，缺失时回退到默认值。"""
+    if dataset.empty or "rebalance_rule" not in dataset.columns:
+        return default
+    rule = str(dataset["rebalance_rule"].iloc[0]).strip().upper()
+    return rule if rule else default
 
 
 # ── 特征工程 ─────────────────────────────────────────────────────────────
@@ -534,7 +573,8 @@ def build_monthly_selection_dataset(
     cfg = cfg or MonthlySelectionConfig()
     daily_features = attach_signal_features(daily, cfg)
     signal_dates = select_month_end_signal_dates(
-        daily_features["trade_date"], start=start_date, end=end_date
+        daily_features["trade_date"], start=start_date, end=end_date,
+        rebalance_rule=cfg.rebalance_rule,
     )
     if not signal_dates:
         return pd.DataFrame()
@@ -563,7 +603,7 @@ def build_monthly_selection_dataset(
     base = attach_feature_transforms(base)
     out = build_candidate_pool_panel(base, cfg)
     out["dataset_version"] = "monthly_selection_features_v1"
-    out["rebalance_rule"] = "M"
+    out["rebalance_rule"] = cfg.rebalance_rule
     out["execution_mode"] = "tplus1_open"
     out["label_return_mode"] = "open_to_open"
     out["sell_timing"] = "holding_month_last_trading_day_open"

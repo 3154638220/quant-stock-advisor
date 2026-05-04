@@ -82,6 +82,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-out", type=str, default="data/cache/monthly_selection_features.parquet")
     p.add_argument("--results-dir", type=str, default="")
     p.add_argument("--dry-run", action="store_true", help="只打印身份与输入范围，不写产物")
+    # H2: 换仓频率参数化
+    p.add_argument(
+        "--rebalance-rule", type=str, default="M",
+        choices=["W", "M", "BM", "Q", "W-FRI"],
+        help="换仓频率：W=周 M=月 BM=双月 Q=季 (默认: M)",
+    )
     return p.parse_args()
 
 
@@ -231,6 +237,7 @@ def main() -> int:
         min_history_days=int(args.min_history_days),
         min_amount_20d=float(args.min_amount_20d),
         limit_move_max=int(args.limit_move_max),
+        rebalance_rule=args.rebalance_rule,
     )
     with duckdb.connect(db_path, read_only=True) as con:
         daily = read_daily_from_duckdb(
