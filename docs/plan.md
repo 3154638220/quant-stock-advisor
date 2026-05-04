@@ -1,13 +1,13 @@
 # 量化月度选股主计划
 
 **文档角色**：当前唯一主计划（canonical）  
-**更新时间**：`2026-05-03`  
+**更新时间**：`2026-05-04`  
 **当前阶段**：M10，成本与执行压力（进行中）  
 **研究终点**：每月输出可解释、可回测、PIT-safe、可执行约束清楚的 Top-K 股票推荐名单  
 **生产状态**：无研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
 **当前结论**：M8 行业约束自然化已完成，soft industry risk-budget 在 Top20/Top30 上产生 3 个通过 M8 natural gate 的研究候选；M10 成本敏感性框架已完成（10/30/50 bps 三档），容量分析与涨停/VWAP 压力测试框架已就位；hard-cap baseline 仍是收益上限更强的 stress 对照；披露日历填充（P2-3）与 next_trade_date 边界校验（P2-4）已完成；P0 紧急修复全部完成；仍不能 promotion，待 M10 压力测试结果确认 after-cost excess 在 30bps 下 > 0  
 **归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留历史执行记录，不再承担主计划职责  
-**问题追踪**：`docs/plan-05-03.md`（P0-P3 完整问题清单与修改方案）
+**问题追踪**：`docs/plan-05-03.md`（P0-P3 完整问题清单）；`docs/plan-05-04.md`（工程质量审计，22/22 项全部完成 ✅）
 
 ---
 

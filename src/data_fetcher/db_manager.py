@@ -14,7 +14,8 @@ from typing import Any, Dict, List, NamedTuple, Optional, Union
 import duckdb
 import pandas as pd
 
-from ..settings import load_config, project_root
+from src.settings import load_config, project_root
+
 from .akshare_client import fetch_a_share_daily, fill_derived_daily_fields
 from .data_quality import QualityConfig, QualityReport, run_quality_checks, validate_daily_frame
 

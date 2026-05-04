@@ -21,11 +21,11 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from src.backtest.engine import build_open_to_open_returns as _build_open_to_open_returns
 from src.features.fund_flow_factors import attach_fund_flow
 from src.features.fundamental_factors import pit_safe_fundamental_rows, preprocess_fundamental_cross_section
 from src.features.ic_monitor import ICMonitor
 from src.features.shareholder_factors import attach_shareholder_factors
-from src.backtest.engine import build_open_to_open_returns as _build_open_to_open_returns
 from src.market.regime import (
     MARKET_EW_PROXY,
     classify_regime,

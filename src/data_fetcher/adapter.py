@@ -21,7 +21,7 @@ from typing import Iterable, Optional, Union
 
 import pandas as pd
 
-from ..settings import load_config, project_root
+from src.settings import load_config
 
 
 @dataclass(frozen=True)

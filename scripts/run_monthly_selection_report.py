@@ -14,8 +14,6 @@ import json
 import shlex
 import sys
 import time
-import warnings
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +25,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
+from scripts.run_monthly_selection_ltr import (
+    build_m6_feature_spec,
+    summarize_ltr_feature_importance,
+)
+from scripts.run_monthly_selection_multisource import M5RunConfig, attach_enabled_families
 from src.pipeline.monthly_baselines import (
     load_baseline_dataset,
     model_n_jobs_token,
@@ -36,16 +39,8 @@ from src.pipeline.monthly_baselines import (
 )
 from src.reporting.markdown_report import format_markdown_table, json_sanitize, project_relative
 from src.research.gates import (
-    LABEL_COL,
     POOL_RULES,
 )
-from scripts.run_monthly_selection_ltr import (
-    _tag_importance,
-    _train_predict_xgboost_ranker,
-    build_m6_feature_spec,
-    summarize_ltr_feature_importance,
-)
-from scripts.run_monthly_selection_multisource import M5RunConfig, _cap_fit_rows, attach_enabled_families
 
 # 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
 _format_markdown_table = format_markdown_table
@@ -63,7 +58,6 @@ from src.models.research_contract import (
     utc_now_iso,
     write_research_manifest,
 )
-from src.settings import load_config, resolve_config_path
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 以下核心报告函数已提取到 src.reporting.monthly_report：
@@ -79,6 +73,7 @@ from src.reporting.monthly_report import (  # noqa: F401
     select_report_signal_date,
     summarize_report_feature_coverage,
 )
+from src.settings import load_config, resolve_config_path
 
 
 def parse_args() -> argparse.Namespace:

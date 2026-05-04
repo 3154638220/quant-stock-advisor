@@ -34,8 +34,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - 取决于运行环境是否安装 duckdb
     duckdb = None  # type: ignore[assignment]
 
+from src.settings import load_config, project_root
+
 from .akshare_resilience import call_with_timeout, install_akshare_requests_resilience
-from ..settings import load_config, project_root
 
 _LOG = logging.getLogger(__name__)
 

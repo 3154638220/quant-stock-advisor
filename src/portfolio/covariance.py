@@ -349,7 +349,6 @@ def mean_cov_returns_from_wide(
         return mu.astype(np.float64), cov.astype(np.float64)
 
     mu = np.mean(R, axis=1)
-    T = R.shape[1]
     method = str(shrinkage).lower()
     if method in ("auto", "ledoit_wolf", "sample", "ewma", "factor", "industry_factor"):
         cov = estimate_covariance(

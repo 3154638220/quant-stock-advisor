@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-import numpy as np
 import pandas as pd
 
 from .neutralize import neutralize_size_industry_regression

@@ -9,45 +9,71 @@ import time
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from scripts.research_identity import make_research_identity, slugify_token
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.pipeline.monthly_baselines import (
-    build_quantile_spread, build_rank_ic, build_realized_market_states,
-    load_baseline_dataset, summarize_candidate_pool_reject_reason,
-    summarize_candidate_pool_width, summarize_industry_exposure,
-    summarize_regime_slice, summarize_year_slice, valid_pool_frame,
+    build_quantile_spread,
+    build_rank_ic,
+    build_realized_market_states,
+    load_baseline_dataset,
+    summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width,
+    summarize_industry_exposure,
+    summarize_regime_slice,
+    summarize_year_slice,
+    valid_pool_frame,
 )
-from src.reporting.markdown_report import format_markdown_table
-from src.research.gates import (
-    EXCESS_COL, INDUSTRY_EXCESS_COL, LABEL_COL, MARKET_COL, TOP20_COL,
+from src.pipeline.monthly_concentration import (
+    M8RunConfig,
+    attach_trade_dates_to_scores,
+    build_constrained_leaderboard,
+    build_constrained_monthly,
+    build_gate_table,
+    build_lagged_state_frame,
+    build_regime_policy_scores,
+    resolve_topk_and_cap_grid,
+    serialize_cap_grid,
+    summarize_industry_concentration,
 )
-
-# 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
-_format_markdown_table = format_markdown_table
 from src.pipeline.monthly_ltr import (
-    M6RunConfig, build_m6_feature_spec, build_walk_forward_ltr_scores,
+    M6RunConfig,
+    build_m6_feature_spec,
+    build_walk_forward_ltr_scores,
     summarize_ltr_feature_importance,
 )
 from src.pipeline.monthly_multisource import (
-    M5RunConfig, attach_enabled_families, build_all_m5_scores, build_feature_specs,
-    summarize_feature_coverage_by_spec, summarize_feature_importance as summarize_m5_feature_importance,
+    M5RunConfig,
+    attach_enabled_families,
+    build_all_m5_scores,
+    build_feature_specs,
+    summarize_feature_coverage_by_spec,
 )
-from src.models.experiment import append_experiment_result
-from src.models.research_contract import (
-    ArtifactRef, DataSlice, ExperimentResult, build_result_id, config_snapshot,
-    utc_now_iso, write_research_manifest,
+from src.pipeline.monthly_multisource import (
+    summarize_feature_importance as summarize_m5_feature_importance,
+)
+from src.reporting.markdown_report import format_markdown_table
+from src.research.gates import (
+    EXCESS_COL,
+    INDUSTRY_EXCESS_COL,
+    LABEL_COL,
+    MARKET_COL,
+    TOP20_COL,
 )
 from src.settings import config_path_candidates, load_config, resolve_config_path
-from src.pipeline.monthly_concentration import (
-    M8RunConfig, TOPK_PRESET_DEFAULT, TOPK_PRESETS,
-    attach_trade_dates_to_scores, build_constrained_monthly,
-    build_constrained_leaderboard, build_gate_table,
-    build_lagged_state_frame, build_regime_policy_scores,
-    resolve_topk_and_cap_grid, serialize_cap_grid,
-    summarize_industry_concentration,
-)
+
+# 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
+_format_markdown_table = format_markdown_table
 
 
 def resolve_project_path(raw: str | Path, root: Path) -> Path:

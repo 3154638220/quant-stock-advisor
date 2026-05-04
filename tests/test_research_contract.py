@@ -3,10 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from src.cli.research_identity import make_research_identity
-from src.research.contracts import validate_manifest
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
     ArtifactRef,
@@ -15,6 +12,7 @@ from src.models.research_contract import (
     build_result_id,
     write_research_manifest,
 )
+from src.research.contracts import validate_manifest
 
 
 def _slice(**overrides) -> DataSlice:

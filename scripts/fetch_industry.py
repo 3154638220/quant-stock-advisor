@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 
-from scripts.build_industry_map import fetch_industry_mapping, main as build_main
+from scripts.build_industry_map import main as build_main
 
 
 def parse_args() -> argparse.Namespace:

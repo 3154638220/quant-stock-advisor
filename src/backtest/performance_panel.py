@@ -137,8 +137,6 @@ def deflated_sharpe_ratio(
     ku = float(kurtosis)
 
     # Expected maximum Sharpe from T independent trials under null
-    # Using extreme value theory approximation
-    gamma = 0.5772156649015329  # Euler-Mascheroni constant
     z_score = (1.0 - np.exp(-1.0)) * norm.ppf(1.0 - 1.0 / T)
     if not np.isfinite(z_score):
         z_score = norm.ppf(1.0 - 1.0 / T)
@@ -146,9 +144,6 @@ def deflated_sharpe_ratio(
     # Non-normality correction: variance of Sharpe estimator
     var_sharpe = 1.0 + 0.5 * sr**2 - sk * sr + (ku - 3.0) / 4.0 * sr**2
     se_sharpe = np.sqrt(max(var_sharpe, 1e-8) / N)
-
-    # Expected maximum Sharpe
-    e_max_sr = se_sharpe * z_score
 
     # DSR: P(max SR >= observed SR) under null
     # = 1 - ((P(SR < observed))^T)
@@ -221,7 +216,8 @@ def compute_performance_panel(
         # 计算收益分布的偏度和峰度
         r_valid = r_fin[np.isfinite(r_fin)]
         if r_valid.size >= 3:
-            from scipy.stats import skew, kurtosis as scipy_kurtosis
+            from scipy.stats import kurtosis as scipy_kurtosis
+            from scipy.stats import skew
             try:
                 sk = float(skew(r_valid))
                 ku = float(scipy_kurtosis(r_valid, fisher=False))  # Pearson 峰度

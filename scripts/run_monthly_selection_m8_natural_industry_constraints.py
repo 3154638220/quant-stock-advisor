@@ -28,31 +28,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
-from src.pipeline.monthly_baselines import (
-    _rank_pct_score,
-    build_quantile_spread,
-    build_rank_ic,
-    build_realized_market_states,
-    load_baseline_dataset,
-    model_n_jobs_token,
-    normalize_model_n_jobs,
-    summarize_candidate_pool_reject_reason,
-    summarize_candidate_pool_width,
-    summarize_industry_exposure,
-    summarize_regime_slice,
-    summarize_year_slice,
-    valid_pool_frame,
-)
-from src.reporting.markdown_report import format_markdown_table, json_sanitize
-from src.research.gates import (
-    EXCESS_COL,
-    INDUSTRY_EXCESS_COL,
-    LABEL_COL,
-    MARKET_COL,
-    POOL_RULES,
-    TOP20_COL,
-)
-from src.pipeline.monthly_concentration import summarize_industry_concentration
 from scripts.run_monthly_selection_multisource import (
     M5RunConfig,
     attach_enabled_families,
@@ -72,6 +47,31 @@ from src.models.research_contract import (
     config_snapshot,
     utc_now_iso,
     write_research_manifest,
+)
+from src.pipeline.monthly_baselines import (
+    _rank_pct_score,
+    build_quantile_spread,
+    build_rank_ic,
+    build_realized_market_states,
+    load_baseline_dataset,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
+    summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width,
+    summarize_industry_exposure,
+    summarize_regime_slice,
+    summarize_year_slice,
+    valid_pool_frame,
+)
+from src.pipeline.monthly_concentration import summarize_industry_concentration
+from src.reporting.markdown_report import format_markdown_table, json_sanitize
+from src.research.gates import (
+    EXCESS_COL,
+    INDUSTRY_EXCESS_COL,
+    LABEL_COL,
+    MARKET_COL,
+    POOL_RULES,
+    TOP20_COL,
 )
 from src.settings import config_path_candidates, load_config, resolve_config_path
 

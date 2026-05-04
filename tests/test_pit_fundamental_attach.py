@@ -4,11 +4,11 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-import pytest
+
+from src.features.fundamental_factors import pit_safe_fundamental_rows
 
 # A3: 核心函数已迁入 src/，消除对已删除脚本的依赖
 from src.pipeline.backtest_runner import _attach_pit_fundamentals
-from src.features.fundamental_factors import pit_safe_fundamental_rows
 
 # _attach_pit_roe_ttm 随 scripts/run_p2_regime_aware_dual_sleeve_v1.py 删除而退役；
 # 其功能已被 _attach_pit_fundamentals（通用 PIT 基本面附着）覆盖。

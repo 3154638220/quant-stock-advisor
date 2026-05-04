@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.engine import build_open_to_open_returns
+from src.pipeline.monthly_dataset import select_month_end_signal_dates
 
 
 def _slugify_token(value: Any) -> str:
@@ -141,9 +142,6 @@ def _daily_asset_return_matrix(
         raise ValueError(f"当前仅支持 tplus1_open/close_to_close，收到: {execution_mode}")
     out.index = pd.to_datetime(out.index, errors="coerce").normalize()
     return out.sort_index().astype(np.float64)
-
-
-from src.pipeline.monthly_dataset import select_month_end_signal_dates
 
 
 def select_rebalance_dates(

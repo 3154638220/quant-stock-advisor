@@ -357,7 +357,6 @@ def fetch_sw_official_industry_mapping(
             continue
         level1 = info.get("industry_level1", "")
         level2 = info.get("industry_level2", "") or level1
-        level3 = info.get("industry_level3", "") or level2
         if not level1:
             missing_codes.add(code)
             continue

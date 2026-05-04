@@ -12,8 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 from src.reporting.m8_indcap3 import (
-    MODEL_NAME, CANDIDATE_POOL, TOP_K,
-    load_stock_names, generate_monthly_reports,
+    CANDIDATE_POOL,
+    MODEL_NAME,
+    TOP_K,
+    generate_monthly_reports,
+    load_stock_names,
 )
 
 DEFAULT_HOLDINGS_CSV = ROOT / "data" / "results" / "monthly_selection_m8_concentration_regime_pitfix_2026_05_03_2026_05_03_topk_holdings.csv"

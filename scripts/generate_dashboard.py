@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -45,8 +44,6 @@ def _build_dashboard_html(
     import pandas as pd
     import plotly.graph_objects as go
     import plotly.io as pio
-    from plotly.subplots import make_subplots
-
     has_data = False
     fig_components: list[str] = []
 
@@ -162,8 +159,8 @@ def _build_dashboard_html(
                 name="最大行业集中度",
             ))
             # Color points by pass/fail
-            passed = sub[sub["concentration_pass"] == True]
-            failed = sub[sub["concentration_pass"] == False]
+            passed = sub[sub["concentration_pass"]]
+            failed = sub[~sub["concentration_pass"]]
             if not passed.empty:
                 fig4.add_trace(go.Scatter(
                     x=passed["signal_date"], y=passed["max_industry_share"],

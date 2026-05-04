@@ -46,7 +46,7 @@ def generate_monthly_reports(
     print(f"[m8-report] 策略 {model} + {pool} + Top{top_k}: {len(selected)} 行")
 
     if selected.empty:
-        print(f"[ERROR] 未找到策略数据")
+        print("[ERROR] 未找到策略数据")
         return
 
     selected["symbol_norm"] = (
@@ -81,7 +81,7 @@ def generate_monthly_reports(
         lines.append(f"- 卖出日：`{sell_date}`" if sell_date else "")
         lines.append(f"- 候选池：`{pool}`")
         lines.append(f"- 选股模型：`{model}`")
-        lines.append(f"- 选股规则：`industry_names_cap`，同一级行业上限：`3`")
+        lines.append("- 选股规则：`industry_names_cap`，同一级行业上限：`3`")
         ew_str = f"{ew_return * 100:.2f}%" if np.isfinite(ew_return) else "N/A"
         lines.append(f"- Top20 等权当月收益：`{ew_str}`")
         lines.append("")

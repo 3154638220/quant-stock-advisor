@@ -10,7 +10,7 @@ VWAP 执行冲击对比和容量估算固化为可定期运行的报告模块。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -18,7 +18,6 @@ import pandas as pd
 
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.backtest.transaction_costs import TransactionCostParams
-
 
 # ── 成本敏感性网格 ──────────────────────────────────────────────────────────
 

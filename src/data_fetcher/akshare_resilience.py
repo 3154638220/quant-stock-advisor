@@ -20,7 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from ..settings import load_config, project_root
+from src.settings import load_config, project_root
 
 _LOG = logging.getLogger(__name__)
 _PATCH_LOCK = threading.Lock()

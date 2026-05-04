@@ -8,6 +8,13 @@ import pytest
 
 # A3: 优先从 src/ 导入已迁移函数；未迁移函数仍从 scripts/ 导入（E1 待处理）
 import scripts.run_monthly_selection_report as m7_report  # CLI main() 仍在 scripts
+
+# E1 待迁移：以下函数仍在 scripts/run_monthly_selection_report.py 中
+from scripts.run_monthly_selection_report import (  # noqa: E402
+    attach_stock_names,
+    build_recommendation_table,
+    summarize_m9_integrity,
+)
 from src.pipeline.monthly_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
 from src.pipeline.monthly_multisource import attach_industry_breadth_features
 from src.reporting.monthly_report import (
@@ -16,12 +23,6 @@ from src.reporting.monthly_report import (
     build_full_fit_report_scores,
     select_report_signal_date,
     summarize_report_feature_coverage,
-)
-# E1 待迁移：以下函数仍在 scripts/run_monthly_selection_report.py 中
-from scripts.run_monthly_selection_report import (  # noqa: E402
-    attach_stock_names,
-    build_recommendation_table,
-    summarize_m9_integrity,
 )
 from src.research.contracts import validate_manifest
 
@@ -351,6 +352,7 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
 def test_apply_industry_cap_reduces_concentration():
     """构造全属同一行业的打分 DataFrame，验证 cap 后单行业占比 ≤ 30%."""
     import numpy as np
+
     from src.reporting.monthly_report import apply_industry_cap
 
     ranked = pd.DataFrame({
@@ -369,6 +371,7 @@ def test_apply_industry_cap_reduces_concentration():
 def test_apply_industry_cap_mixed_industries():
     """验证多行业场景下行业上限贪心选取正确."""
     import numpy as np
+
     from src.reporting.monthly_report import apply_industry_cap
 
     ranked = pd.DataFrame({

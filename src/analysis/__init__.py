@@ -1,10 +1,3 @@
-from .rebalance_sensitivity import (
-    RULE_LABELS,
-    SUPPORTED_RULES,
-    RebalanceSensitivityResult,
-    analyze_rebalance_sensitivity,
-    sensitivity_summary_df,
-)
 from .capacity_report import (
     COST_LABELS,
     DEFAULT_COST_GRID,
@@ -18,6 +11,13 @@ from .capacity_report import (
     compare_execution_modes,
     estimate_capacity,
     run_cost_sensitivity,
+)
+from .rebalance_sensitivity import (
+    RULE_LABELS,
+    SUPPORTED_RULES,
+    RebalanceSensitivityResult,
+    analyze_rebalance_sensitivity,
+    sensitivity_summary_df,
 )
 
 __all__ = [

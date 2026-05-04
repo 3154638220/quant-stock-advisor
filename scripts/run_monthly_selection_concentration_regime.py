@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.pipeline.monthly_concentration import TOPK_PRESET_DEFAULT, TOPK_PRESETS
 from src.cli.monthly_concentration import run_monthly_concentration_regime
+from src.pipeline.monthly_concentration import TOPK_PRESET_DEFAULT, TOPK_PRESETS
 
 
 def parse_args() -> argparse.Namespace:

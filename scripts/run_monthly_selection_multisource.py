@@ -15,12 +15,9 @@ import shlex
 import sys
 import time
 import warnings
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import duckdb
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,10 +25,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
+from src.features.fundamental_factors import DEFAULT_FUNDAMENTAL_COLS
+from src.models.experiment import append_experiment_result
+from src.models.research_contract import (
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    config_snapshot,
+    utc_now_iso,
+    write_research_manifest,
+)
 from src.pipeline.monthly_baselines import (
     ML_FEATURE_COLS,
-    _train_predict_sklearn,
-    _train_predict_xgboost,
     build_leaderboard,
     build_monthly_long,
     build_quantile_spread,
@@ -55,17 +61,6 @@ from src.research.gates import (
     POOL_RULES,
     TOP20_COL,
 )
-from src.features.fundamental_factors import DEFAULT_FUNDAMENTAL_COLS, pit_safe_fundamental_rows
-from src.models.experiment import append_experiment_result
-from src.models.research_contract import (
-    ArtifactRef,
-    DataSlice,
-    ExperimentResult,
-    build_result_id,
-    config_snapshot,
-    utc_now_iso,
-    write_research_manifest,
-)
 from src.settings import config_path_candidates, load_config, resolve_config_path
 
 # 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
@@ -83,6 +78,7 @@ _json_sanitize = json_sanitize
 from src.pipeline.monthly_multisource import (  # noqa: F401
     FeatureSpec,
     M5RunConfig,
+    _cap_fit_rows,
     add_zscore_and_missing_flags,
     attach_enabled_families,
     attach_fund_flow_features,
@@ -95,7 +91,6 @@ from src.pipeline.monthly_multisource import (  # noqa: F401
     industry_neutral_zscore,
     summarize_feature_coverage_by_spec,
     summarize_feature_importance,
-    _cap_fit_rows,
 )
 
 # 特征列常量：从 src.pipeline.monthly_multisource 导入（单一权威来源）

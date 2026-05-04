@@ -25,7 +25,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     duckdb = None  # type: ignore[assignment]
 
-from ..settings import load_config, project_root
+from src.settings import load_config, project_root
 
 _LOG = logging.getLogger(__name__)
 

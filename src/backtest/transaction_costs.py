@@ -6,7 +6,7 @@ P2-1: 支持固定 bps 和平方根律（sqrt_adv）两种市场冲击模型。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
 import numpy as np

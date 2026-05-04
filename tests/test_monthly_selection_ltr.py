@@ -8,17 +8,17 @@ import pandas as pd
 import pytest
 
 import scripts.run_monthly_selection_ltr as ltr
-from src.pipeline.monthly_ltr import (
-    M6RunConfig,
-    build_ltr_relevance,
-    build_m6_feature_spec,
-    build_walk_forward_ltr_scores,
-)
 from src.pipeline.monthly_baselines import (
     build_leaderboard,
     build_monthly_long,
     build_quantile_spread,
     build_rank_ic,
+)
+from src.pipeline.monthly_ltr import (
+    M6RunConfig,
+    build_ltr_relevance,
+    build_m6_feature_spec,
+    build_walk_forward_ltr_scores,
 )
 from src.pipeline.monthly_multisource import attach_industry_breadth_features
 from src.research.contracts import validate_manifest
@@ -239,7 +239,7 @@ def test_industry_neutral_zscore_reduces_sector_bias():
     构造一个两行业样本：证券行业 asset_turnover 系统性偏高。
     验证中性化后同一行业内 z-score 均值为 0，跨行业可比。
     """
-    from src.pipeline.monthly_multisource import industry_neutral_zscore, FUNDAMENTAL_RAW_FEATURES
+    from src.pipeline.monthly_multisource import industry_neutral_zscore
 
     np.random.seed(42)
     n = 100

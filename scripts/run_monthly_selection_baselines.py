@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,12 +40,9 @@ from src.models.research_contract import (
     write_research_manifest,
 )
 from src.pipeline.monthly_baselines import (
-    BLEND_SPECS,
-    FEATURE_SPECS,
     ML_FEATURE_COLS,
     BaselineRunConfig,
     build_leaderboard,
-    build_market_benchmark_monthly,
     build_monthly_long,
     build_quantile_spread,
     build_rank_ic,

@@ -6,12 +6,12 @@ import sys
 import pandas as pd
 import pytest
 
+from src.cli.monthly_concentration import run_monthly_concentration_regime
 from src.pipeline.monthly_baselines import (
     build_quantile_spread,
     build_rank_ic,
     summarize_regime_slice,
 )
-from src.cli.monthly_concentration import run_monthly_concentration_regime
 from src.pipeline.monthly_concentration import (
     EXCESS_COL,
     INDUSTRY_EXCESS_COL,

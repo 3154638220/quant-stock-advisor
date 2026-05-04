@@ -8,8 +8,7 @@
 from __future__ import annotations
 
 import logging
-import warnings
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -164,8 +163,6 @@ def tune_xgboost_ranker(
     if len(folds) < 2:
         logger.warning("时序 CV 折数不足（%d），使用默认超参数", len(folds))
         return _default_ranker_params()
-
-    train_sorted = train.sort_values(["signal_date", "symbol"], kind="mergesort").reset_index(drop=True)
 
     def objective(trial: optuna.Trial) -> float:
         params = _suggest_params(trial, XGBOOST_RANKER_SEARCH_SPACE)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.settings import DEFAULT_CONFIG, _deep_merge, load_config, resolve_config_path
 
 

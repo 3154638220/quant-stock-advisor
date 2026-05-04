@@ -11,13 +11,11 @@ import pandas as pd
 import pytest
 
 from scripts.run_monthly_selection_m8_natural_industry_constraints import (
-    M8NaturalRunConfig,
     build_gate_table,
     copy_source_metric_for_optimizer,
     select_soft_industry_risk,
 )
 from src.pipeline.monthly_concentration import summarize_industry_concentration
-
 
 # ── mock 数据集：5 行业 × 10 只股票 × 3 个月 ──────────────────────────────
 

@@ -7,6 +7,12 @@ import duckdb
 import pandas as pd
 
 import scripts.run_monthly_selection_multisource as multisource
+from src.pipeline.monthly_baselines import (
+    build_leaderboard,
+    build_monthly_long,
+    build_quantile_spread,
+    build_rank_ic,
+)
 from src.pipeline.monthly_multisource import (
     M5RunConfig,
     attach_fundamental_features,
@@ -14,12 +20,6 @@ from src.pipeline.monthly_multisource import (
     build_feature_specs,
     build_incremental_delta,
     build_walk_forward_scores_for_spec,
-)
-from src.pipeline.monthly_baselines import (
-    build_leaderboard,
-    build_monthly_long,
-    build_quantile_spread,
-    build_rank_ic,
 )
 from src.research.contracts import validate_manifest
 

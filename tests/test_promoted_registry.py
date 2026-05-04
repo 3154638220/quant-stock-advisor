@@ -3,7 +3,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "configs" / "promoted" / "promoted_registry.json"
 ACTIVE_CONFIG_ID = "monthly_selection_u1_top20_m8_natural_soft_gamma0_20"

@@ -13,7 +13,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from ..settings import load_config, project_root
+from src.settings import load_config, project_root
 
 try:  # Schema-only workflows and tests should not require the live data client.
     import akshare as ak

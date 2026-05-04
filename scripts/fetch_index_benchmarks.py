@@ -26,7 +26,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_fetcher.index_benchmarks import (
-    DEFAULT_INDEX_SPECS,
     IndexFetchSpec,
     parse_index_specs,
     standardize_index_daily,

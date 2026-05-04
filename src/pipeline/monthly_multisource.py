@@ -19,14 +19,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from src.pipeline.monthly_baselines import (
-    _train_predict_sklearn,
-    _train_predict_xgboost,
-    normalize_model_n_jobs,
-    valid_pool_frame,
-)
 from src.features.fundamental_factors import (
-    DEFAULT_FUNDAMENTAL_COLS,
     LOW_COVERAGE_THRESHOLD,
     filter_low_coverage_cols,
     pit_safe_fundamental_rows,
@@ -37,6 +30,11 @@ from src.features.registry import (  # D1: 统一因子注册中心（单一权�
     INDUSTRY_BREADTH_FEATURES_REGISTRY,
     PRICE_VOLUME_FEATURES_REGISTRY,
     SHAREHOLDER_FEATURES_REGISTRY,
+)
+from src.pipeline.monthly_baselines import (
+    _train_predict_sklearn,
+    _train_predict_xgboost,
+    valid_pool_frame,
 )
 
 # ── 特征列常量（D1: 迁移至 FeatureRegistry 单一来源）─────────────────────

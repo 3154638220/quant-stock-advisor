@@ -33,9 +33,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
 import duckdb
 import numpy as np
@@ -363,11 +363,6 @@ class OOSTracker:
         recent_realized = realized[-min_months:]
         ratio = float(np.mean(recent_realized) / pred_mean) if abs(pred_mean) > 1e-8 else 0.0
 
-        all_below = all(
-            abs(pred_mean) > 1e-8 and (r / pred_mean) < threshold_ratio
-            for r in recent_realized
-        )
-
         # 同时检查连续不达标月数
         consecutive = 0
         for r in reversed(realized):
@@ -420,10 +415,8 @@ class OOSTracker:
         -------
         DataFrame
         """
-        where = ""
         params: list = []
         if config_id:
-            where = "WHERE config_id = ?"
             params.append(str(config_id))
 
         df = self._conn.execute(

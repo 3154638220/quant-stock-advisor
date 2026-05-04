@@ -23,7 +23,6 @@ from src.pipeline.monthly_baselines import (
     INDUSTRY_EXCESS_COL,
     LABEL_COL,
     MARKET_COL,
-    TOP20_COL,
 )
 
 TOPK_PRESET_DEFAULT = "default"

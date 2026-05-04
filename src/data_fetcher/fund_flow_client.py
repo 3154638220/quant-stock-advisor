@@ -26,7 +26,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     duckdb = None  # type: ignore[assignment]
 
-from ..settings import load_config, project_root
+from src.settings import load_config, project_root
 
 _LOG = logging.getLogger(__name__)
 _H5_FUND_FLOW_HISTORY_URL = "https://emdatah5.eastmoney.com/dc/ZJLX/getDBHistoryData"

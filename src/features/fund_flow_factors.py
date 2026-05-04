@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import duckdb
 import numpy as np
 import pandas as pd
-import duckdb
 
 DEFAULT_FUND_FLOW_WINDOWS: tuple[int, ...] = (5, 10, 20)
 _FLOW_RAW_COLS: tuple[str, ...] = (
