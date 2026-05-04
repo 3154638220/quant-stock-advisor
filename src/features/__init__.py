@@ -13,6 +13,17 @@ from .neutralize import (
     neutralize_industry,
     neutralize_size_industry_regression,
 )
+from .registry import (
+    FACTOR_REGISTRY,
+    FactorSpec,
+    get_active_factors,
+    get_factor,
+    get_factor_cols,
+    get_families_by_factor_names,
+    register_factor,
+    reset_all_active,
+    unregister_factor,
+)
 from .standardize import factor_standardize_pipeline, winsorize_by_date, zscore_by_date
 
 try:
@@ -41,6 +52,15 @@ __all__ = [
     "DEFAULT_FUNDAMENTAL_COLS",
     "DEFAULT_FUND_FLOW_WINDOWS",
     "DEFAULT_SHAREHOLDER_AVAILABILITY_LAG_DAYS",
+    "FACTOR_REGISTRY",
+    "FactorSpec",
+    "get_active_factors",
+    "get_factor",
+    "get_factor_cols",
+    "get_families_by_factor_names",
+    "register_factor",
+    "reset_all_active",
+    "unregister_factor",
     "ic_summary",
     "information_coefficient",
     "long_table_from_wide",

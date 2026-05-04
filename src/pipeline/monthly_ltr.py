@@ -64,6 +64,8 @@ class M6RunConfig:
         # "xgboost_rank_pairwise",  # DEPRECATED P1-4: IC 不稳定，移入 ablation
         # "top20_calibrated",       # DEPRECATED P1-4: after-cost excess 为负
         # "ranker_top20_ensemble",  # DEPRECATED P1-4: 同上
+        # "lightgbm_rank_ndcg",     # H1: LightGBM Ranker (per docs/plan-05-04.md)
+        # "ranker_ensemble",        # H1: XGBoost+LightGBM 简单平均集成
         # P2-3: Stacking 集成（需 OOF 收集，默认关闭以保持向后兼容）
         # "stacking_ensemble",
     )
@@ -187,6 +189,171 @@ def _train_predict_xgboost_ranker(
         "importance": model.feature_importances_, "signed_weight": np.nan,
     })
     return out, importance
+
+
+def _train_predict_lightgbm_ranker(
+    *,
+    model_name: str,
+    objective: str,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    feature_cols: list[str],
+    random_seed: int,
+    relevance_grades: int,
+    model_n_jobs: int = 1,
+    **kwargs,
+) -> tuple[pd.DataFrame | None, pd.DataFrame]:
+    """H1: LightGBM Ranker 训练/预测（per docs/plan-05-04.md）。
+
+    作为 XGBoost Ranker 的替代模型，提供模型多样性。
+    使用 lambdarank 目标函数，与 XGBoost 的 rank:ndcg 对应。
+
+    Parameters 与 ``_train_predict_xgboost_ranker`` 一致。
+    """
+    try:
+        import lightgbm as lgb
+    except Exception as exc:
+        warnings.warn(f"跳过 LightGBM ranker，import 失败: {exc}", RuntimeWarning)
+        return None, pd.DataFrame()
+
+    train_sorted = _sort_for_query_groups(train)
+    test_sorted = _sort_for_query_groups(test)
+
+    y = build_ltr_relevance(train_sorted, grades=relevance_grades)
+    if y.nunique(dropna=True) < 2:
+        return None, pd.DataFrame()
+
+    group_sizes = _query_group_sizes(train_sorted)
+    group_test = _query_group_sizes(test_sorted)
+
+    X_train = _prepare_ranker_matrix(train_sorted, feature_cols)
+    X_test = _prepare_ranker_matrix(test_sorted, feature_cols)
+
+    n_jobs = normalize_model_n_jobs(model_n_jobs)
+
+    # LightGBM 默认参数（与 XGBoost 保持类似的保守配置）
+    params = {
+        "objective": objective,          # "lambdarank"
+        "metric": "ndcg",
+        "ndcg_eval_at": [20],
+        "boosting_type": "gbdt",
+        "num_leaves": kwargs.get("num_leaves", 31),
+        "max_depth": kwargs.get("max_depth", 5),
+        "learning_rate": kwargs.get("learning_rate", 0.045),
+        "feature_fraction": kwargs.get("feature_fraction", 0.85),
+        "bagging_fraction": kwargs.get("bagging_fraction", 0.85),
+        "bagging_freq": 1,
+        "min_child_samples": kwargs.get("min_child_samples", 20),
+        "lambda_l1": kwargs.get("lambda_l1", 0.0),
+        "lambda_l2": kwargs.get("lambda_l2", 1.0),
+        "seed": random_seed,
+        "num_threads": n_jobs if n_jobs > 0 else -1,
+        "verbosity": -1,
+        "label_gain": list(range(int(relevance_grades))),
+    }
+
+    try:
+        train_data = lgb.Dataset(
+            X_train, label=y, group=group_sizes,
+            params={"label_gain": list(range(int(relevance_grades)))},
+        )
+        model = lgb.train(
+            params,
+            train_data,
+            num_boost_round=kwargs.get("num_boost_round", 120),
+            valid_sets=None,
+        )
+        raw_pred = pd.Series(
+            model.predict(X_test, group=group_test),
+            index=test_sorted.index,
+        )
+    except Exception as exc:
+        warnings.warn(f"{model_name} 训练失败: {exc}", RuntimeWarning)
+        return None, pd.DataFrame()
+
+    base = _score_base_columns(test_sorted)
+    out = base.copy()
+    out["model"] = model_name
+    out["model_type"] = "lightgbm_ranker"
+    out["score"] = raw_pred.groupby(base["signal_date"], sort=False).transform(_rank_pct_score)
+    out["rank"] = out.groupby(
+        ["signal_date", "candidate_pool_version", "model"], sort=False
+    )["score"].rank(method="first", ascending=False)
+
+    # LightGBM feature importance (gain-based)
+    importance_values = np.array(model.feature_importance(importance_type="gain"))
+    importance = pd.DataFrame({
+        "model": model_name,
+        "feature": feature_cols,
+        "importance": importance_values,
+        "signed_weight": np.nan,
+    })
+    return out, importance
+
+
+def _build_ranker_ensemble(
+    score_frames: list[pd.DataFrame],
+    *,
+    model_name: str = "M6_ranker_ensemble",
+    weights: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    """H1: 简单平均集成多个 Ranker 的百分位分数。
+
+    与 ``_build_ranker_top20_ensemble`` 不同，此函数对所有基于排序的模型
+    （XGBoost Ranker、LightGBM Ranker 等）做等权或加权平均，不依赖 classifier。
+
+    Parameters
+    ----------
+    score_frames
+        各模型的打分 DataFrame 列表。每个 DataFrame 需有 model, score, rank 列。
+    model_name
+        集成模型名称。
+    weights
+        各模型权重，key 为 model 名称。None 表示等权。
+    """
+    if len(score_frames) < 2:
+        return pd.DataFrame()
+
+    cols = ["signal_date", "candidate_pool_version", "symbol"]
+    merged = None
+    active_models: list[str] = []
+    for sf in score_frames:
+        if sf is None or sf.empty:
+            continue
+        mname = sf["model"].iloc[0]
+        sub = sf[cols + ["score"]].rename(columns={"score": f"_score_{mname}"})
+        if merged is None:
+            merged = sub
+        else:
+            merged = merged.merge(sub, on=cols, how="inner")
+        active_models.append(mname)
+
+    if merged is None or merged.empty or len(active_models) < 2:
+        return pd.DataFrame()
+
+    # 计算加权平均分数
+    w = weights or {m: 1.0 / len(active_models) for m in active_models}
+    total_w = sum(w.get(m, 0.0) for m in active_models)
+    if total_w <= 0:
+        return pd.DataFrame()
+
+    merged["score"] = 0.0
+    for m in active_models:
+        col = f"_score_{m}"
+        if col in merged.columns:
+            merged["score"] += merged[col] * (w.get(m, 0.0) / total_w)
+
+    # Drop intermediate columns
+    merge_cols = [f"_score_{m}" for m in active_models]
+    merged = merged.drop(columns=merge_cols, errors="ignore")
+
+    merged["model"] = model_name
+    merged["model_type"] = "ranker_ensemble"
+    merged["rank"] = merged.groupby(
+        ["signal_date", "candidate_pool_version", "model"], sort=False
+    )["score"].rank(method="first", ascending=False)
+
+    return merged
 
 
 def _train_predict_top20_calibrated(
@@ -464,7 +631,7 @@ def _build_stacking_from_existing_scores(
     all_scores = pd.concat(score_frames, ignore_index=True)
     model_names = all_scores["model"].unique()
     # 只取基模型（非 ensemble 类型）
-    base_models = [m for m in model_names if m in ("M6_xgboost_rank_ndcg", "M6_xgboost_rank_pairwise", "M6_top20_calibrated")]
+    base_models = [m for m in model_names if m in ("M6_xgboost_rank_ndcg", "M6_xgboost_rank_pairwise", "M6_lightgbm_rank_ndcg", "M6_top20_calibrated")]
     if len(base_models) < 2:
         return pd.DataFrame()
 
@@ -588,6 +755,29 @@ def build_walk_forward_ltr_scores(
                         _append_oof(oof_records, scores, "M6_xgboost_rank_pairwise")
                 if not imp.empty:
                     importance_frames.append(_tag_importance(imp, spec, pool, test_month))
+            # H1: LightGBM Ranker（per docs/plan-05-04.md）
+            if "lightgbm_rank_ndcg" in requested:
+                scores, imp = _train_predict_lightgbm_ranker(
+                    model_name="M6_lightgbm_rank_ndcg", objective="lambdarank",
+                    train=train_fit, test=test, feature_cols=feature_cols,
+                    random_seed=cfg.random_seed, relevance_grades=cfg.relevance_grades,
+                    model_n_jobs=cfg.model_n_jobs,
+                )
+                if scores is not None and not scores.empty:
+                    current_scores.append(scores)
+                    if stacking_enabled:
+                        _append_oof(oof_records, scores, "M6_lightgbm_rank_ndcg")
+                if not imp.empty:
+                    importance_frames.append(_tag_importance(imp, spec, pool, test_month))
+            # H1: XGBoost + LightGBM 简单平均集成
+            if "ranker_ensemble" in requested:
+                # 从 current_scores 中找出 xgboost_rank_ndcg 和 lightgbm_rank_ndcg
+                ensemble = _build_ranker_ensemble(
+                    current_scores,
+                    model_name="M6_ranker_ensemble",
+                )
+                if not ensemble.empty:
+                    current_scores.append(ensemble)
             if "top20_calibrated" in requested or "ranker_top20_ensemble" in requested or "stacking_ensemble" in requested:
                 scores, imp = _train_predict_top20_calibrated(
                     train=train_fit, test=test, feature_cols=feature_cols,

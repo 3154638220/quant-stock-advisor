@@ -95,6 +95,8 @@ class DuckDBManager:
         self._ensure_schema()
         self._ensure_audit_schema()
         self._auto_backfill_derived_columns_if_needed()
+        # P2-10: 自动执行 schema migration（per docs/plan-05-04.md E2）
+        self._apply_pending_migrations()
         self._last_fetch_run_id: Optional[str] = None
 
     def _append_fetch_failure_log(self, symbol: str, exc: BaseException) -> None:
@@ -153,6 +155,16 @@ class DuckDBManager:
             ON {self._table}(trade_date, symbol)
             """
         )
+
+    def _apply_pending_migrations(self) -> None:
+        """P2-10: 自动执行 DuckDB schema migration（per docs/plan-05-04.md E2）。"""
+        try:
+            from .migrations import apply_migrations
+            applied = apply_migrations(self._conn)
+            if applied:
+                _LOG.info("已应用 %d 个 schema migration: %s", len(applied), applied)
+        except Exception as exc:
+            _LOG.warning("Schema migration 跳过（非阻塞）: %s", exc)
 
     def _missing_derived_daily_columns(self) -> list[str]:
         rows = self._conn.execute(f"PRAGMA table_info('{self._table}')").fetchall()
