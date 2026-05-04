@@ -6,10 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.cli.research_identity import make_research_identity
-try:
-    from scripts.validate_research_contracts import validate_manifest
-except ImportError:
-    validate_manifest = None  # type: ignore[assignment]
+from src.research.contracts import validate_manifest
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
     ArtifactRef,
@@ -123,8 +120,6 @@ def test_append_experiment_result_writes_research_index(tmp_path: Path) -> None:
 
 
 def test_validate_manifest_accepts_standard_contract(tmp_path: Path) -> None:
-    if validate_manifest is None:
-        pytest.skip("scripts.validate_research_contracts 不可用")
     result, manifest = _result(tmp_path)
     write_research_manifest(manifest, result)
 

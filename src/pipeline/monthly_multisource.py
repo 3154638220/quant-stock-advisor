@@ -163,6 +163,10 @@ class M5RunConfig:
     use_industry_neutral_zscore: bool = False
     # P2-1: z-score 后应用 rank transform（将截面秩映射到 [-1,1]，缓解上限堆积）
     use_rank_transform: bool = False
+    # D2: IC 衰减因子自动排除（per docs/plan-05-04.md）
+    ic_decay_enabled: bool = True
+    ic_decay_window: int = 20
+    ic_decay_threshold: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,81 @@ def _rank_transform(series: pd.Series) -> pd.Series:
         return pd.Series(0.0, index=series.index)
     ranked = series.rank(method="average", na_option="keep")
     return ((ranked - 1) / (n - 1) * 2 - 1).clip(-1, 1)
+
+
+# ── D2: IC 衰减因子自动排除 ─────────────────────────────────────────────
+
+# 特征家族原始列名集合（用于 IC 衰减检查时的因子名匹配）
+_IC_DECAY_CHECK_FEATURES: tuple[str, ...] = (
+    PRICE_VOLUME_FEATURES
+    + INDUSTRY_BREADTH_RAW_FEATURES
+    + FUND_FLOW_RAW_FEATURES
+    + FUNDAMENTAL_RAW_FEATURES
+    + SHAREHOLDER_RAW_FEATURES
+)
+
+
+def _get_ic_decayed_features(
+    dataset: pd.DataFrame,
+    db_path: Path,
+    *,
+    window: int = 20,
+    threshold: float = 0.02,
+) -> list[str]:
+    """检查 IC Monitor 中的因子衰减状态，返回已衰减的特征列名列表。
+
+    衰减因子的 ``_z`` 列将被置为 NaN，使其在后续模型训练中被自然排除。
+    若 IC Monitor 数据不可用（无 DuckDB 或无 IC 记录），返回空列表。
+
+    Parameters
+    ----------
+    dataset : DataFrame
+        已附加全部特征的月度数据集。
+    db_path : Path
+        DuckDB 数据库路径（IC Monitor 存储于此）。
+    window : int
+        IC 滚动窗口大小（交易日数）。
+    threshold : float
+        |滚动 IC 均值| 低于此值时视为衰减。
+
+    Returns
+    -------
+    list[str]
+        已衰减的特征列名（原始列名，非 _z 后缀）。
+    """
+    if not db_path.exists():
+        return []
+
+    # 确定需要检查的特征列（仅检查数据集中实际存在的列）
+    candidate_features = [c for c in _IC_DECAY_CHECK_FEATURES if c in dataset.columns]
+    if not candidate_features:
+        return []
+
+    try:
+        from src.features.ic_monitor import ICMonitor
+
+        monitor = ICMonitor(db_path=db_path)
+        decayed = monitor.get_decayed_factors(
+            window=window, threshold=threshold, factors=candidate_features,
+        )
+        monitor.close()
+    except Exception:
+        # IC Monitor 数据不可用时静默跳过（如首次运行尚无 IC 记录）
+        return []
+
+    # 将衰减因子的 _z 列置为 NaN，使其在后续训练中被排除
+    actual_decayed: list[str] = []
+    for feat in decayed:
+        z_col = f"{feat}_z"
+        if z_col in dataset.columns:
+            dataset[z_col] = np.nan
+            actual_decayed.append(feat)
+        # 同时处理行业内中性化列 _ind_z
+        ind_z_col = f"{feat}_ind_z"
+        if ind_z_col in dataset.columns:
+            dataset[ind_z_col] = np.nan
+
+    return actual_decayed
 
 
 def _unique_signal_frame(dataset: pd.DataFrame) -> pd.DataFrame:
@@ -587,6 +666,23 @@ def attach_enabled_families(
         if all_z_cols:
             for col in all_z_cols:
                 out[col] = out.groupby("signal_date", sort=False)[col].transform(_rank_transform)
+
+    # D2: IC 衰减因子自动排除（per docs/plan-05-04.md）
+    # 检查 IC Monitor 中的因子衰减状态，自动将衰减因子的 _z 值置 NaN，
+    # 使其在后续训练中被自然排除。
+    ic_decay_window = getattr(cfg, 'ic_decay_window', 20)
+    ic_decay_threshold = getattr(cfg, 'ic_decay_threshold', 0.02)
+    if getattr(cfg, 'ic_decay_enabled', True):
+        decayed = _get_ic_decayed_features(
+            out, db_path, window=ic_decay_window, threshold=ic_decay_threshold,
+        )
+        if decayed:
+            import warnings
+            warnings.warn(
+                f"D2: IC 衰减因子已自动排除 (window={ic_decay_window}, "
+                f"threshold={ic_decay_threshold}): {sorted(decayed)}",
+                RuntimeWarning,
+            )
 
     return out
 
