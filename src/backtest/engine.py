@@ -14,6 +14,38 @@ from src.backtest.transaction_costs import TransactionCostParams, turnover_cost_
 
 
 @dataclass
+class TieredImpactConfig:
+    """P2-9: 按 amount_20d 分层冲击成本 — 小市值冲击成本可数倍于大市值。
+
+    三档阈值（CNY）：
+    - large: amount_20d >= large_cap_threshold
+    - mid:   large_cap_threshold > amount_20d >= mid_cap_threshold
+    - small: amount_20d < mid_cap_threshold
+    """
+
+    large_cap_threshold: float = 500_000_000.0   # >= 5 亿
+    mid_cap_threshold: float = 100_000_000.0     # >= 1 亿
+    large_slippage_bps: float = 1.5
+    large_impact_bps: float = 4.0
+    mid_slippage_bps: float = 3.0
+    mid_impact_bps: float = 8.0
+    # 小市值冲击成本参考国内公募量化研究（20–50 bps）
+    small_slippage_bps: float = 5.0
+    small_impact_bps: float = 20.0
+
+    def get_params(self, amount_20d: float) -> tuple[float, float]:
+        """返回 (slippage_bps, impact_bps) 对应给定 amount_20d 的档位。"""
+        a = float(amount_20d)
+        if not np.isfinite(a) or a <= 0:
+            return (self.small_slippage_bps, self.small_impact_bps)
+        if a >= self.large_cap_threshold:
+            return (self.large_slippage_bps, self.large_impact_bps)
+        if a >= self.mid_cap_threshold:
+            return (self.mid_slippage_bps, self.mid_impact_bps)
+        return (self.small_slippage_bps, self.small_impact_bps)
+
+
+@dataclass
 class BacktestConfig:
     """回测配置：成本、无风险利率、年化基准、风险约束（与现有 risk 配置兼容）。"""
 
@@ -42,6 +74,9 @@ class BacktestConfig:
     # extra_drag = turnover * (vwap_slippage_bps_per_side + vwap_impact_bps * turnover) / 1e4
     vwap_slippage_bps_per_side: float = 3.0
     vwap_impact_bps: float = 8.0
+    # P2-9: 分层冲击成本 — 启用后按 amount_20d 三档使用独立 slippage/impact 参数
+    use_tiered_impact: bool = False
+    tiered_impact: Optional[TieredImpactConfig] = None
     # 换仓频率：W=周, M=月, BM=双月, Q=季（H2 参数化）
     rebalance_rule: str = "M"
 
@@ -229,6 +264,20 @@ def _apply_limit_up_buy_fail(
     return effective, failed_delta, failed_total, redistributed_total, idle_total
 
 
+def _amount_tier_label(amount_20d: float, cfg: TieredImpactConfig | None) -> str:
+    """返回 amount_20d 对应的市值分档标签。"""
+    if cfg is None:
+        return "mid"
+    a = float(amount_20d)
+    if not np.isfinite(a) or a <= 0:
+        return "small"
+    if a >= cfg.large_cap_threshold:
+        return "large"
+    if a >= cfg.mid_cap_threshold:
+        return "mid"
+    return "small"
+
+
 def _apply_gross_exposure(w: np.ndarray, max_gross: float) -> np.ndarray:
     """若 sum(w) > max_gross，整体缩放。"""
     s = float(np.nansum(np.maximum(w, 0.0)))
@@ -281,6 +330,8 @@ def run_backtest(
     config: Optional[BacktestConfig] = None,
     # 调仓频率：若给定，从 weights_signal 中按规则重采样（仅保留该频率的调仓日）
     rebalance_rule: Optional[str] = None,
+    # P2-9: 日度 amount_20d 宽表（与 asset_returns 同行同列），用于分层冲击成本
+    daily_amount: Optional[pd.DataFrame] = None,
 ) -> BacktestResult:
     """
     标准回测：输入资产日收益宽表 + 信号权重宽表（按调仓日行），输出日组合收益与绩效面板。
@@ -295,6 +346,9 @@ def run_backtest(
     rebalance_rule
         若给定（如 ``"W-FRI"``），先将 ``weights_signal`` 按该规则对齐到 ``asset_returns`` 的日历后
         再前向填充；否则认为 ``weights_signal`` 的每一行即调仓日。
+    daily_amount
+        P2-9: 可选，与 asset_returns 同行同列的 amount_20d 宽表，
+        用于分层冲击成本（TieredImpactConfig）。缺省时回退到固定 vwap 参数。
 
     Notes
     -----
@@ -302,7 +356,7 @@ def run_backtest(
 
     - **close_to_close**（默认）：``r_t`` 为当日收盘相对昨收的收益；基础约定为 ``w_{t-1}^T r_t``。若 ``execution_lag>0``，则改为 ``w_{t-1-L}^T r_t``（``L`` 为滞后天数），用于避免「收盘可得信号却按收盘成交」的不可实现假设。
     - **tplus1_open**：``r_t`` 须为 ``open(t+1)/open(t)-1``（见 ``build_open_to_open_returns``），与「T+1 最早次日开盘卖」一致，避免用日内 T+0 夸大夏普；收益矩阵末行可为 ``nan``（无下一开盘），将按 0 处理。此模式下忽略 ``execution_lag``。
-    - **vwap**：``r_t`` 仍使用 close-to-close 收益，但在调仓日额外扣减与换手相关的 VWAP 执行冲击，降低尾盘成交过于乐观的偏差；可与 ``execution_lag`` 同用。
+    - **vwap**：``r_t`` 仍使用 close-to-close 收益，但在调仓日额外扣减与换手相关的 VWAP 执行冲击，降低尾盘成交过于乐观的偏差；可与 ``execution_lag`` 同用。若启用分层冲击（use_tiered_impact=True），按各股票 amount_20d 分档使用独立 slippage/impact 参数。
 
     成本：在**发生调仓**的交易日，按相对上一有效权重的 half L1 换手，用 ``turnover_cost_drag`` 从当日收益中扣减。
     默认参数（commission_buy=2.5bps, commission_sell=2.5bps, slippage=2.0bps/side, stamp_duty=5.0bps）合计约 14 bps 双边，
@@ -354,6 +408,23 @@ def run_backtest(
     if w_mat.shape != (n, k):
         raise ValueError("内部权重矩阵与收益矩阵形状不一致")
 
+    # P2-9: 分层冲击成本 — 准备 amount_20d 矩阵
+    amount_mat: np.ndarray | None = None
+    tiered_bps: np.ndarray | None = None
+    if cfg.use_tiered_impact and cfg.tiered_impact is not None and daily_amount is not None:
+        amt = daily_amount.copy()
+        amt.index = pd.to_datetime(amt.index).normalize()
+        amt = amt.reindex(index=trading_index, columns=sym_cols, fill_value=np.nan)
+        amount_mat = amt.to_numpy(dtype=np.float64)
+        # 预计算每只股票的 (slippage_bps, impact_bps)，按 amount_20d 中位数分档
+        tiered_bps = np.zeros((k, 2), dtype=np.float64)
+        for s in range(k):
+            col_amt = amount_mat[:, s]
+            median_amt = float(np.nanmedian(col_amt)) if np.any(np.isfinite(col_amt)) else 0.0
+            slip, imp = cfg.tiered_impact.get_params(median_amt)
+            tiered_bps[s, 0] = slip
+            tiered_bps[s, 1] = imp
+
     limit_up_mode = str(cfg.limit_up_mode).lower().strip()
     if limit_up_mode not in ("idle", "redistribute"):
         limit_up_mode = "idle"
@@ -370,6 +441,10 @@ def run_backtest(
     turn_series = np.full(n, np.nan, dtype=np.float64)
     rebalance_dates = ws.index.intersection(trading_index)
     buy_fail_rows: list[dict[str, Any]] = []
+
+    # P2-9: 冲击成本按市值分档累计（仅 vwap 模式）
+    impact_by_tier: dict[str, float] = {"large": 0.0, "mid": 0.0, "small": 0.0}
+    impact_tier_used = cfg.use_tiered_impact and exe == "vwap" and tiered_bps is not None
 
     # r_{p,t} = w_{t-1-L}^T r_t（L=execution_lag；tplus1_open 固定 L=0）
     port[0] = 0.0
@@ -434,10 +509,23 @@ def run_backtest(
                 if cost is not None:
                     port[i] -= turnover_cost_drag(half_l1, cost)
                 if exe == "vwap":
-                    # VWAP 模式将尾盘成交冲击显式体现在调仓日：换手越大，冲击惩罚越高。
-                    base_bps = max(float(cfg.vwap_slippage_bps_per_side), 0.0)
-                    impact_bps = max(float(cfg.vwap_impact_bps), 0.0)
-                    extra_drag = half_l1 * (base_bps + impact_bps * half_l1) / 1e4
+                    # P2-9: 分层冲击成本 — 按各股票 amount_20d 分档计算 per-stock drag
+                    if impact_tier_used:
+                        dw = np.abs(w_new - w_old)
+                        half_l1_per_stock = 0.5 * dw
+                        slip_vec = tiered_bps[:, 0]
+                        imp_vec = tiered_bps[:, 1]
+                        extra_drag_vec = half_l1_per_stock * (slip_vec + imp_vec * half_l1_per_stock) / 1e4
+                        extra_drag = float(np.sum(extra_drag_vec))
+                        # 分解到三档
+                        for s in range(k):
+                            amt_s = float(amount_mat[i, s]) if amount_mat is not None and np.isfinite(amount_mat[i, s]) else 0.0
+                            tier = _amount_tier_label(amt_s, cfg.tiered_impact)
+                            impact_by_tier[tier] += float(extra_drag_vec[s])
+                    else:
+                        base_bps = max(float(cfg.vwap_slippage_bps_per_side), 0.0)
+                        impact_bps = max(float(cfg.vwap_impact_bps), 0.0)
+                        extra_drag = half_l1 * (base_bps + impact_bps * half_l1) / 1e4
                     port[i] -= float(extra_drag)
 
     s = pd.Series(port, index=trading_index, name="portfolio_ret")
@@ -463,6 +551,10 @@ def run_backtest(
         "buy_fail_total_weight": float(sum(row["failed_weight"] for row in buy_fail_rows)),
         "buy_fail_redistributed_weight": float(sum(row["redistributed_weight"] for row in buy_fail_rows)),
         "buy_fail_idle_weight": float(sum(row["idle_weight"] for row in buy_fail_rows)),
+        # P2-9: 分层冲击成本分解
+        "impact_tier_used": impact_tier_used,
+        "impact_cost_by_tier": dict(impact_by_tier),
+        "impact_cost_total": float(sum(impact_by_tier.values())),
     }
     return BacktestResult(daily_returns=s, rebalance_turnover=turn, panel=panel, meta=meta)
 

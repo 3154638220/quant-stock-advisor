@@ -109,12 +109,13 @@ def _time_series_cv_folds(
         return [(train_part, val_part)]
 
     # 将 months 数组作为输入，由 TimeSeriesSplit 划分
+    months_arr = np.asarray(months)
     month_indices = np.arange(len(months))
     tscv = TimeSeriesSplit(n_splits=n_folds, max_train_size=None, gap=gap)
     folds: list[tuple[pd.DataFrame, pd.DataFrame]] = []
     for train_idx, val_idx in tscv.split(month_indices):
-        train_months = months[train_idx]
-        val_months = months[val_idx]
+        train_months = months_arr[train_idx]
+        val_months = months_arr[val_idx]
         if len(val_months) == 0:
             continue
         train_part = train[train[date_col].isin(train_months)]

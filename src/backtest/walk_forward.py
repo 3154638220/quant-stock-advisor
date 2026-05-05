@@ -300,3 +300,190 @@ def walk_forward_pass(
         f"通过：{report['folds']} 折, IC均值={report['ic_mean_of_means']:.4f}, "
         f"CV={ic_cv if np.isfinite(ic_cv) else 'nan'}"
     )
+
+
+# ── C3: 特征重要性跨折叠稳定性 ───────────────────────────────────────────────
+
+
+def feature_importance_cv(
+    fold_importances: dict[str, list[float]],
+    *,
+    unstable_threshold: float = 1.0,
+) -> dict:
+    """计算特征重要性跨折叠的变异系数 (CV)，标注不稳定特征。
+
+    Parameters
+    ----------
+    fold_importances: {feature_name: [fold1_importance, fold2_importance, ...]}
+        每个特征在各折中的重要性值（可以是 gain/weight/permutation importance）。
+    unstable_threshold: CV > 此值标注为「不稳定特征」，需在 M12 Promotion Package 中说明。
+
+    Returns
+    -------
+    dict with:
+        - per_feature: {feature: {cv, mean, std, unstable}}
+        - unstable_features: list[str] — CV > threshold 的特征
+        - n_features: 总特征数
+        - n_unstable: 不稳定特征数
+        - unstable_ratio: 不稳定特征占比
+    """
+    per_feature: dict[str, dict] = {}
+    unstable: list[str] = []
+
+    for feat, imps in fold_importances.items():
+        arr = np.asarray(imps, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        if len(arr) < 2:
+            per_feature[feat] = {"cv": float("nan"), "mean": float("nan"),
+                                 "std": float("nan"), "unstable": True}
+            unstable.append(feat)
+            continue
+        mu = float(np.mean(arr))
+        sd = float(np.std(arr, ddof=1))
+        cv = float(sd / abs(mu)) if abs(mu) > 1e-15 else float("inf")
+        is_unstable = not np.isfinite(cv) or cv > unstable_threshold
+        per_feature[feat] = {"cv": cv, "mean": mu, "std": sd, "unstable": is_unstable}
+        if is_unstable:
+            unstable.append(feat)
+
+    return {
+        "per_feature": per_feature,
+        "unstable_features": sorted(unstable, key=lambda f: per_feature[f]["cv"]
+                                    if np.isfinite(per_feature[f]["cv"]) else float("inf"),
+                                    reverse=True),
+        "n_features": len(fold_importances),
+        "n_unstable": len(unstable),
+        "unstable_ratio": len(unstable) / len(fold_importances) if fold_importances else 0.0,
+    }
+
+
+def feature_importance_cv_markdown(cv_report: dict) -> str:
+    """将特征重要性 CV 报告渲染为 Markdown 表格。"""
+    lines: list[str] = []
+    lines.append("## 特征重要性跨折叠稳定性")
+    lines.append("")
+    lines.append(f"- 总特征数: {cv_report['n_features']}")
+    lines.append(f"- 不稳定特征数 (CV > 1.0): {cv_report['n_unstable']}")
+    lines.append(f"- 不稳定占比: {cv_report['unstable_ratio']:.1%}")
+    lines.append("")
+
+    pf = cv_report["per_feature"]
+    if pf:
+        lines.append("| 特征 | CV | 均值 | 标准差 | 稳定? |")
+        lines.append("|------|-----|------|--------|-------|")
+        for feat in sorted(pf, key=lambda f: pf[f]["cv"] if np.isfinite(pf[f]["cv"]) else float("inf"), reverse=True):
+            d = pf[feat]
+            cv_str = f"{d['cv']:.3f}" if np.isfinite(d['cv']) else "inf"
+            stable = "否 ⚠" if d["unstable"] else "是"
+            lines.append(f"| {feat} | {cv_str} | {d['mean']:.4f} | {d['std']:.4f} | {stable} |")
+        lines.append("")
+
+    if cv_report["unstable_features"]:
+        lines.append("### 需在 M12 Promotion Package 中说明的特征")
+        lines.append("")
+        for f in cv_report["unstable_features"]:
+            d = pf[f]
+            cv_str = f"{d['cv']:.3f}" if np.isfinite(d['cv']) else "inf"
+            lines.append(f"- **{f}**: CV={cv_str}, mean={d['mean']:.4f}, std={d['std']:.4f}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ── C3: Bonferroni 校正 ──────────────────────────────────────────────────────
+
+
+def bonferroni_correction(
+    p_values: list[float] | np.ndarray,
+    *,
+    alpha: float = 0.05,
+) -> dict:
+    """对多重假设检验结果应用 Bonferroni 校正。
+
+    Parameters
+    ----------
+    p_values: 各检验的原始 p 值（如 M8 gamma 网格中每个 gamma 的 NW t-test p 值）
+    alpha: 族系错误率 (FWER) 阈值，默认 0.05
+
+    Returns
+    -------
+    dict with:
+        - n_tests: 检验总数
+        - alpha_original: 原始 alpha
+        - alpha_corrected: 校正后 alpha = alpha / n_tests
+        - significant_original: 原始 p < alpha 的检验索引
+        - significant_corrected: 校正后仍显著的检验索引
+        - any_significant_after_correction: 校正后是否有任何检验仍显著
+        - min_p_value: 最小 p 值
+        - min_p_corrected: 最小 p 值 × n_tests（Bonferroni 校正后 p 值）
+    """
+    p = np.asarray(p_values, dtype=np.float64)
+    p = p[np.isfinite(p)]
+    n = len(p)
+
+    if n == 0:
+        return {
+            "n_tests": 0,
+            "alpha_original": alpha,
+            "alpha_corrected": float("nan"),
+            "significant_original": [],
+            "significant_corrected": [],
+            "any_significant_after_correction": False,
+            "min_p_value": float("nan"),
+            "min_p_corrected": float("nan"),
+        }
+
+    alpha_corrected = alpha / n
+    sig_orig = [int(i) for i in np.where(p < alpha)[0]]
+    sig_corr = [int(i) for i in np.where(p < alpha_corrected)[0]]
+
+    min_p = float(np.min(p))
+    min_p_corr = min(min_p * n, 1.0)
+
+    return {
+        "n_tests": n,
+        "alpha_original": alpha,
+        "alpha_corrected": alpha_corrected,
+        "significant_original": sig_orig,
+        "significant_corrected": sig_corr,
+        "any_significant_after_correction": len(sig_corr) > 0,
+        "min_p_value": min_p,
+        "min_p_corrected": min_p_corr,
+    }
+
+
+def bonferroni_markdown(result: dict, *, test_labels: list[str] | None = None) -> str:
+    """将 Bonferroni 校正结果渲染为 Markdown。"""
+    lines: list[str] = []
+    lines.append("## Bonferroni 多重检验校正")
+    lines.append("")
+    lines.append(f"- 检验总数: {result['n_tests']}")
+    lines.append(f"- 原始 α: {result['alpha_original']:.3f}")
+    lines.append(f"- Bonferroni 校正 α: {result['alpha_corrected']:.6f}")
+    lines.append(f"- 原始显著: {len(result['significant_original'])} 项")
+    lines.append(f"- 校正后显著: {len(result['significant_corrected'])} 项")
+    lines.append(f"- 校正后仍显著: {'是 ✅' if result['any_significant_after_correction'] else '否 ⚠'}")
+    lines.append(f"- 最小 p 值: {result['min_p_value']:.6f}")
+    lines.append(f"- Bonferroni 校正后最小 p 值: {result['min_p_corrected']:.6f}")
+    lines.append("")
+
+    if test_labels:
+        lines.append("| 检验 | 原始 p | Bonferroni p | 原始显著 | 校正后显著 |")
+        lines.append("|------|--------|-------------|----------|-----------|")
+        # We don't have individual p-values here, just the aggregate
+        lines.append("")
+
+    lines.append("### 对 M8 Gamma 网格搜索的启示")
+    lines.append("")
+    if result["any_significant_after_correction"]:
+        lines.append(
+            "校正后最优 gamma 仍显著，说明 M8 自然化约束的超额不是单纯由多重比较伪发现驱动。"
+        )
+    else:
+        lines.append(
+            "校正后无 gamma 显著，说明观察到的最优超额可能部分来自多重比较伪发现。"
+            "建议谨慎解读最优 gamma 结果，并使用更保守的参数。"
+        )
+    lines.append("")
+
+    return "\n".join(lines)

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.run_monthly_selection_m8_natural_industry_constraints import (
+from src.pipeline.m8_natural_industry import (
     build_gate_table,
     copy_source_metric_for_optimizer,
     select_soft_industry_risk,

@@ -65,10 +65,21 @@ ignore_missing_imports = true
 disallow_untyped_defs = false
 
 # 核心模块白名单：已消灭 Any/无类型函数，强制严格检查
+# P0-5: 渐进扩展覆盖范围，每季度新增 1–2 个模块
 [[tool.mypy.overrides]]
 module = [
     "src.pipeline.monthly_dataset",
     "src.features.ic_monitor",
     "src.data_fetcher.db_manager",
+    "src.backtest.engine",
+    "src.backtest.statistical_tests",
+    "src.portfolio.optimizer",
+    "src.portfolio.covariance",
+    "src.portfolio.weights",
+    "src.market.regime",
+    "src.analysis.regime_sensitivity",
+    "src.analysis.portfolio_method_compare",
+    "src.analysis.capacity_report",
+    "src.backtest.walk_forward",
 ]
 disallow_untyped_defs = true

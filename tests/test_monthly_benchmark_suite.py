@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 import scripts.run_monthly_benchmark_suite as suite
-from scripts.run_monthly_benchmark_suite import (
+from src.analysis.benchmark_suite import (
     BenchmarkSpec,
     annualized_return,
     build_benchmark_suite,
@@ -51,7 +51,7 @@ def test_load_index_csv_monthly_returns_aligns_open_to_open(tmp_path):
         }
     )
 
-    out, meta = load_index_csv_monthly_returns(BenchmarkSpec("csi1000", csv, "000852"), schedule)
+    out, meta = load_index_csv_monthly_returns(BenchmarkSpec("csi1000", csv, "000852"), schedule, tmp_path)
 
     assert meta["status"] == "ok"
     assert meta["covered_months"] == 2

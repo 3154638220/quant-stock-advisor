@@ -119,6 +119,10 @@ def run_cost_sensitivity(
             limit_up_mode=base.limit_up_mode,
             limit_up_open_mask=base.limit_up_open_mask,
             rebalance_rule=base.rebalance_rule,
+            vwap_slippage_bps_per_side=base.vwap_slippage_bps_per_side,
+            vwap_impact_bps=base.vwap_impact_bps,
+            use_tiered_impact=base.use_tiered_impact,
+            tiered_impact=base.tiered_impact,
         )
         bt = run_backtest(asset_returns, weights_signal, config=cfg)
         monthly = bt.panel.to_monthly_table() if hasattr(bt.panel, 'to_monthly_table') else pd.DataFrame()
@@ -392,7 +396,7 @@ def compare_execution_modes(
         ),
     )
 
-    # vwap
+    # vwap (P2-9: pass through tiered impact config from base)
     vwap = run_backtest(
         asset_returns_cc, weights_signal,
         config=BacktestConfig(
@@ -403,6 +407,10 @@ def compare_execution_modes(
             execution_mode="vwap",
             execution_lag=cfg.execution_lag,
             rebalance_rule=cfg.rebalance_rule,
+            vwap_slippage_bps_per_side=cfg.vwap_slippage_bps_per_side,
+            vwap_impact_bps=cfg.vwap_impact_bps,
+            use_tiered_impact=cfg.use_tiered_impact,
+            tiered_impact=cfg.tiered_impact,
         ),
     )
 
@@ -470,3 +478,101 @@ class CapacityReport:
                 "vwap_excess_bps": self.execution_comparison.vwap_excess_bps,
             } if self.execution_comparison else None,
         }
+
+
+# ── P2-10: M10 统计显著性 + 换手-超额分析 ───────────────────────────────────
+
+
+def build_m10_statistical_section(
+    monthly_excess: np.ndarray,
+    monthly_turnover: np.ndarray,
+    rank_ic_monthly: Optional[np.ndarray] = None,
+    *,
+    months: Optional[list[str]] = None,
+    regime_labels: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """构建 M10 统计显著性报告段（供月度报告嵌入）。
+
+    Parameters
+    ----------
+    monthly_excess: 月度超额收益序列 (n_months,)
+    monthly_turnover: 月度 half L1 换手序列 (n_months,)
+    rank_ic_monthly: 可选，月度 Rank IC 序列
+    months: 可选，对应的月份标签（如 ["2021-01", ...]）
+    regime_labels: 可选，每月对应的 regime 标签（bull/bear/oscillation）
+
+    Returns
+    -------
+    dict 适合 JSON 序列化，包含：
+    - excess_nw: Newey-West t 统计量（超额）
+    - excess_bootstrap: bootstrap 95% CI
+    - excess_ir: Information Ratio
+    - turnover_ir: 换手调整 IR
+    - turnover_excess_corr: 换手-超额相关性
+    - turnover_excess_scatter: 按月散点数据
+    - ic_nw: Rank IC NW t 统计量（若提供）
+    - gates: 统计门槛评估
+    """
+    from src.backtest.statistical_tests import (
+        newey_west_t_statistic,
+        newey_west_ic_t_statistic,
+        bootstrap_excess_ci,
+        information_ratio,
+        turnover_adjusted_ir,
+        turnover_excess_by_month,
+        turnover_excess_correlation,
+    )
+
+    x = np.asarray(monthly_excess, dtype=np.float64)
+    t = np.asarray(monthly_turnover, dtype=np.float64)
+
+    # 1. NW t-stat on excess
+    nw_excess = newey_west_t_statistic(x, max_lag=6)
+
+    # 2. Bootstrap CI
+    boot_ci = bootstrap_excess_ci(x, n_bootstrap=1000)
+
+    # 3. Information Ratio
+    ir = information_ratio(x)
+
+    # 4. Turnover-adjusted IR
+    tir = turnover_adjusted_ir(x, t)
+
+    # 5. Turnover-excess correlation
+    te_corr = turnover_excess_correlation(x, t)
+
+    # 6. Scatter data
+    month_labels = months or [f"m{i+1}" for i in range(len(x))]
+    scatter = turnover_excess_by_month(month_labels, x, t, regime_labels=regime_labels)
+
+    result: dict[str, Any] = {
+        "excess_nw": nw_excess,
+        "excess_bootstrap": boot_ci,
+        "excess_ir": ir,
+        "turnover_ir": tir,
+        "turnover_excess_correlation": te_corr,
+        "turnover_excess_scatter": scatter,
+    }
+
+    # 7. Rank IC NW (if provided)
+    if rank_ic_monthly is not None:
+        ic_arr = np.asarray(rank_ic_monthly, dtype=np.float64)
+        result["ic_nw"] = newey_west_ic_t_statistic(ic_arr, max_lag=6)
+
+    # 8. Promotion gates
+    nw_t = nw_excess.get("nw_t", float("nan"))
+    ir_val = ir.get("ir", float("nan"))
+    ic_nw_t = result.get("ic_nw", {}).get("nw_t", float("nan")) if "ic_nw" in result else float("nan")
+
+    result["gates"] = {
+        "ir_gate": bool(np.isfinite(ir_val) and ir_val > 0.5),
+        "nw_t_gate": bool(np.isfinite(nw_t) and nw_t > 2.0),
+        "ic_nw_t_gate": bool(np.isfinite(ic_nw_t) and ic_nw_t > 2.0) if "ic_nw" in result else None,
+        "m12_ready": bool(
+            np.isfinite(ir_val) and ir_val > 0.5
+            and np.isfinite(nw_t) and nw_t > 2.0
+        ),
+    }
+
+    return result
+

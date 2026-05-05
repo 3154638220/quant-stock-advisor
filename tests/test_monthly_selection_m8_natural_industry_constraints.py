@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 import scripts.run_monthly_selection_m8_natural_industry_constraints as natural
-from scripts.run_monthly_selection_m8_natural_industry_constraints import (
+from src.pipeline.m8_natural_industry import (
     build_gate_table,
     copy_source_metric_for_optimizer,
     select_soft_industry_risk,
@@ -137,6 +137,8 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
     dataset_path = tmp_path / "monthly_selection_features.parquet"
     _natural_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
     monkeypatch.setattr(natural, "ROOT", tmp_path)
+    from src.pipeline import cli_helpers as _ch
+    monkeypatch.setattr(_ch, "ROOT", tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",

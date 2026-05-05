@@ -112,6 +112,8 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
     dataset_path = tmp_path / "monthly_selection_features.parquet"
     _baseline_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
     monkeypatch.setattr(baselines, "ROOT", tmp_path)
+    from src.pipeline import cli_helpers
+    monkeypatch.setattr(cli_helpers, "ROOT", tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",

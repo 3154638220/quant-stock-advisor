@@ -909,3 +909,71 @@ def build_summary_payload(*, quality: dict[str, Any], leaderboard: pd.DataFrame)
         "quality": quality,
         "top_models_by_topk": best.to_dict(orient="records"),
     }
+
+
+def build_baselines_doc(
+    *, quality: dict[str, Any], leaderboard: pd.DataFrame,
+    year_slice: pd.DataFrame, regime_slice: pd.DataFrame,
+    industry_exposure: pd.DataFrame, artifacts: list[str],
+) -> str:
+    """Generate M4 baselines markdown report."""
+    from src.reporting.markdown_report import format_markdown_table
+    generated_at = pd.Timestamp.utcnow().isoformat()
+    leader_view = leaderboard.sort_values(
+        ["top_k", "candidate_pool_version", "topk_excess_after_cost_mean", "rank_ic_mean"],
+        ascending=[True, True, False, False],
+    )
+    year_view = year_slice.sort_values(["candidate_pool_version", "model", "top_k", "year"]).head(40)
+    regime_view = regime_slice.sort_values(["top_k", "candidate_pool_version", "model", "realized_market_state"]).head(40)
+    industry_view = pd.DataFrame()
+    if not industry_exposure.empty:
+        industry_view = (
+            industry_exposure.groupby(["candidate_pool_version", "model", "top_k", "industry_level1"], sort=True)
+            .agg(mean_share=("industry_share", "mean"), months=("signal_date", "nunique"))
+            .reset_index()
+            .sort_values(["top_k", "candidate_pool_version", "model", "mean_share"], ascending=[True, True, True, False])
+            .head(40)
+        )
+    best_u1 = leaderboard[(leaderboard["candidate_pool_version"] == "U1_liquid_tradable") & (leaderboard["top_k"] == 20)].head(3) if not leaderboard.empty else pd.DataFrame()
+    best_u2 = leaderboard[(leaderboard["candidate_pool_version"] == "U2_risk_sane") & (leaderboard["top_k"] == 20)].head(3) if not leaderboard.empty else pd.DataFrame()
+    artifact_lines = "\n".join(f"- `{x}`" for x in artifacts)
+    return f"""# Monthly Selection Baselines
+
+- 生成时间：`{generated_at}` · 输出 stem：`{quality.get('output_stem', '')}`
+- 数据集：`{quality.get('dataset_path', '')}` · 有效标签月份：`{quality.get('valid_signal_months', 0)}`
+
+## Leaderboard
+
+{format_markdown_table(leader_view, max_rows=40)}
+
+## Year Slice
+
+{format_markdown_table(year_view, max_rows=40)}
+
+## Realized Market State Slice
+
+{format_markdown_table(regime_view, max_rows=40)}
+
+## Industry Exposure
+
+{format_markdown_table(industry_view, max_rows=40)}
+
+## 口径
+
+- 输入固定为 M2 canonical dataset；主训练池/主报告池为 U1_liquid_tradable 与 U2_risk_sane。
+- 第一轮只使用 price-volume-only 特征。Top-K 并行报告 20/30/50。
+- `realized_market_state` 使用同一持有期市场等权收益的全样本 20%/80% 分位切片，仅用于归因。
+- `topk_excess_after_cost` 使用半 L1 月度换手乘以 cost_bps 的简化成本敏感性。
+
+## U1 Top20 领先
+
+{format_markdown_table(best_u1, max_rows=3)}
+
+## U2 Top20 领先
+
+{format_markdown_table(best_u2, max_rows=3)}
+
+## 本轮产物
+
+{artifact_lines}
+"""

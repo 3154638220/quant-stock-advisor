@@ -70,3 +70,6 @@ Thumbs.db
 
 # —— 日志（若将来有仓库根目录下的日志）——
 *.log
+
+.claude/settings.local.json
+.vscode/settings.json

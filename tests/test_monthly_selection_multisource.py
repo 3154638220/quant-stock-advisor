@@ -185,6 +185,8 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
     dataset_path = tmp_path / "monthly_selection_features.parquet"
     _m5_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
     monkeypatch.setattr(multisource, "ROOT", tmp_path)
+    from src.pipeline import cli_helpers
+    monkeypatch.setattr(cli_helpers, "ROOT", tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",

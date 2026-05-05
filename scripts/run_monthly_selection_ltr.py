@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""M6: 月度选股 learning-to-rank 主模型。
-
-本脚本消费 M2 canonical dataset，并复用 M5 的多源特征接入与 M4/M5
-评价口径，训练真正按月度 query 分组的截面排序模型。
-"""
+"""M6: 月度选股 learning-to-rank 主模型。消费 M2 canonical dataset，训练截面排序模型。"""
 
 from __future__ import annotations
 
-import argparse
-import json
-import os
-import shlex
-import sys
-import time
-import warnings
+import argparse, json, sys, time, warnings
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
@@ -24,318 +13,77 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
-from scripts.run_monthly_selection_multisource import (
-    FeatureSpec,
-    M5RunConfig,
-    attach_enabled_families,
-    summarize_feature_coverage_by_spec,
-)
-from src.models.experiment import append_experiment_result
-from src.models.research_contract import (
-    ArtifactRef,
-    DataSlice,
-    ExperimentResult,
-    build_result_id,
-    config_snapshot,
-    file_sha256,
-    stable_hash,
-    utc_now_iso,
-    write_research_manifest,
+from src.pipeline.cli_helpers import (
+    parse_int_list, parse_str_list, project_relative, resolve_loaded_config_path, resolve_project_path,
 )
 from src.pipeline.monthly_baselines import (
-    build_leaderboard,
-    build_monthly_long,
-    build_quantile_spread,
-    build_rank_ic,
-    build_realized_market_states,
-    load_baseline_dataset,
-    model_n_jobs_token,
-    normalize_model_n_jobs,
-    summarize_candidate_pool_reject_reason,
-    summarize_candidate_pool_width,
-    summarize_industry_exposure,
-    summarize_regime_slice,
-    summarize_year_slice,
-    valid_pool_frame,
+    build_leaderboard, build_monthly_long, build_quantile_spread, build_rank_ic,
+    build_realized_market_states, load_baseline_dataset, model_n_jobs_token,
+    normalize_model_n_jobs, summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width, summarize_industry_exposure,
+    summarize_regime_slice, summarize_year_slice, valid_pool_frame,
 )
-from src.reporting.markdown_report import format_markdown_table, json_sanitize
-from src.research.gates import (
-    EXCESS_COL,
-    LABEL_COL,
-    POOL_RULES,
-    TOP20_COL,
+from src.pipeline.monthly_ltr import (
+    M6RunConfig, build_ltr_doc, build_ltr_quality_payload, build_ltr_relevance,
+    build_m6_feature_spec, build_walk_forward_ltr_scores, summarize_ltr_feature_importance,
 )
-from src.settings import config_path_candidates, load_config, resolve_config_path
-
-# 别名：scripts 历史使用下划线前缀，后续薄层化时统一改为原名
-_format_markdown_table = format_markdown_table
-_json_sanitize = json_sanitize
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 以下核心管线函数已提取到 src.pipeline.monthly_ltr：
-#   build_m6_feature_spec, build_ltr_relevance, build_walk_forward_ltr_scores,
-#   summarize_ltr_feature_importance, _train_predict_xgboost_ranker, 等。
-# 本脚本保留本地副本仅为向后兼容；后续维护请直接修改 monthly_ltr 中的版本。
-# ═══════════════════════════════════════════════════════════════════════════
-from src.pipeline.monthly_ltr import (  # noqa: F401
-    M6RunConfig,
-    _build_ranker_top20_ensemble,
-    _tag_importance,
-    _train_predict_top20_calibrated,
-    _train_predict_xgboost_ranker,
-    build_ltr_relevance,
-    build_m6_feature_spec,
-    build_walk_forward_ltr_scores,
-    summarize_ltr_feature_importance,
+from src.pipeline.monthly_multisource import (
+    FeatureSpec, M5RunConfig, attach_enabled_families, summarize_feature_coverage_by_spec,
 )
+from src.pipeline.research_runner import finalize_research_contract
+from src.reporting.markdown_report import json_sanitize
+from src.research.gates import EXCESS_COL, LABEL_COL, POOL_RULES, TOP20_COL
+from src.settings import load_config
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="运行月度选股 M6 learning-to-rank 主模型")
-    p.add_argument("--config", type=Path, default=None)
-    p.add_argument("--dataset", type=str, default="data/cache/monthly_selection_features.parquet")
-    p.add_argument("--duckdb-path", type=str, default="")
-    p.add_argument("--output-prefix", type=str, default="monthly_selection_m6_ltr")
-    p.add_argument("--results-dir", type=str, default="")
-    p.add_argument("--top-k", type=str, default="20,30,50")
-    p.add_argument("--bucket-count", type=int, default=5)
-    p.add_argument("--candidate-pools", type=str, default="U1_liquid_tradable,U2_risk_sane")
-    p.add_argument("--min-train-months", type=int, default=24)
-    p.add_argument("--min-train-rows", type=int, default=500)
-    p.add_argument(
-        "--max-fit-rows",
-        type=int,
-        default=0,
-        help="每个 walk-forward 训练窗的确定性抽样上限；0 表示使用全部训练行。",
-    )
-    p.add_argument("--cost-bps", type=float, default=10.0)
-    p.add_argument("--random-seed", type=int, default=42)
-    p.add_argument("--availability-lag-days", type=int, default=30)
-    p.add_argument("--relevance-grades", type=int, default=5)
-    p.add_argument(
-        "--model-n-jobs",
-        type=int,
-        default=0,
-        help="模型训练线程数；0 表示使用全部 CPU 核心，1 保持旧的单线程行为。",
-    )
-    p.add_argument(
-        "--families",
-        type=str,
-        default="industry_breadth,fund_flow,fundamental",
-        help="M6 主输入特征家族。默认采用 M5 收敛出的 price_volume + industry_breadth + fund_flow + fundamental。",
-    )
-    p.add_argument(
-        "--ltr-models",
-        type=str,
-        default="xgboost_rank_ndcg,xgboost_rank_pairwise,top20_calibrated,ranker_top20_ensemble",
-        help="可选 xgboost_rank_ndcg,xgboost_rank_pairwise,top20_calibrated,ranker_top20_ensemble。",
-    )
-    p.add_argument(
-        "--use-industry-neutral-zscore",
-        action="store_true",
-        default=False,
-        help="P0-1: 对基本面因子使用行业内 z-score 中性化（生成 _ind_z 列替代 _z）。",
-    )
-    p.add_argument(
-        "--rebalance-rule", type=str, default="",
-        choices=["", "W", "M", "BM", "Q", "W-FRI"],
-        help="换仓频率（空字符串=从 dataset 自动检测，默认 M）",
-    )
+    for flag, default, kw in [
+        ("--config", None, {}), ("--dataset", "data/cache/monthly_selection_features.parquet", {}),
+        ("--duckdb-path", "", {}), ("--output-prefix", "monthly_selection_m6_ltr", {}),
+        ("--results-dir", "", {}), ("--top-k", "20,30,50", {}),
+        ("--bucket-count", 5, {"type": int}), ("--candidate-pools", "U1_liquid_tradable,U2_risk_sane", {}),
+        ("--min-train-months", 24, {"type": int}), ("--min-train-rows", 500, {"type": int}),
+        ("--max-fit-rows", 0, {"type": int}), ("--cost-bps", 10.0, {"type": float}),
+        ("--random-seed", 42, {"type": int}), ("--availability-lag-days", 30, {"type": int}),
+        ("--relevance-grades", 5, {"type": int}), ("--model-n-jobs", 0, {"type": int}),
+        ("--families", "industry_breadth,fund_flow,fundamental", {}),
+        ("--ltr-models", "xgboost_rank_ndcg,xgboost_rank_pairwise,top20_calibrated,ranker_top20_ensemble", {}),
+        ("--rebalance-rule", "", {}),
+    ]:
+        p.add_argument(flag, type=kw.get("type", str), default=default)
+    p.add_argument("--skip-xgboost", action="store_true")
+    p.add_argument("--use-industry-neutral-zscore", action="store_true", default=False)
     return p.parse_args()
-
-
-def _resolve_project_path(raw: str | Path) -> Path:
-    p = Path(raw)
-    return p if p.is_absolute() else ROOT / p
-
-
-def _project_relative(path: str | Path) -> str:
-    p = Path(path)
-    try:
-        return str(p.resolve().relative_to(ROOT))
-    except ValueError:
-        return str(p)
-
-
-def _resolve_loaded_config_path(config_arg: Path | None) -> Path | None:
-    if config_arg is not None:
-        return resolve_config_path(config_arg)
-    candidates: list[Path] = []
-    env_path = os.environ.get("QUANT_CONFIG", "").strip()
-    if env_path:
-        candidates.extend(config_path_candidates(env_path))
-    candidates.extend([ROOT / "config.yaml", ROOT / "config.yaml.example"])
-    for path in candidates:
-        if path.exists():
-            return path
-    return candidates[0] if candidates else None
-
-
-def _parse_int_list(raw: str) -> list[int]:
-    return sorted({int(x.strip()) for x in str(raw).split(",") if x.strip()})
-
-
-def _parse_str_list(raw: str) -> list[str]:
-    return [x.strip() for x in str(raw).split(",") if x.strip()]
-
-
-def build_quality_payload(
-    *,
-    dataset: pd.DataFrame,
-    scores: pd.DataFrame,
-    spec: FeatureSpec,
-    cfg: M6RunConfig,
-    dataset_path: Path,
-    db_path: Path,
-    output_stem: str,
-    config_source: str,
-    research_config_id: str,
-) -> dict[str, Any]:
-    valid = valid_pool_frame(dataset)
-    return {
-        "result_type": "monthly_selection_m6_ltr",
-        "research_topic": "monthly_selection_m6_ltr",
-        "research_config_id": research_config_id,
-        "output_stem": output_stem,
-        "config_source": config_source,
-        "dataset_path": str(dataset_path.relative_to(ROOT)) if dataset_path.is_relative_to(ROOT) else str(dataset_path),
-        "duckdb_path": str(db_path.relative_to(ROOT)) if db_path.is_relative_to(ROOT) else str(db_path),
-        "dataset_version": "monthly_selection_features_v1",
-        "candidate_pools": list(cfg.candidate_pools),
-        "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in cfg.candidate_pools},
-        "top_ks": list(cfg.top_ks),
-        "bucket_count": int(cfg.bucket_count),
-        "cost_assumption": f"{float(cfg.cost_bps):.4g} bps per unit half-L1 turnover",
-        "feature_spec": {"name": spec.name, "families": list(spec.families), "feature_count": len(spec.feature_cols)},
-        "label_spec": "monthly query relevance from forward_1m_excess_vs_market; top20 classifier uses future_top_20pct",
-        "pit_policy": "features are signal-date-or-earlier; fundamental uses announcement_date <= signal_date; shareholder is off by default; ML uses past months only",
-        "cv_policy": "walk_forward_by_signal_month",
-        "hyperparameter_policy": "fixed conservative defaults; no random CV and no future-month tuning",
-        "ltr_models": list(cfg.ltr_models),
-        "relevance_grades": int(cfg.relevance_grades),
-        "max_fit_rows": int(cfg.max_fit_rows),
-        "model_n_jobs": int(normalize_model_n_jobs(cfg.model_n_jobs)),
-        "random_seed": int(cfg.random_seed),
-        "rows": int(len(dataset)),
-        "valid_rows": int(len(valid)),
-        "valid_signal_months": int(valid["signal_date"].nunique()) if not valid.empty else 0,
-        "min_valid_signal_date": str(valid["signal_date"].min().date()) if not valid.empty else "",
-        "max_valid_signal_date": str(valid["signal_date"].max().date()) if not valid.empty else "",
-        "models": sorted(scores["model"].unique().tolist()) if not scores.empty else [],
-    }
-
-
-def build_doc(
-    *,
-    quality: dict[str, Any],
-    leaderboard: pd.DataFrame,
-    feature_coverage: pd.DataFrame,
-    year_slice: pd.DataFrame,
-    regime_slice: pd.DataFrame,
-    artifacts: list[str],
-) -> str:
-    generated_at = pd.Timestamp.utcnow().isoformat()
-    leader_view = leaderboard.sort_values(
-        ["top_k", "candidate_pool_version", "topk_excess_after_cost_mean", "rank_ic_mean"],
-        ascending=[True, True, False, False],
-    )
-    cov_view = feature_coverage.head(80).copy()
-    year_view = year_slice.sort_values(["candidate_pool_version", "model", "top_k", "year"]).head(40)
-    regime_view = regime_slice.sort_values(["top_k", "candidate_pool_version", "model", "realized_market_state"]).head(40)
-    best_u1_top20 = pd.DataFrame()
-    if not leaderboard.empty:
-        best_u1_top20 = leaderboard[
-            (leaderboard["candidate_pool_version"] == "U1_liquid_tradable") & (leaderboard["top_k"] == 20)
-        ].head(5)
-    artifact_lines = "\n".join(f"- `{x}`" for x in artifacts)
-    return f"""# Monthly Selection M6 Learning-to-Rank
-
-- 生成时间：`{generated_at}`
-- 结果类型：`monthly_selection_m6_ltr`
-- 研究主题：`{quality.get('research_topic', '')}`
-- 研究配置：`{quality.get('research_config_id', '')}`
-- 输出 stem：`{quality.get('output_stem', '')}`
-- 数据集：`{quality.get('dataset_path', '')}`
-- 数据库：`{quality.get('duckdb_path', '')}`
-- 训练/评估：按 signal_date walk-forward；每个测试月只用历史月份训练。
-- 有效标签月份：`{quality.get('valid_signal_months', 0)}`
-- 单窗训练行上限：`{quality.get('max_fit_rows', 0)}`（`0` 表示不抽样）
-
-## Leaderboard
-
-{_format_markdown_table(leader_view, max_rows=40)}
-
-## U1 Top20 Leading Models
-
-{_format_markdown_table(best_u1_top20, max_rows=5)}
-
-## Feature Coverage
-
-{_format_markdown_table(cov_view, max_rows=80)}
-
-## Year Slice
-
-{_format_markdown_table(year_view, max_rows=40)}
-
-## Realized Market State Slice
-
-{_format_markdown_table(regime_view, max_rows=40)}
-
-## 口径
-
-- M6 默认输入沿用 M5 收敛方向：`price_volume + industry_breadth + fund_flow + fundamental`，暂不把 shareholder 作为主输入。
-- `M6_xgboost_rank_ndcg` 与 `M6_xgboost_rank_pairwise` 使用每个 signal_date 作为 query group，标签为同月未来 market-relative excess 的分级 relevance。
-- `M6_top20_calibrated` 使用 future top20 bucket 分类概率，并在每个测试月内转换为截面分位 score。
-- `M6_ranker_top20_ensemble` 固定使用 `0.60 * rank_ndcg_percentile + 0.40 * top20_percentile`，不使用未来月调权。
-- `topk_excess_after_cost` 使用半 L1 月度换手乘以 `cost_bps` 的简化成本敏感性。
-- 本脚本只生成研究候选与诊断产物，不写入 promoted registry，不生成交易指令。
-
-## 本轮结论
-
-- 本轮新增：M6 learning-to-rank runner，覆盖 XGBoost Lambda/NDCG 排序、pairwise 排序、top-bucket rank calibration 与固定 ensemble。
-- Gate 仍看 Rank IC、Top-K after-cost 超额、Top-K vs next-K、分桶 spread、年度/状态稳定性和行业暴露；oracle overlap 不作为主评价。
-- 若 strong-up 或关键年份切片仍不稳，下一步优先做 regime-aware calibration，而不是把模型直接提升为推荐候选。
-
-## 本轮产物
-
-{artifact_lines}
-"""
 
 
 def main() -> int:
     started_at = time.perf_counter()
     args = parse_args()
-    loaded_config_path = _resolve_loaded_config_path(args.config)
+    loaded_config_path = resolve_loaded_config_path(args.config)
     cfg_raw = load_config(args.config)
     paths = cfg_raw.get("paths", {}) or {}
-    config_source = _project_relative(loaded_config_path) if loaded_config_path is not None else "default_config_lookup"
-    dataset_path = _resolve_project_path(args.dataset)
-    db_path_raw = args.duckdb_path.strip() or str(paths.get("duckdb_path") or "data/market.duckdb")
-    db_path = _resolve_project_path(db_path_raw)
-    results_dir_raw = args.results_dir.strip() or str(paths.get("results_dir") or "data/results")
-    results_dir = _resolve_project_path(results_dir_raw)
-    experiments_dir = _resolve_project_path(str(paths.get("experiments_dir") or "data/experiments"))
+    config_source = project_relative(loaded_config_path) if loaded_config_path else "default_config_lookup"
+    dataset_path = resolve_project_path(args.dataset)
+    db_path = resolve_project_path(args.duckdb_path.strip() or str(paths.get("duckdb_path") or "data/market.duckdb"))
+    results_dir = resolve_project_path(args.results_dir.strip() or str(paths.get("results_dir") or "data/results"))
+    experiments_dir = resolve_project_path(str(paths.get("experiments_dir") or "data/experiments"))
     docs_dir = ROOT / "docs"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    docs_dir.mkdir(parents=True, exist_ok=True)
+    for d in [results_dir, experiments_dir, docs_dir]:
+        d.mkdir(parents=True, exist_ok=True)
 
-    top_ks = _parse_int_list(args.top_k)
-    pools = _parse_str_list(args.candidate_pools)
-    enabled_families = _parse_str_list(args.families)
-    ltr_models = tuple(_parse_str_list(args.ltr_models))
+    top_ks = parse_int_list(args.top_k)
+    pools = parse_str_list(args.candidate_pools)
+    enabled_families = parse_str_list(args.families)
+    ltr_models = tuple(parse_str_list(args.ltr_models))
     cfg = M6RunConfig(
-        top_ks=tuple(top_ks),
-        candidate_pools=tuple(pools),
-        bucket_count=int(args.bucket_count),
-        min_train_months=int(args.min_train_months),
-        min_train_rows=int(args.min_train_rows),
-        max_fit_rows=int(args.max_fit_rows),
-        cost_bps=float(args.cost_bps),
-        random_seed=int(args.random_seed),
+        top_ks=tuple(top_ks), candidate_pools=tuple(pools),
+        bucket_count=int(args.bucket_count), min_train_months=int(args.min_train_months),
+        min_train_rows=int(args.min_train_rows), max_fit_rows=int(args.max_fit_rows),
+        cost_bps=float(args.cost_bps), random_seed=int(args.random_seed),
         availability_lag_days=int(args.availability_lag_days),
         relevance_grades=int(args.relevance_grades),
-        model_n_jobs=int(args.model_n_jobs),
-        ltr_models=ltr_models,
+        model_n_jobs=int(args.model_n_jobs), ltr_models=ltr_models,
         use_industry_neutral_zscore=bool(args.use_industry_neutral_zscore),
     )
     output_stem = f"{slugify_token(args.output_prefix)}_{pd.Timestamp.now().strftime('%Y-%m-%d')}"
@@ -345,41 +93,29 @@ def main() -> int:
         f"_pools_{'-'.join(slugify_token(x) for x in pools)}"
         f"_topk_{'-'.join(str(x) for x in top_ks)}"
         f"_models_{'-'.join(slugify_token(x) for x in ltr_models)}"
-        f"_grades_{int(args.relevance_grades)}"
-        f"_maxfit_{int(args.max_fit_rows)}"
+        f"_grades_{int(args.relevance_grades)}_maxfit_{int(args.max_fit_rows)}"
         f"_jobs_{slugify_token(model_n_jobs_token(args.model_n_jobs))}"
-        f"_wf_{int(args.min_train_months)}m"
-        f"_costbps_{slugify_token(args.cost_bps)}"
+        f"_wf_{int(args.min_train_months)}m_costbps_{slugify_token(args.cost_bps)}"
     )
     identity = make_research_identity(
         result_type="monthly_selection_m6_ltr",
         research_topic="monthly_selection_m6_ltr",
-        research_config_id=research_config_id,
-        output_stem=output_stem,
+        research_config_id=research_config_id, output_stem=output_stem,
     )
-    research_config_id = identity.research_config_id
-    output_stem = identity.output_stem
-
     print(f"[monthly-m6] research_config_id={research_config_id}")
+
     dataset = load_baseline_dataset(dataset_path, candidate_pools=pools)
     m5_cfg = M5RunConfig(
-        top_ks=cfg.top_ks,
-        candidate_pools=cfg.candidate_pools,
-        bucket_count=cfg.bucket_count,
-        min_train_months=cfg.min_train_months,
-        min_train_rows=cfg.min_train_rows,
-        max_fit_rows=cfg.max_fit_rows,
-        cost_bps=cfg.cost_bps,
-        random_seed=cfg.random_seed,
+        top_ks=cfg.top_ks, candidate_pools=cfg.candidate_pools,
+        bucket_count=cfg.bucket_count, min_train_months=cfg.min_train_months,
+        min_train_rows=cfg.min_train_rows, max_fit_rows=cfg.max_fit_rows,
+        cost_bps=cfg.cost_bps, random_seed=cfg.random_seed,
         availability_lag_days=cfg.availability_lag_days,
         model_n_jobs=cfg.model_n_jobs,
         use_industry_neutral_zscore=cfg.use_industry_neutral_zscore,
     )
     dataset = attach_enabled_families(dataset, db_path, m5_cfg, enabled_families)
-    spec = build_m6_feature_spec(
-        enabled_families,
-        use_industry_neutral_zscore=cfg.use_industry_neutral_zscore,
-    )
+    spec = build_m6_feature_spec(enabled_families, use_industry_neutral_zscore=cfg.use_industry_neutral_zscore)
     feature_coverage = summarize_feature_coverage_by_spec(dataset, [spec])
     scores, raw_importance = build_walk_forward_ltr_scores(dataset, spec, cfg)
     if scores.empty:
@@ -395,15 +131,10 @@ def main() -> int:
     reject_reason = summarize_candidate_pool_reject_reason(dataset)
     feature_importance = summarize_ltr_feature_importance(raw_importance)
     leaderboard = build_leaderboard(monthly_long, rank_ic, quantile_spread, regime_slice)
-    quality = build_quality_payload(
-        dataset=dataset,
-        scores=scores,
-        spec=spec,
-        cfg=cfg,
-        dataset_path=dataset_path,
-        db_path=db_path,
-        output_stem=output_stem,
-        config_source=config_source,
+    quality = build_ltr_quality_payload(
+        dataset=dataset, scores=scores, spec=spec, cfg=cfg,
+        dataset_path=dataset_path, db_path=db_path,
+        output_stem=output_stem, config_source=config_source,
         research_config_id=research_config_id,
     )
 
@@ -425,7 +156,6 @@ def main() -> int:
         "manifest": results_dir / f"{output_stem}_manifest.json",
         "doc": docs_dir / f"{output_stem}.md",
     }
-
     leaderboard.to_csv(paths_out["leaderboard"], index=False)
     monthly_long.to_csv(paths_out["monthly_long"], index=False)
     rank_ic.to_csv(paths_out["rank_ic"], index=False)
@@ -445,254 +175,122 @@ def main() -> int:
         "top_models_by_topk": leaderboard.sort_values(
             ["top_k", "topk_excess_after_cost_mean", "rank_ic_mean"],
             ascending=[True, False, False],
-        )
-        .groupby("top_k", as_index=False)
-        .head(5)
-        .to_dict(orient="records")
-        if not leaderboard.empty
-        else [],
+        ).groupby("top_k", as_index=False).head(5).to_dict(orient="records")
+        if not leaderboard.empty else [],
     }
     paths_out["summary_json"].write_text(
-        json.dumps(_json_sanitize(summary_payload), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        json.dumps(json_sanitize(summary_payload), ensure_ascii=False, indent=2), encoding="utf-8",
     )
-    artifact_paths = [
-        _project_relative(p)
-        for key, p in paths_out.items()
+    artifact_paths_raw = [
+        project_relative(p) for key, p in paths_out.items()
         if key not in {"manifest", "doc"}
     ]
     paths_out["doc"].write_text(
-        build_doc(
-            quality=quality,
-            leaderboard=leaderboard,
-            feature_coverage=feature_coverage,
-            year_slice=year_slice,
-            regime_slice=regime_slice,
-            artifacts=[*artifact_paths, _project_relative(paths_out["manifest"])],
-        ),
-        encoding="utf-8",
+        build_ltr_doc(
+            quality=quality, leaderboard=leaderboard, feature_coverage=feature_coverage,
+            year_slice=year_slice, regime_slice=regime_slice,
+            artifacts=[*artifact_paths_raw, project_relative(paths_out["manifest"])],
+        ), encoding="utf-8",
     )
 
     min_signal_date = str(quality.get("min_valid_signal_date") or "")
     max_signal_date = str(quality.get("max_valid_signal_date") or "")
-    best_row: dict[str, Any] = {}
-    if not leaderboard.empty:
-        best_row = (
-            leaderboard.sort_values(
-                ["topk_excess_after_cost_mean", "rank_ic_mean"],
-                ascending=[False, False],
-            )
-            .iloc[0]
-            .to_dict()
-        )
-    rank_ic_observations = int(pd.to_numeric(rank_ic.get("rank_ic"), errors="coerce").notna().sum()) if not rank_ic.empty else 0
+    best_row = leaderboard.sort_values(
+        ["topk_excess_after_cost_mean", "rank_ic_mean"], ascending=[False, False],
+    ).iloc[0].to_dict() if not leaderboard.empty else {}
+    rank_ic_obs = int(pd.to_numeric(rank_ic.get("rank_ic"), errors="coerce").notna().sum()) if not rank_ic.empty else 0
     best_after_cost = best_row.get("topk_excess_after_cost_mean")
-    best_after_cost_float = float(best_after_cost) if pd.notna(best_after_cost) else None
-    # H2: 换仓频率——CLI 显式指定优先，否则从 dataset 自动检测
-    if args.rebalance_rule:
-        rebalance_rule = args.rebalance_rule
-    elif not dataset.empty and "rebalance_rule" in dataset.columns:
-        rebalance_rule = str(dataset["rebalance_rule"].iloc[0]).strip().upper() or "M"
-    else:
-        rebalance_rule = "M"
-    data_slice = DataSlice(
-        dataset_name="monthly_selection_m6_ltr",
-        source_tables=(_project_relative(dataset_path), _project_relative(db_path)),
-        date_start=min_signal_date,
-        date_end=max_signal_date,
-        asof_trade_date=max_signal_date or None,
-        signal_date_col="signal_date",
-        symbol_col="symbol",
-        candidate_pool_version=",".join(pools),
-        rebalance_rule=rebalance_rule,
-        execution_mode="tplus1_open",
-        label_return_mode="open_to_open",
-        feature_set_id=spec.name,
-        feature_columns=tuple(spec.feature_cols),
-        label_columns=(LABEL_COL, EXCESS_COL, TOP20_COL),
-        pit_policy=quality["pit_policy"],
-        config_path=config_source,
-        extra={
-            "dataset_path": _project_relative(dataset_path),
-            "duckdb_path": _project_relative(db_path),
-            "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
-            "enabled_families": enabled_families,
-            "feature_spec": quality["feature_spec"],
-            "top_ks": top_ks,
-            "bucket_count": int(args.bucket_count),
-            "availability_lag_days": int(args.availability_lag_days),
-            "relevance_grades": int(args.relevance_grades),
-            "cv_policy": quality["cv_policy"],
-        },
-    )
-    artifact_refs = (
-        ArtifactRef("summary_json", _project_relative(paths_out["summary_json"]), "json"),
-        ArtifactRef("leaderboard_csv", _project_relative(paths_out["leaderboard"]), "csv"),
-        ArtifactRef("monthly_long_csv", _project_relative(paths_out["monthly_long"]), "csv"),
-        ArtifactRef("rank_ic_csv", _project_relative(paths_out["rank_ic"]), "csv"),
-        ArtifactRef("quantile_spread_csv", _project_relative(paths_out["quantile_spread"]), "csv"),
-        ArtifactRef("feature_coverage_csv", _project_relative(paths_out["feature_coverage"]), "csv"),
-        ArtifactRef("feature_importance_csv", _project_relative(paths_out["feature_importance"]), "csv"),
-        ArtifactRef("topk_holdings_csv", _project_relative(paths_out["topk_holdings"]), "csv"),
-        ArtifactRef("industry_exposure_csv", _project_relative(paths_out["industry_exposure"]), "csv"),
-        ArtifactRef("candidate_pool_width_csv", _project_relative(paths_out["candidate_pool_width"]), "csv"),
-        ArtifactRef(
-            "candidate_pool_reject_reason_csv",
-            _project_relative(paths_out["candidate_pool_reject_reason"]),
-            "csv",
-        ),
-        ArtifactRef("year_slice_csv", _project_relative(paths_out["year_slice"]), "csv"),
-        ArtifactRef("regime_slice_csv", _project_relative(paths_out["regime_slice"]), "csv"),
-        ArtifactRef("market_states_csv", _project_relative(paths_out["market_states"]), "csv"),
-        ArtifactRef("report_md", _project_relative(paths_out["doc"]), "md"),
-        ArtifactRef("manifest_json", _project_relative(paths_out["manifest"]), "json"),
-    )
-    metrics = {
-        "rows": int(quality["rows"]),
-        "valid_rows": int(quality["valid_rows"]),
-        "valid_signal_months": int(quality["valid_signal_months"]),
-        "score_rows": int(len(scores)),
-        "rank_ic_observations": rank_ic_observations,
-        "monthly_long_rows": int(len(monthly_long)),
-        "topk_holdings_rows": int(len(topk_holdings)),
-        "feature_coverage_rows": int(len(feature_coverage)),
-        "model_count": int(len(quality["models"])),
-        "best_model": str(best_row.get("model") or ""),
-        "best_candidate_pool_version": str(best_row.get("candidate_pool_version") or ""),
-        "best_top_k": int(best_row["top_k"]) if best_row.get("top_k") is not None and pd.notna(best_row.get("top_k")) else None,
-        "best_topk_excess_after_cost_mean": best_after_cost_float,
-        "best_rank_ic_mean": float(best_row["rank_ic_mean"])
-        if best_row.get("rank_ic_mean") is not None and pd.notna(best_row.get("rank_ic_mean"))
-        else None,
-    }
-    gates = {
-        "data_gate": {
-            "passed": bool(metrics["valid_rows"] > 0 and metrics["valid_signal_months"] > 0),
-            "checks": {
-                "has_valid_rows": metrics["valid_rows"] > 0,
-                "has_valid_signal_months": metrics["valid_signal_months"] > 0,
-                "has_feature_coverage": metrics["feature_coverage_rows"] > 0,
-            },
-        },
-        "rank_gate": {
-            "passed": bool(rank_ic_observations > 0),
-            "rank_ic_observations": rank_ic_observations,
-        },
-        "spread_gate": {
-            "passed": bool(not monthly_long.empty and not quantile_spread.empty),
-            "monthly_rows": int(len(monthly_long)),
-            "quantile_spread_rows": int(len(quantile_spread)),
-        },
-        "baseline_gate": {
-            "passed": bool(best_after_cost_float is not None and best_after_cost_float > 0.0),
-            "best_topk_excess_after_cost_mean": best_after_cost_float,
-        },
-        "year_gate": {
-            "passed": bool(not year_slice.empty),
-            "year_slice_rows": int(len(year_slice)),
-        },
-        "regime_gate": {
-            "passed": bool(not regime_slice.empty),
-            "regime_slice_rows": int(len(regime_slice)),
-        },
-        "governance_gate": {
-            "passed": True,
-            "manifest_schema": "research_result_v1",
-        },
-    }
-    config_info = config_snapshot(
-        config_path=loaded_config_path,
-        resolved_config=cfg_raw,
-        sections=(
-            "paths",
-            "database",
-            "signals",
-            "portfolio",
-            "backtest",
-            "transaction_costs",
-            "prefilter",
-            "monthly_selection",
-        ),
-    )
-    config_info["config_path"] = config_source
-    result = ExperimentResult(
-        result_id=build_result_id(identity, [data_slice], metrics),
+    rebalance_rule = args.rebalance_rule or ("M" if dataset.empty or "rebalance_rule" not in dataset.columns else str(dataset["rebalance_rule"].iloc[0]).strip().upper() or "M")
+    feature_columns = tuple(spec.feature_cols)
+
+    finalize_research_contract(
         identity=identity,
-        script_name=_project_relative(Path(__file__).resolve()),
-        command=shlex.join([sys.executable, *sys.argv]),
-        created_at=utc_now_iso(),
-        duration_sec=round(time.perf_counter() - started_at, 6),
+        script_path=project_relative(Path(__file__).resolve()),
+        started_at=started_at, config_source=config_source, config_raw=cfg_raw,
+        loaded_config_path=loaded_config_path,
+        experiments_dir=experiments_dir,
+        paths_out=paths_out, dataset_path=dataset_path,
+        data_slice_kwargs=dict(
+            dataset_name="monthly_selection_m6_ltr",
+            source_tables=(project_relative(dataset_path), project_relative(db_path)),
+            date_start=min_signal_date, date_end=max_signal_date,
+            asof_trade_date=max_signal_date or None,
+            signal_date_col="signal_date", symbol_col="symbol",
+            candidate_pool_version=",".join(pools),
+            rebalance_rule=rebalance_rule, execution_mode="tplus1_open",
+            label_return_mode="open_to_open",
+            feature_set_id=spec.name,
+            feature_columns=feature_columns,
+            label_columns=(LABEL_COL, EXCESS_COL, TOP20_COL),
+            pit_policy=quality["pit_policy"], config_path=config_source,
+            extra={
+                "dataset_path": project_relative(dataset_path),
+                "duckdb_path": project_relative(db_path),
+                "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in pools},
+                "enabled_families": enabled_families,
+                "feature_spec": quality["feature_spec"],
+                "top_ks": top_ks, "bucket_count": int(args.bucket_count),
+                "availability_lag_days": int(args.availability_lag_days),
+                "relevance_grades": int(args.relevance_grades),
+                "cv_policy": quality["cv_policy"],
+            },
+        ),
+        metrics={
+            "rows": int(quality["rows"]), "valid_rows": int(quality["valid_rows"]),
+            "valid_signal_months": int(quality["valid_signal_months"]),
+            "score_rows": int(len(scores)), "rank_ic_observations": rank_ic_obs,
+            "monthly_long_rows": int(len(monthly_long)),
+            "topk_holdings_rows": int(len(topk_holdings)),
+            "feature_coverage_rows": int(len(feature_coverage)),
+            "model_count": int(len(quality["models"])),
+            "best_model": str(best_row.get("model") or ""),
+            "best_candidate_pool_version": str(best_row.get("candidate_pool_version") or ""),
+            "best_top_k": int(best_row["top_k"]) if best_row.get("top_k") is not None and pd.notna(best_row.get("top_k")) else None,
+            "best_topk_excess_after_cost_mean": float(best_after_cost) if pd.notna(best_after_cost) else None,
+            "best_rank_ic_mean": float(best_row["rank_ic_mean"]) if best_row.get("rank_ic_mean") is not None and pd.notna(best_row.get("rank_ic_mean")) else None,
+        },
+        gates={
+            "data_gate": {
+                "passed": bool(quality["valid_rows"] > 0 and quality["valid_signal_months"] > 0),
+                "checks": {
+                    "has_valid_rows": quality["valid_rows"] > 0,
+                    "has_valid_signal_months": quality["valid_signal_months"] > 0,
+                    "has_feature_coverage": len(feature_coverage) > 0,
+                },
+            },
+            "rank_gate": {"passed": bool(rank_ic_obs > 0), "rank_ic_observations": rank_ic_obs},
+            "spread_gate": {
+                "passed": bool(not monthly_long.empty and not quantile_spread.empty),
+                "monthly_rows": int(len(monthly_long)),
+                "quantile_spread_rows": int(len(quantile_spread)),
+            },
+            "baseline_gate": {
+                "passed": bool(best_after_cost is not None and pd.notna(best_after_cost) and float(best_after_cost) > 0.0),
+                "best_topk_excess_after_cost_mean": float(best_after_cost) if pd.notna(best_after_cost) else None,
+            },
+            "year_gate": {"passed": bool(not year_slice.empty), "year_slice_rows": int(len(year_slice))},
+            "regime_gate": {"passed": bool(not regime_slice.empty), "regime_slice_rows": int(len(regime_slice))},
+            "governance_gate": {"passed": True, "manifest_schema": "research_result_v1"},
+        },
         seed=int(args.random_seed),
-        data_slices=(data_slice,),
-        config=config_info,
-        params={
-            "cli": vars(args),
-            "run_config": {
-                "top_ks": list(cfg.top_ks),
-                "candidate_pools": list(cfg.candidate_pools),
-                "bucket_count": cfg.bucket_count,
-                "min_train_months": cfg.min_train_months,
-                "min_train_rows": cfg.min_train_rows,
-                "max_fit_rows": cfg.max_fit_rows,
-                "cost_bps": cfg.cost_bps,
-                "availability_lag_days": cfg.availability_lag_days,
-                "relevance_grades": cfg.relevance_grades,
-                "ltr_models": list(cfg.ltr_models),
-                "model_n_jobs": normalize_model_n_jobs(cfg.model_n_jobs),
-                "use_industry_neutral_zscore": cfg.use_industry_neutral_zscore,
-            },
-            "feature_file_hash": file_sha256(dataset_path),
-            "runtime_config_hash": stable_hash({
-                "dataset": str(dataset_path),
-                "max_fit_rows": cfg.max_fit_rows,
-                "min_train_months": cfg.min_train_months,
-                "candidate_pools": list(cfg.candidate_pools),
-                "ltr_models": list(cfg.ltr_models),
-                "cost_bps": cfg.cost_bps,
-                "random_seed": cfg.random_seed,
-                "availability_lag_days": cfg.availability_lag_days,
-                "use_industry_neutral_zscore": cfg.use_industry_neutral_zscore,
-            }),
-            "overrides": {
-                key: value
-                for key, value in {
-                    "dataset": args.dataset,
-                    "duckdb_path": args.duckdb_path.strip(),
-                    "results_dir": args.results_dir.strip(),
-                    "top_k": args.top_k,
-                    "candidate_pools": args.candidate_pools,
-                    "families": args.families,
-                    "ltr_models": args.ltr_models,
-                }.items()
-                if value
-            },
-        },
-        metrics=metrics,
-        gates=gates,
-        artifacts=artifact_refs,
-        promotion={
-            "production_eligible": False,
-            "registry_status": "not_registered",
-            "blocking_reasons": ["m6_ltr_research_only_not_promotion_candidate"],
-        },
+        promotion_blocking=["m6_ltr_research_only_not_promotion_candidate"],
         notes="Monthly selection M6 LTR contract; ranking outputs are unchanged.",
-    )
-    write_research_manifest(
-        paths_out["manifest"],
-        result,
-        extra={
-            "generated_at_utc": result.created_at,
-            **quality,
-            "legacy_artifacts": [*artifact_paths, _project_relative(paths_out["doc"])],
+        artifact_paths_raw=artifact_paths_raw,
+        cli_args=vars(args),
+        params_extra={
+            "top_ks": list(cfg.top_ks), "candidate_pools": list(cfg.candidate_pools),
+            "bucket_count": cfg.bucket_count, "min_train_months": cfg.min_train_months,
+            "min_train_rows": cfg.min_train_rows, "max_fit_rows": cfg.max_fit_rows,
+            "cost_bps": cfg.cost_bps, "availability_lag_days": cfg.availability_lag_days,
+            "relevance_grades": cfg.relevance_grades, "ltr_models": list(cfg.ltr_models),
+            "model_n_jobs": normalize_model_n_jobs(cfg.model_n_jobs),
+            "use_industry_neutral_zscore": cfg.use_industry_neutral_zscore,
         },
     )
-    append_experiment_result(experiments_dir, result)
 
     print(f"[monthly-m6] valid_rows={quality['valid_rows']} valid_months={quality['valid_signal_months']}")
     print(f"[monthly-m6] leaderboard={paths_out['leaderboard']}")
     print(f"[monthly-m6] manifest={paths_out['manifest']}")
-    print(f"[monthly-m6] research_index={experiments_dir / 'research_results.jsonl'}")
-    print(f"[monthly-m6] doc={paths_out['doc']}")
     return 0
 
 

@@ -9,9 +9,9 @@ import pytest
 # A3: 优先从 src/ 导入已迁移函数；未迁移函数仍从 scripts/ 导入（E1 待处理）
 import scripts.run_monthly_selection_report as m7_report  # CLI main() 仍在 scripts
 
-# E1 待迁移：以下函数仍在 scripts/run_monthly_selection_report.py 中
-from scripts.run_monthly_selection_report import (  # noqa: E402
-    attach_stock_names,
+# 核心函数已迁移到 src/
+from src.data_fetcher.stock_name_cache import attach_stock_names  # noqa: E402
+from src.reporting.monthly_report import (  # noqa: E402
     build_recommendation_table,
     summarize_m9_integrity,
 )
@@ -308,6 +308,8 @@ def test_main_writes_standard_research_manifest(tmp_path, monkeypatch):
     dataset_path = tmp_path / "monthly_selection_features.parquet"
     _m7_sample(months=4, symbols=10).to_parquet(dataset_path, index=False)
     monkeypatch.setattr(m7_report, "ROOT", tmp_path)
+    from src.pipeline import cli_helpers as _ch
+    monkeypatch.setattr(_ch, "ROOT", tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",

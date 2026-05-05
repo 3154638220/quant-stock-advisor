@@ -27,6 +27,7 @@ from src.pipeline.monthly_baselines import (
     normalize_model_n_jobs,
     valid_pool_frame,
 )
+from src.pipeline.cli_helpers import project_relative
 from src.pipeline.monthly_multisource import (
     FUNDAMENTAL_RAW_FEATURES,
     FeatureSpec,
@@ -34,6 +35,8 @@ from src.pipeline.monthly_multisource import (
     build_feature_specs,
     industry_neutral_zscore,
 )
+from src.reporting.markdown_report import format_markdown_table
+from src.research.gates import POOL_RULES
 
 
 @dataclass(frozen=True)
@@ -832,3 +835,124 @@ def summarize_ltr_feature_importance(importance: pd.DataFrame) -> pd.DataFrame:
         observations=("test_signal_date", "nunique"),
     ).reset_index()
     return out.sort_values(["candidate_pool_version", "model", "importance"], ascending=[True, True, False])
+
+
+def build_ltr_quality_payload(
+    *,
+    dataset: pd.DataFrame,
+    scores: pd.DataFrame,
+    spec: FeatureSpec,
+    cfg: Any,
+    dataset_path: Any,
+    db_path: Any,
+    output_stem: str,
+    config_source: str,
+    research_config_id: str,
+) -> dict[str, Any]:
+    valid = valid_pool_frame(dataset)
+    return {
+        "result_type": "monthly_selection_m6_ltr",
+        "research_topic": "monthly_selection_m6_ltr",
+        "research_config_id": research_config_id, "output_stem": output_stem,
+        "config_source": config_source,
+        "dataset_path": project_relative(dataset_path),
+        "duckdb_path": project_relative(db_path),
+        "dataset_version": "monthly_selection_features_v1",
+        "candidate_pools": list(cfg.candidate_pools),
+        "candidate_pool_rules": {p: POOL_RULES.get(p, "") for p in cfg.candidate_pools},
+        "top_ks": list(cfg.top_ks),
+        "bucket_count": int(cfg.bucket_count),
+        "cost_assumption": f"{float(cfg.cost_bps):.4g} bps per unit half-L1 turnover",
+        "feature_spec": {"name": spec.name, "families": list(spec.families), "feature_count": len(spec.feature_cols)},
+        "label_spec": "monthly query relevance from forward_1m_excess_vs_market; top20 classifier uses future_top_20pct",
+        "pit_policy": "features are signal-date-or-earlier; fundamental uses announcement_date <= signal_date; ML uses past months only",
+        "cv_policy": "walk_forward_by_signal_month",
+        "hyperparameter_policy": "fixed conservative defaults; no random CV and no future-month tuning",
+        "ltr_models": list(cfg.ltr_models),
+        "relevance_grades": int(cfg.relevance_grades),
+        "max_fit_rows": int(cfg.max_fit_rows),
+        "model_n_jobs": int(normalize_model_n_jobs(cfg.model_n_jobs)),
+        "random_seed": int(cfg.random_seed),
+        "rows": int(len(dataset)), "valid_rows": int(len(valid)),
+        "valid_signal_months": int(valid["signal_date"].nunique()) if not valid.empty else 0,
+        "min_valid_signal_date": str(valid["signal_date"].min().date()) if not valid.empty else "",
+        "max_valid_signal_date": str(valid["signal_date"].max().date()) if not valid.empty else "",
+        "models": sorted(scores["model"].unique().tolist()) if not scores.empty else [],
+    }
+
+
+def build_ltr_doc(
+    *,
+    quality: dict[str, Any],
+    leaderboard: pd.DataFrame,
+    feature_coverage: pd.DataFrame,
+    year_slice: pd.DataFrame,
+    regime_slice: pd.DataFrame,
+    artifacts: list[str],
+) -> str:
+    generated_at = pd.Timestamp.utcnow().isoformat()
+    leader_view = leaderboard.sort_values(
+        ["top_k", "candidate_pool_version", "topk_excess_after_cost_mean", "rank_ic_mean"],
+        ascending=[True, True, False, False],
+    )
+    cov_view = feature_coverage.head(80).copy()
+    year_view = year_slice.sort_values(["candidate_pool_version", "model", "top_k", "year"]).head(40)
+    regime_view = regime_slice.sort_values(["top_k", "candidate_pool_version", "model", "realized_market_state"]).head(40)
+    best_u1_top20 = pd.DataFrame()
+    if not leaderboard.empty:
+        best_u1_top20 = leaderboard[
+            (leaderboard["candidate_pool_version"] == "U1_liquid_tradable") & (leaderboard["top_k"] == 20)
+        ].head(5)
+    artifact_lines = "\n".join(f"- `{x}`" for x in artifacts)
+    return f"""# Monthly Selection M6 Learning-to-Rank
+
+- 生成时间：`{generated_at}`
+- 结果类型：`monthly_selection_m6_ltr`
+- 研究主题：`{quality.get('research_topic', '')}`
+- 研究配置：`{quality.get('research_config_id', '')}`
+- 输出 stem：`{quality.get('output_stem', '')}`
+- 数据集：`{quality.get('dataset_path', '')}`
+- 数据库：`{quality.get('duckdb_path', '')}`
+- 训练/评估：按 signal_date walk-forward；每个测试月只用历史月份训练。
+- 有效标签月份：`{quality.get('valid_signal_months', 0)}`
+- 单窗训练行上限：`{quality.get('max_fit_rows', 0)}`（`0` 表示不抽样）
+
+## Leaderboard
+
+{format_markdown_table(leader_view, max_rows=40)}
+
+## U1 Top20 Leading Models
+
+{format_markdown_table(best_u1_top20, max_rows=5)}
+
+## Feature Coverage
+
+{format_markdown_table(cov_view, max_rows=80)}
+
+## Year Slice
+
+{format_markdown_table(year_view, max_rows=40)}
+
+## Realized Market State Slice
+
+{format_markdown_table(regime_view, max_rows=40)}
+
+## 口径
+
+- M6 默认输入沿用 M5 收敛方向：`price_volume + industry_breadth + fund_flow + fundamental`，暂不把 shareholder 作为主输入。
+- `M6_xgboost_rank_ndcg` 与 `M6_xgboost_rank_pairwise` 使用每个 signal_date 作为 query group，标签为同月未来 market-relative excess 的分级 relevance。
+- `M6_top20_calibrated` 使用 future top20 bucket 分类概率，并在每个测试月内转换为截面分位 score。
+- `M6_ranker_top20_ensemble` 固定使用 `0.60 * rank_ndcg_percentile + 0.40 * top20_percentile`，不使用未来月调权。
+- `topk_excess_after_cost` 使用半 L1 月度换手乘以 `cost_bps` 的简化成本敏感性。
+- 本脚本只生成研究候选与诊断产物，不写入 promoted registry，不生成交易指令。
+
+## 本轮结论
+
+- 本轮新增：M6 learning-to-rank runner，覆盖 XGBoost Lambda/NDCG 排序、pairwise 排序、top-bucket rank calibration 与固定 ensemble。
+- Gate 仍看 Rank IC、Top-K after-cost 超额、Top-K vs next-K、分桶 spread、年度/状态稳定性和行业暴露；oracle overlap 不作为主评价。
+- 若 strong-up 或关键年份切片仍不稳，下一步优先做 regime-aware calibration，而不是把模型直接提升为推荐候选。
+
+## 本轮产物
+
+{artifact_lines}
+"""

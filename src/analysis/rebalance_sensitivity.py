@@ -63,6 +63,10 @@ def analyze_rebalance_sensitivity(
             limit_up_mode=cfg.limit_up_mode,
             limit_up_open_mask=cfg.limit_up_open_mask,
             rebalance_rule=rule,
+            vwap_slippage_bps_per_side=cfg.vwap_slippage_bps_per_side,
+            vwap_impact_bps=cfg.vwap_impact_bps,
+            use_tiered_impact=cfg.use_tiered_impact,
+            tiered_impact=cfg.tiered_impact,
         )
         bt = run_backtest(asset_returns, weights_signal, config=rule_cfg)
         signal_dates = select_month_end_signal_dates(

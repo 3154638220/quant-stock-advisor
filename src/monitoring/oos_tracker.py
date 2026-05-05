@@ -431,7 +431,7 @@ class OOSTracker:
                    AVG(benchmark_return) as avg_benchmark
             FROM {self._table}
             WHERE realized_excess_monthly IS NOT NULL
-              {('' if config_id else '')}
+              {('AND config_id = ?' if config_id else '')}
             GROUP BY config_id
             ORDER BY avg_realized DESC
             """,

@@ -177,9 +177,20 @@ backtest:
   # P4-B 关键差异字段：调仓频率（M/2W/W...）直接影响信号衰减与交易成本暴露。
   eval_rebalance_rule: M
   limit_up_mode: redistribute
-  # execution_mode=vwap 时生效：按换手额外扣减执行冲击
+  # execution_mode=vwap 时生效：按换手额外扣减执行冲击（未启用分层时的固定参数）
   vwap_slippage_bps_per_side: 3.0
   vwap_impact_bps: 8.0
+  # P2-9: 分层冲击成本 — 按 amount_20d 分三档，小市值冲击成本可数倍于大市值
+  use_tiered_impact: true
+  tiered_impact:
+    large_cap_threshold: 500000000   # >= 5 亿
+    mid_cap_threshold: 100000000     # >= 1 亿
+    large_slippage_bps: 1.5
+    large_impact_bps: 4.0
+    mid_slippage_bps: 3.0
+    mid_impact_bps: 8.0
+    small_slippage_bps: 5.0
+    small_impact_bps: 20.0
 
 transaction_costs:
   commission_buy_bps: 2.5

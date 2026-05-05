@@ -31,10 +31,17 @@ jobs:
         run: python -m ruff check src/ scripts/ tests/
 
       - name: Type check with mypy
-        run: python -m mypy src/ --ignore-missing-imports --show-error-codes || true
+        run: python -m mypy src/ --ignore-missing-imports --show-error-codes | tee mypy-output.txt || true
+        continue-on-error: true
 
       - name: Test with pytest
-        run: python -m pytest --cov=src --cov-fail-under=40 --cov-report=term-missing
+        run: python -m pytest --cov=src --cov-fail-under=56 --cov-report=term-missing
+
+      - name: Check script sizes (>200 lines warning)
+        run: |
+          echo "Scripts exceeding 200 lines (target: <200):"
+          find scripts/ -name "run_*.py" -exec wc -l {} + | awk '$1 > 200 {printf "  %s: %d lines\n", $2, $1}' || true
+          echo "See docs/plan-05-05 B4 for script slimming plan."
 
       - name: Smoke test imports
         run: |
