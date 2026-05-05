@@ -16,7 +16,6 @@ from src.reporting.m8_indcap3 import (
     load_stock_names,
 )
 
-
 # ── load_stock_names ───────────────────────────────────────────────────────
 
 

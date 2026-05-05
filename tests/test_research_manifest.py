@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pandas as pd
-
 from src.models.research_contract import (
     DataSlice,
     ResearchIdentity,
@@ -16,7 +12,6 @@ from src.research.manifest import (
     record_experiment_result,
     slugify_token,
 )
-
 
 # ── slugify_token ──────────────────────────────────────────────────────────
 

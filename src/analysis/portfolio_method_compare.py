@@ -18,9 +18,9 @@ import pandas as pd
 
 from src.backtest.engine import BacktestConfig, run_backtest
 from src.backtest.statistical_tests import (
-    newey_west_t_statistic,
     bootstrap_excess_ci,
     information_ratio,
+    newey_west_t_statistic,
     turnover_adjusted_ir,
 )
 

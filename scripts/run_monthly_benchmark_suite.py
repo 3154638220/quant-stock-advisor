@@ -20,7 +20,6 @@ if str(ROOT) not in sys.path:
 
 from scripts.research_identity import make_research_identity, slugify_token
 from src.analysis.benchmark_suite import (
-    BenchmarkSpec,
     build_benchmark_doc,
     build_benchmark_suite,
     build_capacity_analysis,
@@ -31,8 +30,12 @@ from src.analysis.benchmark_suite import (
 )
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
-    ArtifactRef, DataSlice, ExperimentResult,
-    build_result_id, utc_now_iso, write_research_manifest,
+    ArtifactRef,
+    DataSlice,
+    ExperimentResult,
+    build_result_id,
+    utc_now_iso,
+    write_research_manifest,
 )
 
 DEFAULT_MODEL = "M8_regime_aware_fixed_policy__indcap3"

@@ -4,26 +4,23 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.portfolio.covariance import (
+    _ewma_covariance,
+    estimate_covariance,
+)
+from src.portfolio.optimizer import (
+    _symmetrize,
+    covariance_diagnostics,
+    weight_diagnostics,
+)
 from src.portfolio.weights import (
     _nonnegative_weights_from_scores,
     _scores_from_column,
     _tiered_equal_weights_from_scores,
     apply_turnover_constraint,
-    build_portfolio_weights,
     infer_score_column,
     redistribute_individual_cap,
 )
-from src.portfolio.optimizer import (
-    _risk_contributions,
-    _symmetrize,
-    covariance_diagnostics,
-    weight_diagnostics,
-)
-from src.portfolio.covariance import (
-    _ewma_covariance,
-    estimate_covariance,
-)
-
 
 # ── weights: infer_score_column ───────────────────────────────────────────────
 

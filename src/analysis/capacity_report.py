@@ -514,10 +514,10 @@ def build_m10_statistical_section(
     - gates: 统计门槛评估
     """
     from src.backtest.statistical_tests import (
-        newey_west_t_statistic,
-        newey_west_ic_t_statistic,
         bootstrap_excess_ci,
         information_ratio,
+        newey_west_ic_t_statistic,
+        newey_west_t_statistic,
         turnover_adjusted_ir,
         turnover_excess_by_month,
         turnover_excess_correlation,

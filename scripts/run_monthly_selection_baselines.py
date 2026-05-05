@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
-import argparse, json, sys, time
+import argparse
+import json
+import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -16,21 +19,39 @@ if str(ROOT) not in sys.path:
 
 from scripts.research_identity import make_research_identity, slugify_token
 from src.pipeline.cli_helpers import (
-    parse_int_list, parse_str_list, project_relative, resolve_loaded_config_path, resolve_project_path,
+    parse_int_list,
+    parse_str_list,
+    project_relative,
+    resolve_loaded_config_path,
+    resolve_project_path,
 )
 from src.pipeline.monthly_baselines import (
-    ML_FEATURE_COLS, BaselineRunConfig, build_baselines_doc, build_leaderboard,
-    build_monthly_long, build_quantile_spread, build_rank_ic, build_realized_market_states,
-    build_static_scores, build_summary_payload, build_walk_forward_scores,
-    load_baseline_dataset, model_n_jobs_token, normalize_model_n_jobs,
-    summarize_candidate_pool_reject_reason, summarize_candidate_pool_width,
-    summarize_feature_importance, summarize_industry_exposure,
-    summarize_regime_slice, summarize_year_slice, valid_pool_frame,
+    ML_FEATURE_COLS,
+    BaselineRunConfig,
+    build_baselines_doc,
+    build_leaderboard,
+    build_monthly_long,
+    build_quantile_spread,
+    build_rank_ic,
+    build_realized_market_states,
+    build_static_scores,
+    build_summary_payload,
+    build_walk_forward_scores,
+    load_baseline_dataset,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
+    summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width,
+    summarize_feature_importance,
+    summarize_industry_exposure,
+    summarize_regime_slice,
+    summarize_year_slice,
+    valid_pool_frame,
 )
 from src.pipeline.research_runner import finalize_research_contract
 from src.reporting.markdown_report import json_sanitize
 from src.research.gates import EXCESS_COL, INDUSTRY_EXCESS_COL, LABEL_COL, MARKET_COL, POOL_RULES, TOP20_COL
-from src.settings import load_config, resolve_config_path
+from src.settings import load_config
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,13 +1,14 @@
 """Tests for src/analysis/portfolio_method_compare.py — M12 portfolio method comparison."""
 
 from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.analysis.portfolio_method_compare import (
-    PortfolioMethodRow,
     PortfolioMethodReport,
+    PortfolioMethodRow,
     compare_portfolio_methods,
     portfolio_method_markdown,
 )

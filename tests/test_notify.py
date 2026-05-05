@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from unittest import mock
 
-import pytest
 import requests
 
 from src.notify import WecomWebhookHandler

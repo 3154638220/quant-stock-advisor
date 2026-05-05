@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
-import argparse, json, sys, time, warnings
+import argparse
+import json
+import sys
+import time
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -14,21 +18,39 @@ if str(ROOT) not in sys.path:
 
 from scripts.research_identity import make_research_identity, slugify_token
 from src.pipeline.cli_helpers import (
-    parse_int_list, parse_str_list, project_relative, resolve_loaded_config_path, resolve_project_path,
+    parse_int_list,
+    parse_str_list,
+    project_relative,
+    resolve_loaded_config_path,
+    resolve_project_path,
 )
 from src.pipeline.monthly_baselines import (
-    build_leaderboard, build_monthly_long, build_quantile_spread, build_rank_ic,
-    build_realized_market_states, load_baseline_dataset, model_n_jobs_token,
-    normalize_model_n_jobs, summarize_candidate_pool_reject_reason,
-    summarize_candidate_pool_width, summarize_industry_exposure,
-    summarize_regime_slice, summarize_year_slice, valid_pool_frame,
+    build_leaderboard,
+    build_monthly_long,
+    build_quantile_spread,
+    build_rank_ic,
+    build_realized_market_states,
+    load_baseline_dataset,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
+    summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width,
+    summarize_industry_exposure,
+    summarize_regime_slice,
+    summarize_year_slice,
 )
 from src.pipeline.monthly_ltr import (
-    M6RunConfig, build_ltr_doc, build_ltr_quality_payload, build_ltr_relevance,
-    build_m6_feature_spec, build_walk_forward_ltr_scores, summarize_ltr_feature_importance,
+    M6RunConfig,
+    build_ltr_doc,
+    build_ltr_quality_payload,
+    build_m6_feature_spec,
+    build_walk_forward_ltr_scores,
+    summarize_ltr_feature_importance,
 )
 from src.pipeline.monthly_multisource import (
-    FeatureSpec, M5RunConfig, attach_enabled_families, summarize_feature_coverage_by_spec,
+    M5RunConfig,
+    attach_enabled_families,
+    summarize_feature_coverage_by_spec,
 )
 from src.pipeline.research_runner import finalize_research_contract
 from src.reporting.markdown_report import json_sanitize

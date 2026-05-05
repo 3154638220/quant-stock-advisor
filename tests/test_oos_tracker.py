@@ -5,13 +5,12 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from src.monitoring.oos_tracker import (
-    OOSTracker,
     OOSDegradationResult,
     OOSRecord,
+    OOSTracker,
     record_monthly_oos,
 )
 

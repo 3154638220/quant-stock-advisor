@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import numpy as np
-import pytest
+import pandas as pd
 
 from src.analysis.rebalance_sensitivity import (
     RULE_LABELS,
     RebalanceSensitivityResult,
     sensitivity_summary_df,
 )
-from src.backtest.engine import BacktestConfig
-from src.backtest.transaction_costs import TransactionCostParams
 
 
 def make_mock_returns(n_days=300, n_assets=10, seed=42):

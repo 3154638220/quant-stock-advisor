@@ -1,13 +1,12 @@
 """Tests for feature importance CV and Bonferroni correction in walk_forward.py."""
 
 import numpy as np
-import pytest
 
 from src.backtest.walk_forward import (
-    feature_importance_cv,
-    feature_importance_cv_markdown,
     bonferroni_correction,
     bonferroni_markdown,
+    feature_importance_cv,
+    feature_importance_cv_markdown,
 )
 
 

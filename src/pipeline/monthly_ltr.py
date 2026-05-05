@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.pipeline.cli_helpers import project_relative
 from src.pipeline.monthly_baselines import (
     EXCESS_COL,
     LABEL_COL,
@@ -27,7 +28,6 @@ from src.pipeline.monthly_baselines import (
     normalize_model_n_jobs,
     valid_pool_frame,
 )
-from src.pipeline.cli_helpers import project_relative
 from src.pipeline.monthly_multisource import (
     FUNDAMENTAL_RAW_FEATURES,
     FeatureSpec,

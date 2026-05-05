@@ -15,7 +15,6 @@ from src.pipeline.label_builder import (
     select_rebalance_dates,
 )
 
-
 # ── _slugify_token ─────────────────────────────────────────────────────────
 
 

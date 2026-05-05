@@ -17,8 +17,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src.settings import load_config, project_root
-
 _LOG = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -94,6 +92,7 @@ def fetch_northbound_aggregate(
     board: str = "沪股通",
     *,
     max_retries: int = 3,
+    retry_delay_sec: float = 2.0,
 ) -> pd.DataFrame:
     """拉取北向资金市场汇总（沪股通/深股通）。
 

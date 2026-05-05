@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,7 +145,6 @@ def main() -> int:
     # 2. 逐年拆分 → 识别失败年份
     print("=== M6 LTR 逐年 after-cost excess ===")
     m6_by_year = _excess_by_year(m6, model_filter="xgboost")
-    m5_by_year = _excess_by_year(m5) if not m5.empty else pd.DataFrame()
     print(m6_by_year.to_string(index=False))
 
     # 3. 识别 U1 vs U2 差异
@@ -175,7 +173,7 @@ def main() -> int:
             overlap = _candidate_pool_overlap(dataset, "U1_liquid_tradable", "U2_risk_sane")
             if not overlap.empty:
                 mean_ol = float(overlap["overlap_ratio"].mean())
-                print(f"\n=== U1/U2 Overlap 分析 ===")
+                print("\n=== U1/U2 Overlap 分析 ===")
                 print(f"  月均 overlap ratio: {mean_ol:.1%}")
                 print(f"  U1-only 月均: {float(overlap['pool_a_only'].mean()):.0f}")
                 print(f"  U2-only 月均: {float(overlap['pool_b_only'].mean()):.0f}")

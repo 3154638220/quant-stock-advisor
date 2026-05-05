@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
-import pytest
 
 from src.pipeline.hpo_utils import (
-    XGBOOST_RANKER_SEARCH_SPACE,
     XGBOOST_CLASSIFIER_SEARCH_SPACE,
+    XGBOOST_RANKER_SEARCH_SPACE,
     XGBOOST_REGRESSOR_SEARCH_SPACE,
     _default_ranker_params,
     _default_regressor_params,
@@ -16,7 +14,6 @@ from src.pipeline.hpo_utils import (
     _suggest_params,
     _time_series_cv_folds,
 )
-
 
 # ── _optuna_available ──────────────────────────────────────────────────────
 

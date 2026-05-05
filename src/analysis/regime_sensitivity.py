@@ -11,19 +11,19 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
 from src.market.regime import (
+    REGIME_BEAR,
+    REGIME_BULL,
+    REGIME_OSCILLATION,
     RegimeConfig,
     RegimeResult,
     classify_regime,
     get_regime_weights,
-    REGIME_BULL,
-    REGIME_BEAR,
-    REGIME_OSCILLATION,
 )
 
 

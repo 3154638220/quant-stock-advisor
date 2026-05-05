@@ -114,10 +114,9 @@ def main():
 
     # 如果缺少必要数据，尝试从数据库构建
     if weights_equal is None or returns_df is None:
-        from src.data_fetcher.db_manager import DuckDBManager
         db_path = config.get("database", {}).get("path", "data/stock_data.duckdb")
         if not Path(db_path).exists():
-            print(f"错误: 数据库不存在，且未提供 --signal-weights/--returns", file=sys.stderr)
+            print("错误: 数据库不存在，且未提供 --signal-weights/--returns", file=sys.stderr)
             sys.exit(1)
 
         print("从数据库构建回测数据...")
@@ -150,7 +149,7 @@ def main():
         weights_risk_parity, diags_rp = _build_cov_weights(
             symbols, daily_df, None, "risk_parity", port_cfg, asof_dates,
         )
-        print(f"构建最小方差权重...")
+        print("构建最小方差权重...")
         weights_min_variance, diags_mv = _build_cov_weights(
             symbols, daily_df, None, "min_variance", port_cfg, asof_dates,
         )
@@ -160,7 +159,6 @@ def main():
         }
 
     # 运行对比
-    from src.backtest.engine import BacktestConfig
     from src.analysis.portfolio_method_compare import (
         compare_portfolio_methods,
         portfolio_method_markdown,

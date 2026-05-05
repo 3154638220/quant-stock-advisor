@@ -19,6 +19,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.data_fetcher.stock_name_cache import (
+    _display_symbol,
+    _is_st_name,
+    _name_column,
+)
 from src.pipeline.monthly_ltr import (
     _tag_importance,
     _train_predict_xgboost_ranker,
@@ -26,12 +31,7 @@ from src.pipeline.monthly_ltr import (
 from src.pipeline.monthly_multisource import (
     _cap_fit_rows,
 )
-from src.data_fetcher.stock_name_cache import (
-    _display_symbol,
-    _is_st_name,
-    _name_column,
-)
-from src.reporting.markdown_report import format_markdown_table, json_sanitize, project_relative
+from src.reporting.markdown_report import format_markdown_table
 from src.research.gates import POOL_RULES
 
 

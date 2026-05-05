@@ -5,14 +5,11 @@ Extracted from duplicated boilerplate across scripts/run_monthly_selection_*.py.
 
 from __future__ import annotations
 
-import json
 import shlex
 import sys
 import time
 from pathlib import Path
 from typing import Any
-
-import pandas as pd
 
 from src.models.experiment import append_experiment_result
 from src.models.research_contract import (
@@ -25,7 +22,6 @@ from src.models.research_contract import (
     write_research_manifest,
 )
 from src.pipeline.cli_helpers import project_relative
-from src.reporting.markdown_report import json_sanitize
 
 
 def finalize_research_contract(

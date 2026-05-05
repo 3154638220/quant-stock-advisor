@@ -11,17 +11,15 @@ import scripts.run_monthly_selection_report as m7_report  # CLI main() 仍在 sc
 
 # 核心函数已迁移到 src/
 from src.data_fetcher.stock_name_cache import attach_stock_names  # noqa: E402
-from src.reporting.monthly_report import (  # noqa: E402
-    build_recommendation_table,
-    summarize_m9_integrity,
-)
 from src.pipeline.monthly_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
 from src.pipeline.monthly_multisource import attach_industry_breadth_features
-from src.reporting.monthly_report import (
+from src.reporting.monthly_report import (  # noqa: E402
     M7RunConfig,
     apply_m9_feature_coverage_policy,
     build_full_fit_report_scores,
+    build_recommendation_table,
     select_report_signal_date,
+    summarize_m9_integrity,
     summarize_report_feature_coverage,
 )
 from src.research.contracts import validate_manifest

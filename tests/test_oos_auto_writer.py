@@ -11,9 +11,9 @@ import pytest
 
 from src.monitoring.oos_auto_writer import (
     OOSWriteResult,
-    record_oos_from_m7_report,
-    record_oos_batch_from_history,
     _compute_realized_excess_from_holdings,
+    record_oos_batch_from_history,
+    record_oos_from_m7_report,
 )
 
 
@@ -112,7 +112,7 @@ class TestRecordOOSFromM7Report:
 
     def test_multiple_writes_same_key_updates(self, temp_db):
         """相同 (config_id, signal_date, ...) 应做 upsert。"""
-        result1 = record_oos_from_m7_report(
+        record_oos_from_m7_report(
             db_path=temp_db,
             config_id="test_upsert",
             signal_date="2026-05-05",

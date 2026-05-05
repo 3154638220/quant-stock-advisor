@@ -84,7 +84,7 @@ def main():
         "bias_long": 0.05,
     })
 
-    from src.analysis.regime_sensitivity import run_regime_sensitivity_grid, regime_sensitivity_markdown
+    from src.analysis.regime_sensitivity import regime_sensitivity_markdown, run_regime_sensitivity_grid
 
     report = run_regime_sensitivity_grid(
         benchmark_series,

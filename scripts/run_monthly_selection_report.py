@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-import argparse, json, sys, time
+import argparse
+import json
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,13 +17,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.research_identity import make_research_identity, slugify_token
-from src.data_fetcher.stock_name_cache import attach_stock_names, ensure_stock_name_cache, load_stock_name_cache
+from src.data_fetcher.stock_name_cache import (
+    attach_stock_names,
+    ensure_stock_name_cache,
+    load_stock_name_cache,
+)
 from src.pipeline.cli_helpers import (
-    parse_int_list, parse_str_list, project_relative, resolve_loaded_config_path, resolve_project_path,
+    parse_int_list,
+    parse_str_list,
+    project_relative,
+    resolve_loaded_config_path,
+    resolve_project_path,
 )
 from src.pipeline.monthly_baselines import (
-    load_baseline_dataset, model_n_jobs_token, normalize_model_n_jobs,
-    summarize_candidate_pool_reject_reason, summarize_candidate_pool_width,
+    load_baseline_dataset,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
+    summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width,
 )
 from src.pipeline.monthly_ltr import build_m6_feature_spec, summarize_ltr_feature_importance
 from src.pipeline.monthly_multisource import M5RunConfig, attach_enabled_families

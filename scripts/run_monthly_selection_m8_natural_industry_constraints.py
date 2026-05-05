@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
-import argparse, json, sys, time, warnings
+import argparse
+import json
+import sys
+import time
+import warnings
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,26 +19,49 @@ if str(ROOT) not in sys.path:
 
 from scripts.research_identity import make_research_identity, slugify_token
 from src.pipeline.cli_helpers import (
-    parse_float_list, parse_int_list, parse_str_list, project_relative,
-    resolve_loaded_config_path, resolve_project_path,
+    parse_float_list,
+    parse_int_list,
+    parse_str_list,
+    project_relative,
+    resolve_loaded_config_path,
+    resolve_project_path,
 )
 from src.pipeline.m8_natural_industry import (
-    LABEL_VARIANTS, M8NaturalRunConfig, build_gate_table, build_label_variant_scores,
-    build_leaderboard, build_m8_natural_doc, build_monthly_from_scores,
-    build_quality_payload, build_score_decomposition_scores, build_soft_optimizer_scores,
-    build_soft_penalty_scores, copy_source_metric_for_optimizer, load_hardcap_baseline,
+    LABEL_VARIANTS,
+    M8NaturalRunConfig,
+    build_gate_table,
+    build_label_variant_scores,
+    build_leaderboard,
+    build_m8_natural_doc,
+    build_monthly_from_scores,
+    build_quality_payload,
+    build_score_decomposition_scores,
+    build_soft_optimizer_scores,
+    build_soft_penalty_scores,
+    copy_source_metric_for_optimizer,
+    load_hardcap_baseline,
 )
 from src.pipeline.monthly_baselines import (
-    build_quantile_spread, build_rank_ic, build_realized_market_states,
-    load_baseline_dataset, model_n_jobs_token, normalize_model_n_jobs,
-    summarize_candidate_pool_reject_reason, summarize_candidate_pool_width,
-    summarize_industry_exposure, summarize_regime_slice, summarize_year_slice,
-    valid_pool_frame,
+    build_quantile_spread,
+    build_rank_ic,
+    build_realized_market_states,
+    load_baseline_dataset,
+    model_n_jobs_token,
+    normalize_model_n_jobs,
+    summarize_candidate_pool_reject_reason,
+    summarize_candidate_pool_width,
+    summarize_industry_exposure,
+    summarize_regime_slice,
+    summarize_year_slice,
 )
 from src.pipeline.monthly_concentration import summarize_industry_concentration
 from src.pipeline.monthly_multisource import (
-    M5RunConfig, attach_enabled_families, build_all_m5_scores,
-    build_feature_specs, summarize_feature_coverage_by_spec,
+    M5RunConfig,
+    attach_enabled_families,
+    build_feature_specs,
+    summarize_feature_coverage_by_spec,
+)
+from src.pipeline.monthly_multisource import (
     summarize_feature_importance as summarize_m5_feature_importance,
 )
 from src.pipeline.research_runner import finalize_research_contract

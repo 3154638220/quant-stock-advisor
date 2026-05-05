@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.analysis.capacity_report import (
     CapacityEstimate,
@@ -15,12 +14,9 @@ from src.analysis.capacity_report import (
     analyze_limit_up_redistribution,
     build_m10_statistical_section,
     capacity_summary,
-    compare_execution_modes,
     estimate_capacity,
-    run_cost_sensitivity,
 )
 from src.backtest.transaction_costs import TransactionCostParams
-from src.backtest.engine import BacktestConfig
 
 
 class TestCostLabel:
