@@ -198,6 +198,29 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_margin_trading_date ON a_share_margin_trading(trade_date);
     """),
+    # ── v13: 概念板块数据（P5: M11-C concept/theme breadth，THS 同花顺数据源）──
+    (13, "a_share_concept_tables", """
+        CREATE TABLE IF NOT EXISTS a_share_concept_meta (
+            concept_code VARCHAR NOT NULL PRIMARY KEY,
+            concept_name VARCHAR NOT NULL,
+            stock_count INTEGER,
+            total_mv DOUBLE,
+            first_seen_date DATE
+        );
+        CREATE TABLE IF NOT EXISTS a_share_concept_daily (
+            concept_code VARCHAR NOT NULL,
+            trade_date DATE NOT NULL,
+            open DOUBLE,
+            close DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            pct_chg DOUBLE,
+            volume DOUBLE,
+            amount DOUBLE,
+            PRIMARY KEY (concept_code, trade_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_concept_daily_date ON a_share_concept_daily(trade_date);
+    """),
 ]
 
 # ── Migration 引擎 ───────────────────────────────────────────────────────

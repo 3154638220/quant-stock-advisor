@@ -447,4 +447,33 @@ FUND_FLOW_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("fund_flo
 FUNDAMENTAL_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("fundamental")
 NORTHBOUND_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("northbound")
 MARGIN_TRADING_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("margin_trading")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 概念板块（P5: M11-C concept/theme breadth）
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 注意：概念成分股为当前快照（非历史回溯），历史信号日用当前成分股近似存在前瞻偏差。
+# 板块日线 OHLCV 为 PIT-safe。
+
+_CONCEPT_FACTORS: list[dict] = [
+    {"name": "concept_breadth_1m", "feature_col": "feature_concept_breadth_1m",
+     "direction": 1, "description": "概念板块近月上涨占比（市场级 breadth）"},
+    {"name": "concept_dispersion_1m", "feature_col": "feature_concept_dispersion_1m",
+     "direction": 1, "description": "概念板块近月收益率截面标准差（市场 dispersion）"},
+    {"name": "concept_momentum_1m", "feature_col": "feature_concept_momentum_1m",
+     "direction": 1, "description": "概念板块近月平均收益率（市场 momentum）"},
+]
+
+for _spec in _CONCEPT_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="concept",
+        feature_col=_spec["feature_col"],
+        min_coverage=0.05,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+CONCEPT_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("concept")
 SHAREHOLDER_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("shareholder")
