@@ -1,19 +1,21 @@
 # 量化月度选股主计划
 
 **文档角色**：当前唯一主计划（canonical）  
-**更新时间**：`2026-05-04`  
-**当前阶段**：M10，成本与执行压力（进行中）  
+**更新时间**：`2026-05-06`  
+**当前阶段**：M12 promotion package — hard-cap baseline promotion，OOS 持续积累  
 **研究终点**：每月输出可解释、可回测、PIT-safe、可执行约束清楚的 Top-K 股票推荐名单  
 **生产状态**：无研究候选进入生产；`configs/promoted/promoted_registry.json` 继续为空  
-**当前结论**：M8 行业约束自然化已完成，soft industry risk-budget 在 Top20/Top30 上产生 3 个通过 M8 natural gate 的研究候选；M10 成本敏感性框架已完成（10/30/50 bps 三档），容量分析与涨停/VWAP 压力测试框架已就位；hard-cap baseline 仍是收益上限更强的 stress 对照；披露日历填充（P2-3）与 next_trade_date 边界校验（P2-4）已完成；P0 紧急修复全部完成；仍不能 promotion，待 M10 压力测试结果确认 after-cost excess 在 30bps 下 > 0  
-**归档入口**：`docs/reports/2026-04/plan-04-20.md` 仅保留历史执行记录，不再承担主计划职责  
-**问题追踪**：`docs/plan-05-03.md`（P0-P3 完整问题清单）；`docs/plan-05-04.md`（工程质量审计，22/22 项全部完成 ✅）
+**当前结论**：M11 新数据扩展全部完成（北向 P2 + 融资融券 P4 + 概念 breadth P5 V1），在 M5 ElasticNet 下均 delta≈0；hard-cap baseline 仍是唯一通过全部 gate 的候选（NW-t=3.65, IR=0.51, 1 月 OOS=+2.13%）；M10 成本已 pivot 到散户视角（16 bps）；M12 promotion package 待启动，基于 hard-cap baseline  
+**归档入口**：`docs/reports/2026-04/plan-04-20.md`  
+**执行追踪**：`docs/plan-05-05(1).md`（散户版优化路线，P1-P8 全部完成，含第一/二/三轮执行记录）
 
 ---
 
 ## 0. 当前决策
 
-项目主线已经从“旧持仓 replacement”切换为“月度截面选股”。
+项目主线已经从”旧持仓 replacement”切换为”月度截面选股”。
+
+成本视角已 pivot：用户为小资金散户，实际成本约 16 bps/次（佣金 10 + 印花税 5 + 过户费 1，无冲击成本），远低于机构 30-50 bps 假设。换手优化、容量分析、冲击成本建模不再是瓶颈。
 
 旧问题：
 
@@ -32,12 +34,13 @@ score(stock, month_end)
 
 当前最重要的判断：
 
-1. **不 promotion M7/M8/M9 报告**。M8 已从 hard cap 诊断推进到自然化约束，但真实成本压力、买入失败和冲击成本仍未完成。
-2. **M8 当前通过候选来自 soft industry risk-budget，而不是 hard cap**。`U1 + M5 ElasticNet market_excess + Top20 + gamma0.20` after-cost 月均超额约 `0.018338`，相对 hard-cap best 差 `-0.004031`，Rank IC 约 `0.103597`，Top-K vs next-K 约 `0.013406`，平均最大行业占比约 `0.103947`，集中度 pass rate `1.0`。
-3. **hard cap 仍是 stress 上限，不是生产形态**。`U1_liquid_tradable + Top20 + indcap3` after-cost 月均超额约 `0.022369`，平均最大行业占比 `0.150000`，集中度 pass rate `1.0`；后续只作为 M10/M12 对照，不作为主候选形态。
-4. **M6 仍只作 watchlist / sleeve**。`U2 + M6_xgboost_rank_ndcg + Top20` 在 industry cap 后仍有收益证据，但 Rank IC 很弱，不能单独 promotion。
-5. **下一步不再堆模型**。优先对 M8 natural 候选做 30/50 bps、买入失败、冲击成本、容量和换手压力测试。
-6. **生产边界不变**。任何研究候选通过完整 gate 前，不写入 `config.yaml.example` 或 promoted registry。
+1. **不 promotion M7/M8/M9 报告**。hard-cap baseline 经统计显著性验证（NW-t=3.65），但 M11 新数据（北向/两融）尚未提供有效增量，M12 promotion package 条件不满足。
+2. **成本不是瓶颈**。16 bps 真实成本下，hard-cap baseline 净月收益约 2.05%/月，natural soft 约 0.96%/月，盈亏平衡成本远高于当前超额。
+3. **hard-cap baseline 是当前最强候选**。NW-t=3.65（p<0.001），Bootstrap 95% CI 下界 +0.75%/月，IR=0.51，1 个月 OOS 已记录（2026-03 信号→04 实现 +2.13% 超额）。
+4. **M8 natural soft 统计显著性边际**。NW-t=1.48（p=0.069），Bootstrap CI 包含零，作为主候选不如 hard-cap baseline 可靠。
+5. **北向和融资融券在 M5 ElasticNet 框架下 delta≈0**。不是数据接入问题（基础设施均完善），而是覆盖度不足（北向 2.6%）或线性模型捕获能力有限。可能在特定 regime 下显著，全时段平均后稀释。
+6. **M6 LTR 已冻结**。归因分析确认为系统性失败：U1/U2 均负超额，月换手 0.85-1.00 吞噬微弱 gross 信号，Rank IC ~0.007。
+7. **生产边界不变**。任何研究候选通过完整 gate 前，不写入 `config.yaml.example` 或 promoted registry。
 
 一句话路线：
 
@@ -47,7 +50,8 @@ PIT 数据
 -> 多源 tabular ranker
 -> 行业/状态/成本约束复核
 -> 研究版推荐
--> promotion package
+-> OOS 跟踪验证
+-> 新数据增量（主题 breadth → promotion package）
 ```
 
 ---
@@ -264,13 +268,28 @@ Oracle Top-K 只用于判断上限和可分性，不作为训练目标或 promot
 | M3 Oracle | 完成 | U1/U2 oracle 上限强，price-volume 可分性不足 |
 | M4 Baseline | 完成 | price-volume-only 有弱信号，不足以推荐 |
 | M5 多源扩展 | 完成 | industry breadth + fundamental 带来稳定增量 |
-| M6 LTR | 完成 | `U2 + M6_xgboost_rank_ndcg + Top20/30` 仅进入 watchlist |
+| M6 LTR | 完成 | `U2 + M6_xgboost_rank_ndcg + Top20/30` 仅进入 watchlist；归因分析确认系统性失败，已冻结 |
 | M7 推荐报告 | 完成 | 能输出研究名单，但 Top20/30 全为非银金融 |
-| M8 集中度与状态治理 | 完成 | hard cap 诊断与 natural industry soft risk-budget 均已生成；3 个自然化候选通过 M8 natural gate，但仍不 promotion |
+| M8 集中度与状态治理 | 完成 | hard cap 诊断与 natural industry soft risk-budget 均已生成；3 个自然化候选通过 M8 natural gate |
 | M9 数据完整性修复 | 完成 | 报告层名称、T+1 可买字段、低覆盖特征治理、ST 名称过滤和 M9 gate 已落地 |
-| M10 成本与执行压力 | 进行中 | 成本敏感性(10/30/50bps)、容量分析、涨停/VWAP压力测试框架已就位 |
-| M11 新数据扩展 | 待启动 | 北向、两融、主题、公告事件 |
-| M12 promotion package | 待启动 | 仅在 M8-M11 gate 通过后进入 |
+| M10 成本与执行压力 | **已 pivot** | 用户为散户（16 bps），冲击成本/容量/换手优化不再紧迫；成本敏感性框架已就位但不再作为 block gate |
+| M11 新数据扩展 | **完成** | 北向（P2）、融资融券（P4）、概念 breadth V1（P5）在 M5 ElasticNet 下均 delta≈0；M11 未提供有效 Alpha 增量 |
+| M12 promotion package | **进行中** | 基于 hard-cap baseline（NW-t=3.65, IR=0.51, OOS=+2.13%）启动 promotion；持续积累 OOS
+
+### 散户版路线修正（2026-05-05）
+
+核心认知：**成本不是瓶颈，真正需要解决的是 Oracle gap（当前 Rank IC ≈ 0.10 vs Oracle 可分性上限）和 OOS 持续验证。**
+
+| 轮次 | 状态 | P 项 | 结论 |
+| --- | --- | --- | --- |
+| 第一轮（2026-05-05） | ✅ | P1 OOS 跟踪 | 1 个月已验证（+2.13% 实现超额） |
+| | ✅ | P3 统计显著性 | hard-cap NW-t=3.65 通过；natural soft 边际 |
+| | ✅ | P7 流动性门槛 | min_amount_20d=1 亿已存在 |
+| | ✅ | P2 北向 M5 delta | 覆盖 2.6%，delta≈0，基础设施就绪 |
+| 第二轮（2026-05-06） | ✅ | P4 融资融券 M5 delta | 缺 2021-2022，delta≈0 |
+| | ✅ | P6 M6 LTR 归因 | 系统性失败，已冻结 |
+| | ✅ | P8 Oracle IC gate | 模块+CLI 就绪，待 M5 个股级 scores |
+| 第三轮（待启动） | 🔴 | P5 主题/概念 breadth | A 股月度最重要的主题驱动因子 |
 
 ---
 
@@ -649,10 +668,9 @@ manifest 明确数据截止日、信号日、下一交易日。
 
 ## 8. M10：成本与执行压力测试
 
-**状态**：进行中（2026-05-03）。  
-**进度**：成本敏感性网格（10/30/50 bps）已在 `run_monthly_benchmark_suite.py` 实现；容量分析（日均成交额）框架已就位；涨停买入失败（idle/redistribute）与 VWAP 冲击对比框架已就位。披露日历填充（P2-3）与 next_trade_date 边界校验（P2-4）已完成。  
-**目标**：验证高换手月度 Top-K 在真实成本下是否仍有意义。  
-**问题追踪**：详见 `docs/plan-05-03.md` P1-1。
+**状态**：已 pivot（2026-05-05）。用户为小资金散户（~16 bps 真实成本），冲击成本、容量分析、换手优化不再作为 block gate。  
+**保留**：成本敏感性网格（10/30/50 bps）已在 `run_monthly_benchmark_suite.py` 实现，作为参考对照保留，但不再阻塞 promotion。  
+**关键判断**：16 bps 成本下 hard-cap baseline 净月收益约 2.05%/月，natural soft 约 0.96%/月，盈亏平衡成本远高于当前超额。
 
 ### 8.1 成本网格
 
@@ -676,35 +694,53 @@ manifest 明确数据截止日、信号日、下一交易日。
 
 ## 9. M11：新数据扩展
 
-**状态**：待启动。  
+**状态**：进行中（2026-05-06）。  
 **目标**：补齐能解释月度 top bucket 的增量信息，而不是继续压榨价量因子。
 
-优先顺序：
+### 9.1 北向资金（P2）✅
 
-1. 主题 / 概念 breadth。
-2. 北向资金持股和净买入。
-3. 融资融券余额与交易。
-4. 龙虎榜机构和席位结构。
-5. 解禁、减持、回购、业绩预告等结构化事件。
-6. 大宗交易。
+**状态**：基础设施完成，M5 delta≈0。  
+**产物**：`src/features/northbound_factors.py`、`scripts/load_northbound.py`、`docs/m5_northbound_delta_full_2026-05-05.md`  
+**结论**：4 因子（hold_ratio, net_buy_1m, hold_change_1m, inflow_stability），当前覆盖仅 134 标的（2.6%），因子 importance 接近零。需继续加载至 600+ 标的后重跑。
 
-每个数据族必须单独跑：
+### 9.2 融资融券（P4）✅
 
-```text
-data quality
--> coverage
--> M5-style incremental delta
--> regime/year slice
--> feature importance
--> gate
+**状态**：M1 质量通过，M5 delta≈0。  
+**产物**：`src/features/margin_trading_factors.py`、`scripts/load_margin_trading.py`、`docs/m5_margin_delta_full_2026-05-06.md`  
+**结论**：4 因子（fin_balance_ratio, fin_balance_momentum, short_pressure, net_fin_buy），缺 2021-2022 数据。因子 importance 合计 4.3%，无显著增量。
+
+### 9.3 主题/概念 breadth（P5）🔴 当前优先
+
+**假设**：A 股月度强势股很大比例由主题扩散驱动（新能源、AI、国产替代等），当前模型完全没有主题因子。
+**候选因子**：
+```python
+features_theme = [
+    "concept_breadth_score",     # 所属概念板块当月上涨成员比例
+    "theme_momentum_1m",         # 概念板块近 1 月涨幅
+    "theme_inflow_1m",           # 概念板块资金净流入
+    "is_hot_concept_member",     # 是否属于当月热门概念（前 10）
+]
 ```
+**策略**：先做板块层面 breadth（概念板块等权/市值加权涨幅），再做个股-板块绑定。数据源：AkShare 概念板块。
+**数据挑战**：板块成分历史变化记录不完整，PIT 验证需保守处理。
+
+### 9.4 后续候选
+
+| 优先级 | 数据 | 原因 |
+| --- | --- | --- |
+| P1 | 龙虎榜 | 区分持续机构资金与短炒噪声 |
+| P2 | 结构化公告事件 | 业绩预告、合同、回购、减持、解禁等 |
+| P3 | 大宗交易 | 识别筹码转移和潜在压力 |
+| P3 | 分钟线 / Level-2 | 仅当 tabular ranker 通过稳定 gate 后再投入 |
 
 ---
 
 ## 10. M12：Promotion Package
 
-**状态**：待启动。  
-**触发条件**：M8-M10 通过，且 M11 没有引入新泄漏或不稳定暴露。
+**状态**：进行中（2026-05-06）。  
+**候选**：hard-cap baseline `M8_regime_aware_fixed_policy + U1 + Top20 + indcap3`。  
+**证据**：NW-t=3.65 (p<0.001), Bootstrap 95% CI [+0.75%, +2.73%/月], IR=0.51, 1 month OOS verified (+2.13%)。  
+**触发条件**：M8-M10 通过，M11 虽无增量但不引入泄漏或不稳定暴露。
 
 Promotion package 必须包含：
 
@@ -880,6 +916,20 @@ config.yaml.example
 - `data/results/monthly_selection_m9_data_integrity_report_2026-04-30_feature_policy.csv`
 - `data/results/monthly_selection_m9_data_integrity_report_2026-04-30_manifest.json`
 
+### M10-M11 新数据证据（2026-05）
+
+- `docs/plan-05-05(1).md`（散户版优化路线，P1-P8 完整执行记录）
+- `docs/m5_northbound_delta_full_2026-05-05.md`（P2：北向 M5 delta ≈ 0）
+- `docs/m5_margin_delta_full_2026-05-06.md`（P4：融资融券 M5 delta ≈ 0）
+- `docs/reports/2026-05/monthly_selection_benchmark_p3_2026-05-05.md`（P3：统计显著性）
+- `docs/reports/2026-05/monthly_selection_benchmark_p3_natural_soft_2026-05-05.md`（P3：natural soft 统计显著性）
+- `docs/reports/2026-05/m6_ltr_failure_attribution_2026-05-06.md`（P6：M6 LTR 失败归因）
+- `docs/monthly_selection_m7_oos_backfill_2026-05-05.md`（P1：OOS 回填）
+- `docs/margin_trading_m1_families_margin_trading_*_summary.md`（P4：融资融券 M1 质量）
+- `data/results/m5_margin_delta_full_2026-05-06_*`（P4：13 个产物文件）
+- `data/results/monthly_selection_benchmark_p3_2026-05-05_*`（P3：统计检验产物）
+- `data/results/m6_ltr_failure_attribution_20260506.md`（P6：LTR 归因数字）
+
 ### 数据质量证据
 
 - `docs/newdata_quality_current_families_fund_flow-shareholder_flow_a_share_fund_flow_holder_a_share_shareholder_daily_a_share_daily_lag_30_width_100.md`
@@ -912,12 +962,24 @@ config.yaml.example
 - `scripts/run_monthly_selection_concentration_regime.py`
 - `scripts/run_monthly_selection_m8_natural_industry_constraints.py`
 - `scripts/run_backtest_eval.py`
+- `scripts/run_monthly_benchmark_suite.py`（M10 成本 + P3 统计检验集成）
+- `scripts/run_newdata_quality_checks.py`（M1 新数据质量诊断 CLI）
+- `scripts/run_oracle_ic_gate.py`（P8 Oracle 条件 IC Gate CLI）
+- `scripts/load_northbound.py`（P2 北向数据加载）
+- `scripts/load_margin_trading.py`（P4 融资融券数据加载）
 - `src/market/tradability.py`
 - `src/features/tensor_base_factors.py`
 - `src/features/intraday_proxy_factors.py`
 - `src/features/fund_flow_factors.py`
 - `src/features/shareholder_factors.py`
 - `src/features/fundamental_factors.py`
+- `src/features/northbound_factors.py`（P2 北向因子）
+- `src/features/margin_trading_factors.py`（P4 融资融券因子）
+- `src/features/oracle_ic_gate.py`（P8 Oracle IC Gate 模块）
+- `src/data_fetcher/margin_trading_client.py`（P4 融资融券 AkShare fetcher）
+- `src/data_fetcher/migrations.py`（v11 northbound 表）
+- `src/monitoring/oos_auto_writer.py`（P1 OOS 跟踪）
+- `src/analysis/benchmark_suite.py`（P3 统计检验集成）
 - `tests/test_monthly_selection_dataset.py`
 - `tests/test_monthly_selection_oracle.py`
 - `tests/test_monthly_selection_baselines.py`
@@ -931,4 +993,4 @@ config.yaml.example
 
 ## 15. 当前一句话路线
 
-**当前项目已经完成 M0-M9，其中 M8 已从 hard-cap 诊断推进到 soft industry risk-budget 自然化验收；但 M10 成本执行压力、M11 新数据稳定性和 M12 promotion package 尚未完成，因此当前仍不是交易策略。下一步进入 M10，对 M8 natural 候选做 30/50 bps、买入失败、冲击成本、容量和换手压力测试，最终只有完整通过 M10-M12 gate 的候选才允许进入 promoted registry。**
+**M0-M11 已完成。M11 新数据扩展（北向 P2 + 融资融券 P4 + 概念 breadth P5 V1）在 M5 ElasticNet 下全部 delta≈0，Oracle gap 未被缩小。但 hard-cap baseline 已有足够强证据（NW-t=3.65, IR=0.51, OOS=+2.13%）。当前进入 M12：将 hard-cap baseline 提升为生产候选，同时持续积累 OOS 验证月数（目标 ≥ 6 个月）。概念 breadth Alpha 等待个股-概念绑定后重启 P5 V2。**
