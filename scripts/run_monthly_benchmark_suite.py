@@ -25,6 +25,8 @@ from src.analysis.benchmark_suite import (
     build_capacity_analysis,
     build_cost_sensitivity,
     build_limit_up_stress_comparison,
+    build_statistical_tests,
+    build_statistical_tests_doc,
     load_promoted_monthly,
     parse_index_specs,
 )
@@ -128,6 +130,20 @@ def main() -> int:
             except Exception:
                 pass
 
+    statistical_tests = build_statistical_tests(monthly)
+    stat_tests_csv = pd.DataFrame([{
+        "nw_t": statistical_tests.get("nw_t_statistic", {}).get("nw_t"),
+        "nw_p_value": statistical_tests.get("nw_t_statistic", {}).get("p_value_onesided"),
+        "nw_mean_excess": statistical_tests.get("nw_t_statistic", {}).get("mean"),
+        "nw_se": statistical_tests.get("nw_t_statistic", {}).get("nw_se"),
+        "n_obs": statistical_tests.get("nw_t_statistic", {}).get("n_obs"),
+        "bootstrap_ci_lower": statistical_tests.get("bootstrap_ci", {}).get("ci_lower"),
+        "bootstrap_ci_upper": statistical_tests.get("bootstrap_ci", {}).get("ci_upper"),
+        "ir_monthly": statistical_tests.get("information_ratio", {}).get("ir"),
+        "rank_ic_nw_t": statistical_tests.get("rank_ic", {}).get("nw_t"),
+        "rank_ic_mean": statistical_tests.get("rank_ic", {}).get("ic_mean"),
+    }])
+
     output_stem = f"{args.output_prefix}_{as_of}"
     paths = {
         "summary": results_dir / f"{output_stem}_summary.csv",
@@ -136,6 +152,7 @@ def main() -> int:
         "cost_sensitivity": results_dir / f"{output_stem}_cost_sensitivity.csv",
         "capacity": results_dir / f"{output_stem}_capacity.csv",
         "limit_up_stress": results_dir / f"{output_stem}_limit_up_stress.csv",
+        "statistical_tests": results_dir / f"{output_stem}_statistical_tests.csv",
         "manifest": results_dir / f"{output_stem}_manifest.json",
         "doc": docs_dir / f"{output_stem}.md",
     }
@@ -145,16 +162,18 @@ def main() -> int:
     cost_sensitivity.to_csv(paths["cost_sensitivity"], index=False)
     capacity.to_csv(paths["capacity"], index=False)
     limit_up_vwap_comparison.to_csv(paths["limit_up_stress"], index=False)
+    stat_tests_csv.to_csv(paths["statistical_tests"], index=False)
     artifact_paths = [_project_relative(p) for p in paths.values()]
-    paths["doc"].write_text(
-        build_benchmark_doc(
-            monthly_path=monthly_path, model=args.model, pool=args.candidate_pool,
-            top_k=int(args.top_k), summary=summary, relative=relative,
-            index_meta=index_meta, cost_sensitivity=cost_sensitivity,
-            capacity=capacity, limit_up_stress=limit_up_vwap_comparison,
-            artifacts=artifact_paths, project_root=ROOT,
-        ), encoding="utf-8",
+    base_doc = build_benchmark_doc(
+        monthly_path=monthly_path, model=args.model, pool=args.candidate_pool,
+        top_k=int(args.top_k), summary=summary, relative=relative,
+        index_meta=index_meta, cost_sensitivity=cost_sensitivity,
+        capacity=capacity, limit_up_stress=limit_up_vwap_comparison,
+        artifacts=artifact_paths, project_root=ROOT,
     )
+    stat_tests_doc = build_statistical_tests_doc(statistical_tests)
+    full_doc = base_doc + "\n" + stat_tests_doc
+    paths["doc"].write_text(full_doc, encoding="utf-8")
 
     # --- research contract ---
     identity = make_research_identity(
@@ -186,6 +205,7 @@ def main() -> int:
         ArtifactRef("cost_sensitivity_csv", _project_relative(paths["cost_sensitivity"]), "csv"),
         ArtifactRef("capacity_csv", _project_relative(paths["capacity"]), "csv"),
         ArtifactRef("limit_up_stress_csv", _project_relative(paths["limit_up_stress"]), "csv"),
+        ArtifactRef("statistical_tests_csv", _project_relative(paths["statistical_tests"]), "csv"),
         ArtifactRef("report_md", _project_relative(paths["doc"]), "md"),
         ArtifactRef("manifest_json", _project_relative(paths["manifest"]), "json"),
     )

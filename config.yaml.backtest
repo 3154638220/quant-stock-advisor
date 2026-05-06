@@ -88,5 +88,5 @@ prefilter:
 # M2.6-A：仅在 prefilter=false 条件下，Universe 显示稳定正向增益，升级为默认研究口径
 universe_filter:
   enabled: true
-  min_amount_20d: 50000000
+  min_amount_20d: 100000000
   require_roe_ttm_positive: true

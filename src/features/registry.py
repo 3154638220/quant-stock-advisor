@@ -380,6 +380,52 @@ for _spec in _SHAREHOLDER_FACTORS:
         description=_spec["description"],
     ))
 
+# Northbound factors (M11-A: 北向资金)
+_NORTHBOUND_FACTORS = [
+    {"name": "northbound_hold_ratio", "feature_col": "feature_northbound_hold_ratio",
+     "direction": 1, "description": "北向持股占比（最新）"},
+    {"name": "northbound_net_buy_1m", "feature_col": "feature_northbound_net_buy_1m",
+     "direction": 1, "description": "近 1 月北向净买入合计额"},
+    {"name": "northbound_hold_change_1m", "feature_col": "feature_northbound_hold_change_1m",
+     "direction": 1, "description": "近 1 月北向持股占比变化"},
+    {"name": "northbound_inflow_stability_1m", "feature_col": "feature_northbound_inflow_stability_1m",
+     "direction": 1, "description": "近 1 月北向净流入稳定性（正流入天数占比）"},
+]
+
+for _spec in _NORTHBOUND_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="northbound",
+        feature_col=_spec["feature_col"],
+        min_coverage=0.02,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+# Margin trading factors (M11-B: 融资融券)
+_MARGIN_TRADING_FACTORS = [
+    {"name": "margin_fin_balance_ratio", "feature_col": "feature_margin_fin_balance_ratio",
+     "direction": -1, "description": "融资余额占融资买入额比例（近似杠杆倾向，逆向信号）"},
+    {"name": "margin_net_fin_buy_1m", "feature_col": "feature_margin_net_fin_buy_1m",
+     "direction": -1, "description": "近 1 月融资净买入额（散户杠杆拥挤，逆向信号）"},
+    {"name": "margin_short_pressure_1m", "feature_col": "feature_margin_short_pressure_1m",
+     "direction": -1, "description": "近 1 月融券余量变化率（机构做空压力）"},
+    {"name": "margin_fin_balance_momentum_1m", "feature_col": "feature_margin_fin_balance_momentum_1m",
+     "direction": -1, "description": "近 1 月融资余额增长率（杠杆加速，逆向信号）"},
+]
+
+for _spec in _MARGIN_TRADING_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="margin_trading",
+        feature_col=_spec["feature_col"],
+        min_coverage=0.05,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 便捷常量：向后兼容旧的元组定义
 # ═══════════════════════════════════════════════════════════════════════════
@@ -399,4 +445,6 @@ PRICE_VOLUME_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("price
 INDUSTRY_BREADTH_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("industry_breadth")
 FUND_FLOW_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("fund_flow")
 FUNDAMENTAL_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("fundamental")
+NORTHBOUND_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("northbound")
+MARGIN_TRADING_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("margin_trading")
 SHAREHOLDER_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("shareholder")

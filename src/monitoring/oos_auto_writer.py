@@ -181,10 +181,13 @@ def _compute_realized_excess_from_holdings(
     signal_date: str,
     holdings_json: Optional[str],
 ) -> Optional[float]:
-    """从 holdings 列表 + 数据库中的 forward return 计算实现超额（简化版）。
+    """从 a_share_daily 计算持仓的 T+1 开盘到次月开盘实现超额。
 
-    实际实现依赖数据管线提供 label_forward_1m_o2o_return，
-    此处提供框架，具体计算需接入数据集查询。
+    计算逻辑：
+    - buy_open = signal_date 之后第一个交易日的开盘价
+    - sell_open = 次月第一个交易日的开盘价（即下次调仓买入日）
+    - realized_return = sell_open / buy_open - 1
+    - realized_excess = mean(holdings_returns) - market_ew_return
     """
     if not holdings_json:
         return None
@@ -198,7 +201,6 @@ def _compute_realized_excess_from_holdings(
     if not holdings_data:
         return None
 
-    # holdings_data 可能是 list[str] 或 dict[str, float]
     if isinstance(holdings_data, dict):
         symbols = list(holdings_data.keys())
     elif isinstance(holdings_data, list):
@@ -206,30 +208,58 @@ def _compute_realized_excess_from_holdings(
     else:
         return None
 
+    symbols = [str(s).strip() for s in symbols if str(s).strip()]
     if not symbols:
         return None
 
-    # 尝试从数据库中查询这些标的在 signal_date 之后的 forward return
-    # 注意：这需要数据库中有对应的 forward return 列
     try:
-        sym_list = "', '".join(str(s) for s in symbols[:50])
+        # 零填充为 6 位代码以匹配数据库格式
+        sym_list = "', '".join(s.zfill(6) for s in symbols[:50])
+
+        # signal_date 之后第一个交易日 = 买入日（开盘价买入）
+        # 次月第一个交易日 = 卖出日（开盘价卖出）
+        # sell_after = signal_date 所在月的下下个月 1 号
+        sd = pd.Timestamp(signal_date)
+        sell_cutoff = (sd + pd.DateOffset(months=2)).replace(day=1).strftime("%Y-%m-%d")
+
         df = tracker._conn.execute(
             f"""
-            SELECT symbol, AVG(label_forward_1m_o2o_return) AS avg_ret
-            FROM daily_features
-            WHERE symbol IN ('{sym_list}')
-              AND trade_date > ?
-            GROUP BY symbol
+            WITH
+            ranked AS (
+                SELECT symbol, trade_date, open,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date) AS rn
+                FROM a_share_daily
+                WHERE symbol IN ('{sym_list}')
+                  AND trade_date > '{signal_date}'
+            ),
+            buy_prices AS (
+                SELECT symbol, open AS buy_open FROM ranked WHERE rn = 1
+            ),
+            sell_ranked AS (
+                SELECT symbol, trade_date, open,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date) AS rn
+                FROM a_share_daily
+                WHERE symbol IN ('{sym_list}')
+                  AND trade_date >= '{sell_cutoff}'
+            ),
+            sell_prices AS (
+                SELECT symbol, open AS sell_open FROM sell_ranked WHERE rn = 1
+            )
+            SELECT b.symbol, b.buy_open, s.sell_open,
+                   (s.sell_open / NULLIF(b.buy_open, 0) - 1.0) AS realized_return
+            FROM buy_prices b
+            LEFT JOIN sell_prices s ON b.symbol = s.symbol
+            WHERE b.buy_open > 0
             """,
-            [str(signal_date)],
         ).df()
 
-        if df.empty or "avg_ret" not in df.columns:
+        if df.empty:
             return None
 
-        rets = pd.to_numeric(df["avg_ret"], errors="coerce").dropna()
+        rets = pd.to_numeric(df["realized_return"], errors="coerce").dropna()
         if len(rets) < max(3, len(symbols) * 0.5):
             return None
+
         return float(rets.mean())
 
     except Exception:

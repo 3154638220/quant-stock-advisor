@@ -169,6 +169,35 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_oos_tracking_date ON oos_tracking(signal_date);
     """),
+    # ── v11: 北向资金日频持股数据（P2: M11-A northbound factor family）──
+    (11, "a_share_northbound", """
+        CREATE TABLE IF NOT EXISTS a_share_northbound (
+            symbol VARCHAR NOT NULL,
+            trade_date DATE NOT NULL,
+            hold_amount DOUBLE,
+            hold_ratio DOUBLE,
+            net_buy_amount DOUBLE,
+            hold_shares DOUBLE,
+            PRIMARY KEY (symbol, trade_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_northbound_date ON a_share_northbound(trade_date);
+    """),
+    # ── v12: 融资融券日频数据（P4: M11-B margin_trading factor family）──
+    (12, "a_share_margin_trading", """
+        CREATE TABLE IF NOT EXISTS a_share_margin_trading (
+            symbol VARCHAR NOT NULL,
+            trade_date DATE NOT NULL,
+            fin_balance DOUBLE,
+            fin_buy_amount DOUBLE,
+            fin_repay_amount DOUBLE,
+            short_volume DOUBLE,
+            short_sell_volume DOUBLE,
+            short_balance DOUBLE,
+            total_balance DOUBLE,
+            PRIMARY KEY (symbol, trade_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_margin_trading_date ON a_share_margin_trading(trade_date);
+    """),
 ]
 
 # ── Migration 引擎 ───────────────────────────────────────────────────────

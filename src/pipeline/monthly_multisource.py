@@ -28,6 +28,8 @@ from src.features.registry import (  # D1: 统一因子注册中心（单一权�
     FUND_FLOW_FEATURES_REGISTRY,
     FUNDAMENTAL_FEATURES_REGISTRY,
     INDUSTRY_BREADTH_FEATURES_REGISTRY,
+    MARGIN_TRADING_FEATURES_REGISTRY,
+    NORTHBOUND_FEATURES_REGISTRY,
     PRICE_VOLUME_FEATURES_REGISTRY,
     SHAREHOLDER_FEATURES_REGISTRY,
 )
@@ -44,6 +46,8 @@ PRICE_VOLUME_FEATURES: tuple[str, ...] = PRICE_VOLUME_FEATURES_REGISTRY
 INDUSTRY_BREADTH_RAW_FEATURES: tuple[str, ...] = INDUSTRY_BREADTH_FEATURES_REGISTRY
 FUND_FLOW_RAW_FEATURES: tuple[str, ...] = FUND_FLOW_FEATURES_REGISTRY
 FUNDAMENTAL_RAW_FEATURES: tuple[str, ...] = FUNDAMENTAL_FEATURES_REGISTRY
+NORTHBOUND_RAW_FEATURES: tuple[str, ...] = NORTHBOUND_FEATURES_REGISTRY
+MARGIN_TRADING_RAW_FEATURES: tuple[str, ...] = MARGIN_TRADING_FEATURES_REGISTRY
 SHAREHOLDER_RAW_FEATURES: tuple[str, ...] = SHAREHOLDER_FEATURES_REGISTRY
 
 
@@ -55,6 +59,8 @@ FAMILY_DATA_START: dict[str, str] = {
     "fundamental": "2018-01-01",
     "shareholder": "2019-01-01",
     "fund_flow": "2023-10-01",   # 实际数据起始日
+    "northbound": "2017-03-17",
+    "margin_trading": "2012-01-01",
 }
 
 _FAMILY_FEATURE_PREFIX: dict[str, str] = {
@@ -63,6 +69,8 @@ _FAMILY_FEATURE_PREFIX: dict[str, str] = {
     "fund_flow": "feature_fund_flow_",
     "fundamental": "feature_fundamental_",
     "shareholder": "feature_shareholder_",
+    "northbound": "feature_northbound_",
+    "margin_trading": "feature_margin_",
 }
 
 
@@ -591,8 +599,10 @@ def build_feature_specs(
             for c in FUNDAMENTAL_RAW_FEATURES
         ),
         "shareholder": tuple(f"{c}_z" for c in SHAREHOLDER_RAW_FEATURES),
+        "northbound": tuple(f"{c}_z" for c in NORTHBOUND_RAW_FEATURES),
+        "margin_trading": tuple(f"{c}_z" for c in MARGIN_TRADING_RAW_FEATURES),
     }
-    family_order = ["industry_breadth", "fund_flow", "fundamental", "shareholder"]
+    family_order = ["industry_breadth", "fund_flow", "fundamental", "shareholder", "northbound", "margin_trading"]
     active_families = ["price_volume"]
     for family in family_order:
         if family not in enabled:
@@ -625,6 +635,12 @@ def attach_enabled_families(
         )
     if "shareholder" in enabled_families:
         out = attach_shareholder_features(out, db_path, availability_lag_days=cfg.availability_lag_days)
+    if "northbound" in enabled_families:
+        from src.features.northbound_factors import attach_northbound_features
+        out = attach_northbound_features(out, str(db_path))
+    if "margin_trading" in enabled_families:
+        from src.features.margin_trading_factors import attach_margin_trading_features
+        out = attach_margin_trading_features(out, str(db_path))
 
     # P0-1: 可选行业内 z-score 中性化（生成 _ind_z 列）
     if getattr(cfg, 'use_industry_neutral_zscore', False) and "fundamental" in enabled_families:

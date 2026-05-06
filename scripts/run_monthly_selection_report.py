@@ -359,8 +359,10 @@ def main() -> int:
     # OOS auto-writer
     try:
         from src.monitoring.oos_auto_writer import record_oos_from_m7_report
-        predicted_excess = float(monthly_long["excess_return"].mean()) if (
-            not monthly_long.empty and "excess_return" in monthly_long.columns
+        excess_col = next((c for c in ["topk_excess_after_cost", "topk_excess_vs_market", "excess_return"]
+                          if c in monthly_long.columns), None)
+        predicted_excess = float(monthly_long[excess_col].mean()) if (
+            not monthly_long.empty and excess_col is not None
         ) else None
         if predicted_excess is not None and np.isfinite(predicted_excess):
             oos_config_id = str(research_config_id).replace("m7_", "m8_") if research_config_id else (

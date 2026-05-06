@@ -479,6 +479,150 @@ def _format_markdown_table(df, max_rows=30):  # 延迟导入避免循环
     return format_markdown_table(df, max_rows=max_rows)
 
 
+# ── 统计显著性检验（P3）──────────────────────────────────────────────────────
+
+
+def build_statistical_tests(monthly: pd.DataFrame) -> dict:
+    """对月度超额序列计算 NW-t、bootstrap CI 和 IR。
+
+    使用 src/backtest/statistical_tests.py 中的检验函数，
+    为 M10 基准套件提供统计显著性证据。
+
+    Returns
+    -------
+    dict with keys: nw_t_statistic, bootstrap_ci, information_ratio, rank_ic
+    """
+    # 延迟导入避免循环
+    from src.backtest.statistical_tests import (  # noqa: PLC0415
+        bootstrap_excess_ci,
+        information_ratio,
+        newey_west_ic_t_statistic,
+        newey_west_t_statistic,
+    )
+
+    topk_ret = pd.to_numeric(monthly["topk_return"], errors="coerce")
+    market_ret = pd.to_numeric(monthly["market_ew_return"], errors="coerce")
+    cost_drag = pd.to_numeric(monthly["cost_drag"], errors="coerce").fillna(0.0)
+
+    excess = (topk_ret - cost_drag - market_ret).dropna()
+
+    result: dict[str, object] = {}
+    if len(excess) < 3:
+        result["error"] = f"insufficient months: {len(excess)}"
+        return result
+
+    nw_result = newey_west_t_statistic(excess.values, max_lag=6)
+    ci_result = bootstrap_excess_ci(excess.values, n_bootstrap=2000, alpha=0.05, seed=42)
+    ir_result = information_ratio(excess.values, return_monthly=True)
+
+    result["nw_t_statistic"] = nw_result
+    result["bootstrap_ci"] = ci_result
+    result["information_ratio"] = ir_result
+
+    # 如果有 rank_ic 列，也计算 IC 的 NW-t
+    if "rank_ic" in monthly.columns:
+        ic_series = pd.to_numeric(monthly["rank_ic"], errors="coerce").dropna()
+        if len(ic_series) >= 3:
+            result["rank_ic"] = newey_west_ic_t_statistic(ic_series.values, max_lag=6)
+
+    return result
+
+
+def build_statistical_tests_doc(tests: dict) -> str:
+    """将统计检验结果格式化为 Markdown 节。"""
+    if "error" in tests:
+        return f"\n## Statistical Significance (P3)\n\n⚠️ 数据不足：{tests['error']}\n"
+
+    lines = ["## Statistical Significance (P3)", ""]
+
+    # NW-t
+    nw = tests.get("nw_t_statistic", {})
+    if nw:
+        nw_t = nw.get("nw_t", float("nan"))
+        nw_p = nw.get("p_value_onesided", float("nan"))
+        nw_mean = nw.get("mean", float("nan"))
+        nw_se = nw.get("nw_se", float("nan"))
+        nw_n = nw.get("n_obs", 0)
+        lines.append("### Newey-West Adjusted t-Test (Monthly Excess)")
+        lines.append("")
+        lines.append(f"| 指标 | 值 |")
+        lines.append(f"|---|---|")
+        lines.append(f"| 月均超额 (mean) | {nw_mean:.4%} |")
+        lines.append(f"| NW HAC 标准误 | {nw_se:.4%} |")
+        lines.append(f"| NW-adjusted t | {nw_t:.2f} |")
+        lines.append(f"| 单侧 p-value | {nw_p:.4f} |")
+        lines.append(f"| 观测月数 | {nw_n} |")
+        lines.append(f"| 零假设 | 月均超额 ≤ 0 |")
+        lines.append("")
+        if nw_t > 2.0:
+            lines.append("✅ NW-t > 2.0，超额在时序自相关调整后显著非零。")
+        else:
+            lines.append("⚠️ NW-t ≤ 2.0，超额未达显著水平，需更多 OOS 验证。")
+        lines.append("")
+
+    # Bootstrap CI
+    ci = tests.get("bootstrap_ci", {})
+    if ci:
+        ci_lower = ci.get("ci_lower", float("nan"))
+        ci_upper = ci.get("ci_upper", float("nan"))
+        ci_mean = ci.get("mean_excess", float("nan"))
+        ci_n = ci.get("n_months", 0)
+        lines.append("### Bootstrap 95% CI (Block Bootstrap, Block Size=3)")
+        lines.append("")
+        lines.append(f"| 指标 | 值 |")
+        lines.append(f"|---|---|")
+        lines.append(f"| 均值超额 | {ci_mean:.4%} |")
+        lines.append(f"| 95% CI 下界 | {ci_lower:.4%} |")
+        lines.append(f"| 95% CI 上界 | {ci_upper:.4%} |")
+        lines.append(f"| 观测月数 | {ci_n} |")
+        lines.append("")
+        if ci_lower > 0:
+            lines.append("✅ Bootstrap 95% CI 下界 > 0，超额在保持时序结构下显著为正。")
+        else:
+            lines.append("⚠️ Bootstrap 95% CI 下界 ≤ 0，超额可能不稳健。")
+        lines.append("")
+
+    # IR
+    ir = tests.get("information_ratio", {})
+    if ir:
+        ir_val = ir.get("ir", float("nan"))
+        ir_mean = ir.get("mean_excess", float("nan"))
+        ir_std = ir.get("std_excess", float("nan"))
+        lines.append("### Information Ratio (Monthly)")
+        lines.append("")
+        lines.append(f"| 指标 | 值 |")
+        lines.append(f"|---|---|")
+        lines.append(f"| 月均超额 | {ir_mean:.4%} |")
+        lines.append(f"| 超额标准差 | {ir_std:.4%} |")
+        lines.append(f"| IR (月频) | {ir_val:.2f} |")
+        lines.append(f"| IR (年化) | {ir_val * np.sqrt(12):.2f} |")
+        lines.append("")
+        if ir_val > 0.5:
+            lines.append("✅ IR > 0.5，策略信息比健康。")
+        else:
+            lines.append("⚠️ IR ≤ 0.5，超额波动较大。")
+        lines.append("")
+
+    # Rank IC NW-t
+    ric = tests.get("rank_ic", {})
+    if ric:
+        ric_t = ric.get("nw_t", float("nan"))
+        ric_p = ric.get("p_value_onesided", float("nan"))
+        ric_mean = ric.get("ic_mean", float("nan"))
+        ric_ir = ric.get("ic_ir", float("nan"))
+        lines.append("### Rank IC 显著性")
+        lines.append("")
+        lines.append(f"| 指标 | 值 |")
+        lines.append(f"|---|---|")
+        lines.append(f"| Rank IC 均值 | {ric_mean:.4f} |")
+        lines.append(f"| IC IR | {ric_ir:.2f} |")
+        lines.append(f"| NW-adjusted t | {ric_t:.2f} |")
+        lines.append(f"| 单侧 p-value | {ric_p:.4f} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def build_benchmark_doc(
     *,
     monthly_path: Path,
