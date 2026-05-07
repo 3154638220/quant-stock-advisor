@@ -281,6 +281,16 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_concept_membership_concept
             ON a_share_concept_membership(concept_code, snapshot_date);
     """),
+    # ── v16: 北向资金市场汇总日频数据（M13-C northbound_regime factor family）──
+    (16, "a_share_northbound_aggregate", """
+        CREATE TABLE IF NOT EXISTS a_share_northbound_aggregate (
+            trade_date DATE PRIMARY KEY NOT NULL,
+            net_buy_sh DOUBLE,
+            net_buy_sz DOUBLE,
+            net_buy_total DOUBLE
+        );
+        CREATE INDEX IF NOT EXISTS idx_nbaggr_date ON a_share_northbound_aggregate(trade_date);
+    """),
 ]
 
 # ── Migration 引擎 ───────────────────────────────────────────────────────

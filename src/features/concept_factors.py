@@ -250,10 +250,14 @@ def _get_membership_features(
     if membership.empty:
         return pd.DataFrame()
 
+    # 优先使用 EM 概念日线（BK 代码，与 membership 代码体系一致）；
+    # 如 EM 表为空则回退到 THS 日线（旧代码体系，仅市场级特征可用）。
+    em_exists = _table_exists(con, "a_share_concept_daily_em")
+    daily_table = "a_share_concept_daily_em" if em_exists else "a_share_concept_daily"
     daily = con.execute(
-        """
+        f"""
         SELECT concept_code, trade_date, pct_chg
-        FROM a_share_concept_daily
+        FROM {daily_table}
         WHERE trade_date >= ? AND trade_date <= ?
         """,
         [date_min - pd.Timedelta(days=35), date_max],

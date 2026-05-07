@@ -147,6 +147,58 @@ def fetch_northbound_aggregate_combined() -> pd.DataFrame:
     return net.sort_values("trade_date")
 
 
+def backfill_northbound_aggregate(conn) -> dict:
+    """回填北向资金市场汇总日频数据到 DuckDB。
+
+    从 AkShare stock_hsgt_hist_em 拉取沪股通+深股通每日净买入，
+    写入 a_share_northbound_aggregate 表。数据无监管截断，持续到当日。
+
+    返回 dict: {trade_dates: int, sh_rows: int, sz_rows: int, merged_rows: int}
+    """
+    import akshare as ak
+
+    boards = {"沪股通": "net_buy_sh", "深股通": "net_buy_sz"}
+    frames: dict[str, pd.DataFrame] = {}
+    for board, col in boards.items():
+        df = ak.stock_hsgt_hist_em(symbol=board)
+        if df is None or df.empty:
+            _LOG.warning("northbound aggregate: %s returned empty", board)
+            continue
+        df = df.rename(columns={"日期": "trade_date", "当日成交净买额": "net_buy"})
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+        df["net_buy"] = pd.to_numeric(df["net_buy"], errors="coerce")
+        df = df.dropna(subset=["trade_date", "net_buy"])
+        df = df[["trade_date", "net_buy"]].copy()
+        df = df.rename(columns={"net_buy": col})
+        frames[col] = df
+
+    if not frames:
+        return {"trade_dates": 0, "sh_rows": 0, "sz_rows": 0, "merged_rows": 0}
+
+    merged = None
+    for col, df in frames.items():
+        if merged is None:
+            merged = df
+        else:
+            merged = merged.merge(df, on="trade_date", how="outer")
+    merged["net_buy_total"] = merged["net_buy_sh"].fillna(0) + merged["net_buy_sz"].fillna(0)
+    merged = merged.sort_values("trade_date")
+
+    conn.execute("DELETE FROM a_share_northbound_aggregate")
+    conn.execute(
+        """
+        INSERT INTO a_share_northbound_aggregate (trade_date, net_buy_sh, net_buy_sz, net_buy_total)
+        SELECT trade_date, net_buy_sh, net_buy_sz, net_buy_total FROM merged
+        """,
+    )
+    return {
+        "trade_dates": len(merged),
+        "sh_rows": len(frames.get("net_buy_sh", pd.DataFrame())),
+        "sz_rows": len(frames.get("net_buy_sz", pd.DataFrame())),
+        "merged_rows": len(merged),
+    }
+
+
 # ── 质量诊断 ──────────────────────────────────────────────────────────────────
 
 

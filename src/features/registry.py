@@ -403,6 +403,29 @@ for _spec in _NORTHBOUND_FACTORS:
         description=_spec["description"],
     ))
 
+# ── M13-C: 北向资金 regime 因子（市场级，无个股维度）────────────────────
+_NORTHBOUND_REGIME_FACTORS = [
+    {"name": "north_net_inflow_1m", "feature_col": "feature_north_net_inflow_1m",
+     "direction": 1, "description": "近 1 月北向净流入总额（市场级 regime）"},
+    {"name": "north_net_inflow_3m", "feature_col": "feature_north_net_inflow_3m",
+     "direction": 1, "description": "近 3 月北向净流入总额（市场级 regime）"},
+    {"name": "north_inflow_zscore_6m", "feature_col": "feature_north_inflow_zscore_6m",
+     "direction": 1, "description": "近 1 月净流入相对 6 月均值的 z-score"},
+    {"name": "north_consecutive_outflow_days", "feature_col": "feature_north_consecutive_outflow_days",
+     "direction": -1, "description": "连续净流出天数（负向风险 regime 信号）"},
+]
+
+for _spec in _NORTHBOUND_REGIME_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="northbound_regime",
+        feature_col=_spec["feature_col"],
+        min_coverage=0.0,
+        ic_decay_threshold=0.01,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
 # Margin trading factors (M11-B: 融资融券)
 _MARGIN_TRADING_FACTORS = [
     {"name": "margin_fin_balance_ratio", "feature_col": "feature_margin_fin_balance_ratio",
@@ -446,6 +469,7 @@ INDUSTRY_BREADTH_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("i
 FUND_FLOW_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("fund_flow")
 FUNDAMENTAL_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("fundamental")
 NORTHBOUND_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("northbound")
+NORTHBOUND_REGIME_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("northbound_regime")
 MARGIN_TRADING_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("margin_trading")
 
 # ═══════════════════════════════════════════════════════════════════════════

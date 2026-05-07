@@ -1,11 +1,18 @@
 """概念板块数据拉取与质量诊断。
 
-数据源: AkShare 同花顺（THS）concept APIs，东方财富（EM）概念成分股快照。
-API:
-- ``stock_board_concept_name_ths()`` → 概念名称与代码（375 个概念）
-- ``stock_board_concept_index_ths(symbol, start_date, end_date)`` → 日线 OHLCV
-- ``stock_board_concept_info_ths(symbol)`` → 概念详情（涨跌家数等）
-- ``stock_board_concept_cons_em(symbol)`` → 当前成分股快照（M13-B）
+数据源:
+- 同花顺（THS）概念日线 OHLCV（akshare stock_board_concept_*_ths）
+- 东方财富（EM）概念成分股快照（akshare stock_board_concept_cons_em）
+- 东方财富 sidemenu API（概念板块名称+代码，全量 1014 个板块含 486 概念）
+
+关键 API:
+- ``fetch_concept_list()`` → THS 概念名称与代码（375 个）
+- ``fetch_concept_list_em()`` → EM 概念名称与代码（sidemenu，1014 个含 486 概念）
+- ``stock_board_concept_cons_em(symbol)`` → EM 概念当前成分股快照（M13-B）
+
+命名兼容性: EM 概念名称匹配 EM API（sidemenu 名称与 stock_board_concept_cons_em
+使用相同命名体系）。THS 概念名称不同（如 THS "AI PC" vs EM 可能不存在同名）。
+成分股回填必须使用 EM 名称，否则 akshare 内部解析失败。
 
 历史起点: 各概念板块不同，最早约 2019 年。
 PIT-safety: 板块日线 OHLCV 为 T 日收盘后可见；成分股仅按 snapshot_date
@@ -63,6 +70,57 @@ def fetch_concept_list(
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))
     raise RuntimeError(f"fetch_concept_list failed after {max_retries} retries: {last_err}")
+
+
+def fetch_concept_list_em(
+    *,
+    timeout: float = 15.0,
+) -> pd.DataFrame:
+    """从 EM sidemenu API 拉取全量概念板块名称与代码。
+
+    数据源: ``quote.eastmoney.com/center/api/sidemenu_new.json``
+    可用性: ✅ 已验证（2026-05-07），GFW 不阻断此接口。
+
+    Returns
+    -------
+    DataFrame with columns: concept_code, concept_name, market, type, pinyin
+    type: 1=地域, 2=行业, 3=概念
+    """
+    import requests
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://quote.eastmoney.com/center/boardlist.html",
+    })
+
+    resp = session.get(
+        "https://quote.eastmoney.com/center/api/sidemenu_new.json",
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    bklist = data.get("bklist", [])
+    if not bklist:
+        raise RuntimeError("sidemenu_new.json returned empty bklist")
+
+    items = []
+    for item in bklist:
+        code = str(item.get("code", ""))
+        if not code.startswith("BK"):
+            continue
+        items.append({
+            "concept_code": code,
+            "concept_name": str(item.get("name", "")),
+            "market": int(item.get("market", 0)),
+            "type": int(item.get("type", 0)),
+            "pinyin": str(item.get("pinyin", "")),
+        })
+    return pd.DataFrame(items)
 
 
 def fetch_concept_daily_history(
@@ -374,7 +432,11 @@ def backfill_concept_membership_snapshot(
     concept_limit: Optional[int] = None,
     batch_delay: float = DEFAULT_BATCH_DELAY,
 ) -> dict:
-    """拉取并写入当前个股-概念成分股快照。"""
+    """拉取并写入当前个股-概念成分股快照（EM 数据源）。
+
+    使用 EM sidemenu 概念名称（匹配 stock_board_concept_cons_em API）。
+    优先从 a_share_concept_meta 读取，表中为空时自动调用 fetch_concept_list_em()。
+    """
     meta = conn.execute(
         """
         SELECT concept_code, concept_name
@@ -382,8 +444,15 @@ def backfill_concept_membership_snapshot(
         ORDER BY concept_code
         """
     ).df()
+
     if meta.empty:
-        meta = fetch_concept_list()
+        _LOG.info("concept_meta empty, fetching from EM sidemenu ...")
+        meta_em = fetch_concept_list_em()
+        # Filter to type=3 (概念板块) — EM API uses these names
+        meta = meta_em[meta_em["type"] == 3][["concept_code", "concept_name"]].copy()
+        _LOG.info("fetched %d type-3 concepts from EM sidemenu", len(meta))
+        if meta.empty:
+            meta = fetch_concept_list()
 
     membership, stats = fetch_concept_membership_snapshot(
         meta,
@@ -405,6 +474,166 @@ def backfill_concept_membership_snapshot(
         """,
     )
     return stats
+
+
+# ── EM 概念日线历史（M13-B 个股绑定因子依赖） ─────────────────────────────
+
+def fetch_concept_daily_em(
+    concept_name: str,
+    *,
+    start_date: str = "20200101",
+    end_date: str | None = None,
+    max_retries: int = DEFAULT_MEMBERSHIP_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+) -> pd.DataFrame:
+    """拉取单个 EM 概念板块日线历史 OHLCV。
+
+    使用 ``akshare.stock_board_concept_hist_em()``，与 EM 概念成分股
+    API 共享相同命名体系。返回的 concept_code 为 BK 前缀代码。
+
+    Returns
+    -------
+    DataFrame with columns: concept_code, concept_name, trade_date, open, close,
+    high, low, pct_chg, volume, amount
+    """
+    import akshare as ak
+
+    today = date.today().strftime("%Y%m%d")
+    if end_date is None:
+        end_date = today
+
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            df = ak.stock_board_concept_hist_em(
+                symbol=concept_name,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="",
+            )
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            df = df.rename(
+                columns={
+                    "日期": "trade_date",
+                    "开盘": "open",
+                    "收盘": "close",
+                    "最高": "high",
+                    "最低": "low",
+                    "涨跌幅": "pct_chg",
+                    "成交量": "volume",
+                    "成交额": "amount",
+                }
+            )
+            keep_cols = ["trade_date", "open", "close", "high", "low", "pct_chg", "volume", "amount"]
+            df = df[[c for c in keep_cols if c in df.columns]]
+            df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+            df = df.dropna(subset=["trade_date"])
+            for c in ["open", "close", "high", "low", "volume", "amount", "pct_chg"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+            df["concept_name"] = concept_name
+            return df
+
+        except Exception as e:
+            last_err = e
+            _LOG.debug("%s attempt %d/%d: %s", concept_name, attempt + 1, max_retries, e)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+
+    _LOG.warning("%s: failed after %d retries: %s", concept_name, max_retries, last_err)
+    return pd.DataFrame()
+
+
+def backfill_concept_daily_em(
+    conn,
+    *,
+    start_date: str = "20200101",
+    end_date: str | None = None,
+    concept_limit: int | None = None,
+    batch_delay: float = DEFAULT_BATCH_DELAY,
+) -> dict:
+    """拉取全量 EM 概念板块日线历史并写入 DuckDB ``a_share_concept_daily_em``。
+
+    使用 EM 概念名称（匹配 stock_board_concept_hist_em），同时通过
+    membership 表解析 BK 代码。写入时包含 concept_code (BK) 和 concept_name。
+    """
+    # 从 membership 获取 concept_code -> concept_name 映射
+    code_name_map = conn.execute(
+        """
+        SELECT DISTINCT concept_code, concept_name
+        FROM a_share_concept_membership
+        ORDER BY concept_code
+        """
+    ).df()
+
+    if code_name_map.empty:
+        _LOG.info("membership empty, fetching concept names from EM sidemenu ...")
+        meta_em = fetch_concept_list_em()
+        code_name_map = meta_em[meta_em["type"] == 3][["concept_code", "concept_name"]].copy()
+
+    if concept_limit:
+        code_name_map = code_name_map.head(concept_limit)
+
+    _LOG.info("backfilling %d EM concepts daily from %s", len(code_name_map), start_date)
+
+    # 创建表（如不存在）
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS a_share_concept_daily_em (
+            concept_code VARCHAR,
+            concept_name VARCHAR,
+            trade_date DATE,
+            open DOUBLE,
+            close DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            pct_chg DOUBLE,
+            volume DOUBLE,
+            amount DOUBLE,
+            PRIMARY KEY (concept_code, trade_date)
+        )
+        """
+    )
+
+    success, empty_count, fail_count, total_rows = 0, 0, 0, 0
+    for i, (_, row) in enumerate(code_name_map.iterrows()):
+        if i > 0:
+            time.sleep(batch_delay)
+        code = str(row["concept_code"])
+        name = str(row["concept_name"])
+        try:
+            df = fetch_concept_daily_em(name, start_date=start_date, end_date=end_date)
+            if df.empty:
+                empty_count += 1
+                _LOG.info("[%d/%d] %s %s: empty", i + 1, len(code_name_map), code, name)
+                continue
+            df["concept_code"] = code
+            conn.execute("DELETE FROM a_share_concept_daily_em WHERE concept_code = ?", [code])
+            conn.execute(
+                """
+                INSERT INTO a_share_concept_daily_em
+                (concept_code, concept_name, trade_date, open, close, high, low, pct_chg, volume, amount)
+                SELECT concept_code, concept_name, trade_date, open, close, high, low, pct_chg, volume, amount
+                FROM df
+                """
+            )
+            success += 1
+            total_rows += len(df)
+            _LOG.info("[%d/%d] %s %s: %d rows", i + 1, len(code_name_map), code, name, len(df))
+        except Exception as e:
+            fail_count += 1
+            _LOG.warning("[%d/%d] %s %s: failed: %s", i + 1, len(code_name_map), code, name, e)
+
+    return {
+        "concepts_total": len(code_name_map),
+        "concepts_success": success,
+        "concepts_empty": empty_count,
+        "concepts_failed": fail_count,
+        "total_rows": total_rows,
+    }
 
 
 # ── 质量诊断 ────────────────────────────────────────────────────────────────
