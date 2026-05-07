@@ -452,8 +452,9 @@ MARGIN_TRADING_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("mar
 # 概念板块（P5: M11-C concept/theme breadth）
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 注意：概念成分股为当前快照（非历史回溯），历史信号日用当前成分股近似存在前瞻偏差。
-# 板块日线 OHLCV 为 PIT-safe。
+# V1 市场级 breadth 因子来自板块日线；M13-B 个股绑定因子来自
+# a_share_concept_membership 快照，仅按 snapshot_date <= signal_date 且
+# rolling 60 天有效期使用，避免把当前成分回填到历史。
 
 _CONCEPT_FACTORS: list[dict] = [
     {"name": "concept_breadth_1m", "feature_col": "feature_concept_breadth_1m",
@@ -462,6 +463,18 @@ _CONCEPT_FACTORS: list[dict] = [
      "direction": 1, "description": "概念板块近月收益率截面标准差（市场 dispersion）"},
     {"name": "concept_momentum_1m", "feature_col": "feature_concept_momentum_1m",
      "direction": 1, "description": "概念板块近月平均收益率（市场 momentum）"},
+    {"name": "concept_member_count", "feature_col": "feature_concept_member_count",
+     "direction": 1, "description": "个股所属概念数量（M13-B 个股绑定）"},
+    {"name": "hot_concept_membership", "feature_col": "feature_hot_concept_membership",
+     "direction": 1, "description": "是否属于近月热门概念 Top-10（M13-B）"},
+    {"name": "concept_ew_return_1m", "feature_col": "feature_concept_ew_return_1m",
+     "direction": 1, "description": "所属概念近月收益均值（M13-B）"},
+    {"name": "concept_max_return_1m", "feature_col": "feature_concept_max_return_1m",
+     "direction": 1, "description": "所属概念近月最高收益（M13-B）"},
+    {"name": "concept_inflow_breadth", "feature_col": "feature_concept_inflow_breadth",
+     "direction": 1, "description": "所属概念中资金净流入成员占比均值（M13-B）"},
+    {"name": "concept_return_dispersion", "feature_col": "feature_concept_return_dispersion",
+     "direction": 1, "description": "所属概念近月收益离散度（M13-B）"},
 ]
 
 for _spec in _CONCEPT_FACTORS:
@@ -477,3 +490,39 @@ for _spec in _CONCEPT_FACTORS:
 
 CONCEPT_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("concept")
 SHAREHOLDER_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("shareholder")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 龙虎榜（M14: 月度选股因子）
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LHB_FACTORS: list[dict] = [
+    {"name": "lhb_appearance_count_1m", "feature_col": "feature_lhb_appearance_count_1m",
+     "direction": 1, "description": "近月上榜次数（活跃度）"},
+    {"name": "lhb_appearance_count_3m", "feature_col": "feature_lhb_appearance_count_3m",
+     "direction": 1, "description": "近季上榜次数"},
+    {"name": "lhb_recent_5d", "feature_col": "feature_lhb_recent_5d",
+     "direction": 1, "description": "近 5 日是否上榜"},
+    {"name": "lhb_avg_change_1m", "feature_col": "feature_lhb_avg_change_1m",
+     "direction": 1, "description": "上榜日平均涨跌幅"},
+    {"name": "lhb_avg_amount_1m", "feature_col": "feature_lhb_avg_amount_1m",
+     "direction": 1, "description": "上榜日平均成交额(万元)"},
+    {"name": "lhb_is_bullish_1m", "feature_col": "feature_lhb_is_bullish_1m",
+     "direction": 1, "description": "近月上榜原因含看涨信号"},
+    {"name": "lhb_is_bearish_1m", "feature_col": "feature_lhb_is_bearish_1m",
+     "direction": -1, "description": "近月上榜原因含看跌信号"},
+    {"name": "lhb_is_high_turnover_1m", "feature_col": "feature_lhb_is_high_turnover_1m",
+     "direction": 1, "description": "近月因高换手上榜"},
+]
+
+for _spec in _LHB_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="lhb",
+        feature_col=_spec["feature_col"],
+        min_coverage=0.01,  # LHB 天然稀疏，覆盖率要求极低
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+LHB_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("lhb")

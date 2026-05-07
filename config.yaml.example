@@ -169,21 +169,23 @@ signals:
     map_location: cpu
 
 monthly_selection:
+  # 默认方法：hard-cap baseline（M12 正式 promotion，2026-05-06）
+  # 备选：monthly_selection_u1_top20_m8_natural_soft_gamma0_20（M10 cost gate 通过，2026-05-04）
   default_method:
-    config_id: monthly_selection_u1_top20_m8_natural_soft_gamma0_20
-    config_path: configs/promoted/monthly_selection_u1_top20_m8_natural_soft_gamma0_20.json
+    config_id: monthly_selection_u1_top20_indcap3_hardcap_baseline
+    config_path: configs/promoted/monthly_selection_u1_top20_indcap3_hardcap_baseline.json
     candidate_pool_version: U1_liquid_tradable
     top_k: 20
-    base_model: M8_natural_industry_constraints
-    model: elasticnet_market_excess_soft_risk_budget_gamma0_2
-    selection_policy: soft_industry_risk_budget
-    max_industry_names: null
-    soft_gamma: 0.20
-    cost_bps: 30.0
+    base_model: M8_regime_aware_fixed_policy
+    model: M8_regime_aware_fixed_policy__indcap3
+    selection_policy: industry_names_cap
+    max_industry_names: 3
+    cost_bps: 10.0
     buy_timing: next_month_first_trading_day_open
     sell_timing: holding_month_last_trading_day_open
     transition_policy: sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day
     production_status: active_promoted
+    promotion_package: docs/reports/2026-05/m12_promotion_package_2026-05-06.md
 
 regime:
   # P4-B 关键差异字段：开启后会对因子权重做状态切换，可能提升适应性也可能增加方差。

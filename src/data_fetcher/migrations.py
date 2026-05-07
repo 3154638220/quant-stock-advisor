@@ -221,6 +221,66 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_concept_daily_date ON a_share_concept_daily(trade_date);
     """),
+    # ── v14: 概念成分股快照（M13-B: PIT-safe 个股-概念绑定 Alpha）──
+    (14, "a_share_concept_membership", """
+        CREATE TABLE IF NOT EXISTS a_share_concept_membership (
+            symbol VARCHAR NOT NULL,
+            concept_code VARCHAR NOT NULL,
+            snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            concept_name VARCHAR,
+            entry_date DATE,
+            exit_date DATE,
+            source VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, concept_code, snapshot_date)
+        );
+        ALTER TABLE a_share_concept_membership ADD COLUMN IF NOT EXISTS concept_name VARCHAR;
+        ALTER TABLE a_share_concept_membership ADD COLUMN IF NOT EXISTS entry_date DATE;
+        ALTER TABLE a_share_concept_membership ADD COLUMN IF NOT EXISTS exit_date DATE;
+        ALTER TABLE a_share_concept_membership ADD COLUMN IF NOT EXISTS source VARCHAR;
+        ALTER TABLE a_share_concept_membership ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP;
+        CREATE INDEX IF NOT EXISTS idx_concept_membership_snapshot
+            ON a_share_concept_membership(snapshot_date);
+        CREATE INDEX IF NOT EXISTS idx_concept_membership_symbol
+            ON a_share_concept_membership(symbol, snapshot_date);
+        CREATE INDEX IF NOT EXISTS idx_concept_membership_concept
+            ON a_share_concept_membership(concept_code, snapshot_date);
+    """),
+    # ── v15: 重建旧 membership 表主键，允许同一 (symbol, concept) 存多个月度快照 ──
+    (15, "a_share_concept_membership_pk_snapshot", """
+        DROP TABLE IF EXISTS a_share_concept_membership_v2;
+        CREATE TABLE a_share_concept_membership_v2 (
+            symbol VARCHAR NOT NULL,
+            concept_code VARCHAR NOT NULL,
+            snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            concept_name VARCHAR,
+            entry_date DATE,
+            exit_date DATE,
+            source VARCHAR,
+            fetched_at TIMESTAMP,
+            PRIMARY KEY (symbol, concept_code, snapshot_date)
+        );
+        INSERT OR REPLACE INTO a_share_concept_membership_v2
+        (symbol, concept_code, snapshot_date, concept_name, entry_date, exit_date, source, fetched_at)
+        SELECT
+            symbol,
+            concept_code,
+            snapshot_date,
+            concept_name,
+            COALESCE(entry_date, snapshot_date),
+            exit_date,
+            source,
+            fetched_at
+        FROM a_share_concept_membership;
+        DROP TABLE a_share_concept_membership;
+        ALTER TABLE a_share_concept_membership_v2 RENAME TO a_share_concept_membership;
+        CREATE INDEX IF NOT EXISTS idx_concept_membership_snapshot
+            ON a_share_concept_membership(snapshot_date);
+        CREATE INDEX IF NOT EXISTS idx_concept_membership_symbol
+            ON a_share_concept_membership(symbol, snapshot_date);
+        CREATE INDEX IF NOT EXISTS idx_concept_membership_concept
+            ON a_share_concept_membership(concept_code, snapshot_date);
+    """),
 ]
 
 # ── Migration 引擎 ───────────────────────────────────────────────────────
