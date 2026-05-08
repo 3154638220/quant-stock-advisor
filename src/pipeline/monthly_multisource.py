@@ -20,8 +20,6 @@ import numpy as np
 import pandas as pd
 
 from src.features.fundamental_factors import (
-    LOW_COVERAGE_THRESHOLD,
-    filter_low_coverage_cols,
     pit_safe_fundamental_rows,
 )
 from src.features.registry import (  # D1: 统一因子注册中心（单一权威来源）
@@ -36,10 +34,27 @@ from src.features.registry import (  # D1: 统一因子注册中心（单一权�
     PRICE_VOLUME_FEATURES_REGISTRY,
     SHAREHOLDER_FEATURES_REGISTRY,
 )
+from src.features.standardize import winsor_zscore
 from src.pipeline.monthly_baselines import (
     _train_predict_sklearn,
     _train_predict_xgboost,
     valid_pool_frame,
+)
+from src.pipeline.shared_loaders import (
+    DataLoader,
+    DataLoaderConfig,
+)
+from src.pipeline.shared_loaders import (
+    attach_fund_flow_features as _shared_attach_fund_flow_features,
+)
+from src.pipeline.shared_loaders import (
+    attach_fundamental_features as _shared_attach_fundamental_features,
+)
+from src.pipeline.shared_loaders import (
+    attach_industry_breadth_features as _shared_attach_industry_breadth_features,
+)
+from src.pipeline.shared_loaders import (
+    attach_shareholder_features as _shared_attach_shareholder_features,
 )
 
 # ── 特征列常量（D1: 迁移至 FeatureRegistry 单一来源）─────────────────────
@@ -177,21 +192,6 @@ def _normalize_symbol_date(df: pd.DataFrame, *, date_col: str = "signal_date") -
     return out
 
 
-def _winsor_zscore(series: pd.Series) -> pd.Series:
-    x = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
-    if x.notna().sum() < 3:
-        return pd.Series(0.0, index=series.index)
-    lo = x.quantile(0.01)
-    hi = x.quantile(0.99)
-    clipped = x.clip(lo, hi)
-    med = clipped.median()
-    filled = clipped.fillna(med)
-    std = filled.std(ddof=0)
-    if not np.isfinite(std) or std <= 1e-12:
-        return pd.Series(0.0, index=series.index)
-    return ((filled - filled.mean()) / std).clip(-5.0, 5.0)
-
-
 def add_zscore_and_missing_flags(
     dataset: pd.DataFrame,
     raw_cols: tuple[str, ...],
@@ -207,7 +207,7 @@ def add_zscore_and_missing_flags(
         vals = pd.to_numeric(out[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
         out[f"is_missing_{col}"] = vals.isna().astype(int)
         z_col = f"{col}_z"
-        out[z_col] = vals.groupby(out[date_col], sort=False).transform(_winsor_zscore)
+        out[z_col] = vals.groupby(out[date_col], sort=False).transform(lambda s: winsor_zscore(s, clip_val=5.0))
         # P2-1: 可选秩变换，缓解 z-score 上限堆积
         if use_rank_transform:
             out[z_col] = out.groupby(date_col, sort=False)[z_col].transform(_rank_transform)
@@ -433,60 +433,13 @@ def _compute_signed_streak(df: pd.DataFrame, col: str) -> pd.Series:
 
 def attach_industry_breadth_features(dataset: pd.DataFrame) -> pd.DataFrame:
     """用信号日已知的行业截面强度构造 industry breadth 特征。"""
-    base = _unique_signal_frame(dataset)
-    if base.empty or "industry_level1" not in base.columns:
-        return add_zscore_and_missing_flags(dataset, INDUSTRY_BREADTH_RAW_FEATURES)
-
-    base["industry_level1"] = base["industry_level1"].fillna("_UNKNOWN_").astype(str)
-    base["_ret20_positive"] = (pd.to_numeric(base.get("feature_ret_20d"), errors="coerce") > 0).astype(float)
-    grouped = base.groupby(["signal_date", "industry_level1"], dropna=False, sort=False)
-    ind = grouped.agg(
-        feature_industry_ret20_mean=("feature_ret_20d", "mean"),
-        feature_industry_ret60_mean=("feature_ret_60d", "mean"),
-        feature_industry_positive_ret20_ratio=("_ret20_positive", "mean"),
-        feature_industry_amount20_mean=("feature_amount_20d_log", "mean"),
-        feature_industry_low_vol20_mean=("feature_realized_vol_20d", lambda s: -pd.to_numeric(s, errors="coerce").mean()),
-    ).reset_index()
-    out = dataset.merge(ind, on=["signal_date", "industry_level1"], how="left")
-    return add_zscore_and_missing_flags(out, INDUSTRY_BREADTH_RAW_FEATURES)
+    return _shared_attach_industry_breadth_features(dataset)
 
 
 def attach_fund_flow_features(
     dataset: pd.DataFrame, db_path: Path, *, table: str = "a_share_fund_flow"
 ) -> pd.DataFrame:
-    signal = dataset[["signal_date", "symbol"]].drop_duplicates(["signal_date", "symbol"]).copy()
-    raw = _read_table_if_exists(
-        db_path, table,
-        ["symbol", "trade_date", "main_net_inflow_pct", "super_large_net_inflow_pct", "small_net_inflow_pct"],
-    )
-    if raw.empty:
-        out = dataset.copy()
-        for col in FUND_FLOW_RAW_FEATURES:
-            out[col] = np.nan
-        return add_zscore_and_missing_flags(out, FUND_FLOW_RAW_FEATURES)
-
-    raw = raw.rename(columns={"trade_date": "_flow_trade_date"})
-    raw = _normalize_symbol_date(raw, date_col="_flow_trade_date")
-    for col in ["main_net_inflow_pct", "super_large_net_inflow_pct", "small_net_inflow_pct"]:
-        raw[col] = pd.to_numeric(raw[col], errors="coerce")
-    raw = raw.drop_duplicates(["symbol", "_flow_trade_date"], keep="last")
-    raw = raw.sort_values(["symbol", "_flow_trade_date"], kind="mergesort").reset_index(drop=True)
-    g = raw.groupby("symbol", sort=False)
-    for w in (5, 10, 20):
-        raw[f"feature_fund_flow_main_inflow_{w}d"] = g["main_net_inflow_pct"].transform(
-            lambda s: s.rolling(w, min_periods=max(3, w // 2)).mean()
-        )
-    raw["feature_fund_flow_super_inflow_10d"] = g["super_large_net_inflow_pct"].transform(
-        lambda s: s.rolling(10, min_periods=5).mean()
-    )
-    small20 = g["small_net_inflow_pct"].transform(lambda s: s.rolling(20, min_periods=10).mean())
-    raw["feature_fund_flow_divergence_20d"] = raw["feature_fund_flow_main_inflow_20d"] - small20
-    raw["feature_fund_flow_main_inflow_streak"] = _compute_signed_streak(raw, "main_net_inflow_pct")
-    raw_keep = raw[["symbol", "_flow_trade_date", *FUND_FLOW_RAW_FEATURES]].copy()
-    attached = _merge_asof_by_symbol(signal, raw_keep, left_date="signal_date", right_date="_flow_trade_date")
-    attached = attached.drop(columns=["_flow_trade_date"], errors="ignore")
-    out = dataset.merge(attached, on=["signal_date", "symbol"], how="left")
-    return add_zscore_and_missing_flags(out, FUND_FLOW_RAW_FEATURES)
+    return _shared_attach_fund_flow_features(dataset, db_path, table=table)
 
 
 def attach_fundamental_features(
@@ -494,97 +447,24 @@ def attach_fundamental_features(
     disclosure_calendar: pd.DataFrame | None = None,
     fallback_lag_days: int = 45,
 ) -> pd.DataFrame:
-    signal = dataset[["signal_date", "symbol"]].drop_duplicates(["signal_date", "symbol"]).copy()
-    raw_cols = [
-        "symbol", "report_period", "announcement_date", "source",
-        *[c.replace("feature_fundamental_", "") for c in FUNDAMENTAL_RAW_FEATURES],
-    ]
-    raw = _read_table_if_exists(db_path, table, raw_cols)
-    if raw.empty:
-        out = dataset.copy()
-        for col in FUNDAMENTAL_RAW_FEATURES:
-            out[col] = np.nan
-        return add_zscore_and_missing_flags(out, FUNDAMENTAL_RAW_FEATURES)
-
-    raw = raw.rename(columns={"announcement_date": "_fund_announcement_date"})
-    raw = _normalize_symbol_date(raw, date_col="_fund_announcement_date")
-    raw["report_period"] = pd.to_datetime(raw.get("report_period"), errors="coerce").dt.normalize()
-    raw = raw[raw["_fund_announcement_date"].notna()].copy()
-    # P0-1: 按信号日逐批过滤，优先使用实际披露日历
-    raw = _filter_pit_safe_fundamental_rows(
-        raw, fallback_lag_days=fallback_lag_days, disclosure_calendar=disclosure_calendar,
+    return _shared_attach_fundamental_features(
+        dataset,
+        db_path,
+        table=table,
+        disclosure_calendar=disclosure_calendar,
+        fallback_lag_days=fallback_lag_days,
     )
-    raw = raw.sort_values(["symbol", "_fund_announcement_date", "report_period"], kind="mergesort")
-    raw = raw.drop_duplicates(["symbol", "_fund_announcement_date", "report_period"], keep="last")
-    rename_map = {c.replace("feature_fundamental_", ""): c for c in FUNDAMENTAL_RAW_FEATURES}
-    raw = raw.rename(columns=rename_map)
-    for col in FUNDAMENTAL_RAW_FEATURES:
-        if col not in raw.columns:
-            raw[col] = np.nan
-        raw[col] = pd.to_numeric(raw[col], errors="coerce")
-    attached = _merge_asof_by_symbol(
-        signal,
-        raw[["symbol", "_fund_announcement_date", *FUNDAMENTAL_RAW_FEATURES]],
-        left_date="signal_date", right_date="_fund_announcement_date",
-    )
-    attached = attached.drop(columns=["_fund_announcement_date"], errors="ignore")
-    out = dataset.merge(attached, on=["signal_date", "symbol"], how="left")
-
-    # P0-2: 排除覆盖率过低的特征列（如 ev_ebitda 覆盖率=0），仅保留 is_missing 标志
-    active_fundamental, dropped = filter_low_coverage_cols(
-        out, list(FUNDAMENTAL_RAW_FEATURES),
-        threshold=LOW_COVERAGE_THRESHOLD,
-    )
-    if dropped:
-        import warnings
-        warnings.warn(
-            f"P0-2: 基本面特征覆盖率过低已排除: {dropped}，阈值={LOW_COVERAGE_THRESHOLD}",
-            RuntimeWarning,
-        )
-
-    return add_zscore_and_missing_flags(out, tuple(active_fundamental))
 
 
 def attach_shareholder_features(
     dataset: pd.DataFrame, db_path: Path, *, table: str = "a_share_shareholder", availability_lag_days: int = 30,
 ) -> pd.DataFrame:
-    signal = dataset[["signal_date", "symbol"]].drop_duplicates(["signal_date", "symbol"]).copy()
-    raw = _read_table_if_exists(
-        db_path, table,
-        ["symbol", "end_date", "notice_date", "holder_count", "holder_change"],
+    return _shared_attach_shareholder_features(
+        dataset,
+        db_path,
+        table=table,
+        availability_lag_days=availability_lag_days,
     )
-    if raw.empty:
-        out = dataset.copy()
-        for col in SHAREHOLDER_RAW_FEATURES:
-            out[col] = np.nan
-        return add_zscore_and_missing_flags(out, SHAREHOLDER_RAW_FEATURES)
-
-    raw["symbol"] = raw["symbol"].astype(str).str.extract(r"(\d{1,6})", expand=False).fillna("").str.zfill(6)
-    raw["end_date"] = pd.to_datetime(raw.get("end_date"), errors="coerce").dt.normalize()
-    raw["notice_date"] = pd.to_datetime(raw.get("notice_date"), errors="coerce").dt.normalize()
-    raw["holder_count"] = pd.to_numeric(raw.get("holder_count"), errors="coerce")
-    raw["holder_change"] = pd.to_numeric(raw.get("holder_change"), errors="coerce")
-    raw["_holder_availability_date"] = raw["notice_date"]
-    fallback = raw["_holder_availability_date"].isna() | (raw["_holder_availability_date"] < raw["end_date"])
-    raw.loc[fallback, "_holder_availability_date"] = raw.loc[fallback, "end_date"] + pd.to_timedelta(
-        int(availability_lag_days), unit="D",
-    )
-    raw = raw.dropna(subset=["_holder_availability_date"]).copy()
-    raw = raw.sort_values(["symbol", "_holder_availability_date", "end_date"], kind="mergesort")
-    raw = raw.drop_duplicates(["symbol", "_holder_availability_date", "end_date"], keep="last")
-    holder_count = pd.to_numeric(raw["holder_count"], errors="coerce")
-    raw["feature_shareholder_holder_count_log"] = np.log(holder_count.where(holder_count > 0))
-    raw["feature_shareholder_holder_change_rate"] = pd.to_numeric(raw["holder_change"], errors="coerce") / holder_count.replace(0, np.nan)
-    raw["feature_shareholder_concentration_proxy"] = -raw["feature_shareholder_holder_count_log"]
-    raw = raw.rename(columns={"_holder_availability_date": "holder_availability_date"})
-    raw = _normalize_symbol_date(raw, date_col="holder_availability_date")
-    attached = _merge_asof_by_symbol(
-        signal, raw[["symbol", "holder_availability_date", *SHAREHOLDER_RAW_FEATURES]],
-        left_date="signal_date", right_date="holder_availability_date",
-    )
-    attached = attached.drop(columns=["holder_availability_date"], errors="ignore")
-    out = dataset.merge(attached, on=["signal_date", "symbol"], how="left")
-    return add_zscore_and_missing_flags(out, SHAREHOLDER_RAW_FEATURES)
 
 
 # ── FeatureSpec 构建 ─────────────────────────────────────────────────────
@@ -641,33 +521,11 @@ def build_feature_specs(
 def attach_enabled_families(
     dataset: pd.DataFrame, db_path: Path, cfg: M5RunConfig, enabled_families: list[str]
 ) -> pd.DataFrame:
-    out = dataset.copy()
-    if "industry_breadth" in enabled_families:
-        out = attach_industry_breadth_features(out)
-    if "fund_flow" in enabled_families:
-        out = attach_fund_flow_features(out, db_path)
-    if "fundamental" in enabled_families:
-        out = attach_fundamental_features(
-            out, db_path,
-            fallback_lag_days=cfg.pit_fallback_lag_days if hasattr(cfg, 'pit_fallback_lag_days') else cfg.availability_lag_days,
-        )
-    if "shareholder" in enabled_families:
-        out = attach_shareholder_features(out, db_path, availability_lag_days=cfg.availability_lag_days)
-    if "northbound" in enabled_families:
-        from src.features.northbound_factors import attach_northbound_features
-        out = attach_northbound_features(out, str(db_path))
-    if "northbound_regime" in enabled_families:
-        from src.features.northbound_regime_factors import attach_northbound_regime_features
-        out = attach_northbound_regime_features(out, str(db_path))
-    if "margin_trading" in enabled_families:
-        from src.features.margin_trading_factors import attach_margin_trading_features
-        out = attach_margin_trading_features(out, str(db_path))
-    if "concept" in enabled_families:
-        from src.features.concept_factors import attach_concept_features
-        out = attach_concept_features(out, str(db_path))
-    if "lhb" in enabled_families:
-        from src.features.lhb_factors import attach_lhb_features
-        out = attach_lhb_features(out, str(db_path))
+    loader_cfg = DataLoaderConfig(
+        availability_lag_days=cfg.availability_lag_days,
+        pit_fallback_lag_days=cfg.pit_fallback_lag_days if hasattr(cfg, "pit_fallback_lag_days") else cfg.availability_lag_days,
+    )
+    out = DataLoader(db_path, config=loader_cfg).attach(dataset, enabled_families)
 
     # P0-1: 可选行业内 z-score 中性化（生成 _ind_z 列）
     if getattr(cfg, 'use_industry_neutral_zscore', False) and "fundamental" in enabled_families:

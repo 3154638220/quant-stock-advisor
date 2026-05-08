@@ -274,3 +274,144 @@ def test_monthly_investable_label_basic():
         "monthly_investable", "monthly_investable_market_relative",
         "monthly_investable_up_capture_market_relative",
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P3-1 补充: market_relative 数值正确性 与 边界
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_market_relative_label_numeric_correctness():
+    """market_relative 应减去当日截面等权均值。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03", "2023-01-03"]),
+        "symbol": ["000001", "000002"],
+        "ret_5d": [0.10, -0.04],
+    })
+    out, col, meta = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    # 截面均值 = (0.10 + (-0.04)) / 2 = 0.03
+    # 000001: 0.10 - 0.03 = 0.07
+    # 000002: -0.04 - 0.03 = -0.07
+    mean = (0.10 + (-0.04)) / 2
+    vals = out.set_index("symbol").sort_index()[col]
+    assert vals["000001"] == pytest.approx(0.10 - mean)
+    assert vals["000002"] == pytest.approx(-0.04 - mean)
+
+
+def test_market_relative_single_stock():
+    """单股票截面: market_ret = 自身值 → 结果应为 0。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03"]),
+        "symbol": ["000001"],
+        "ret_5d": [0.05],
+    })
+    out, col, meta = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    assert out[col].iloc[0] == pytest.approx(0.0)
+
+
+def test_market_relative_balanced():
+    """对称正负收益 → 截面均值为 0 → market_relative 等于原始值。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03", "2023-01-03"]),
+        "symbol": ["000001", "000002"],
+        "ret_5d": [0.08, -0.08],
+    })
+    out, col, meta = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    vals = out.set_index("symbol").sort_index()[col]
+    assert vals["000001"] == pytest.approx(0.08)
+    assert vals["000002"] == pytest.approx(-0.08)
+
+
+def test_benchmark_relative_same_as_market_relative():
+    """benchmark_relative 与 market_relative 在当前实现中行为一致（均用截面均值）。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03", "2023-01-03"]),
+        "symbol": ["000001", "000002"],
+        "ret_5d": [0.06, 0.02],
+    })
+    out_m, _, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    out_b, _, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="benchmark_relative",
+    )
+    pd.testing.assert_series_equal(
+        out_m.sort_values("symbol")["forward_ret_fused"].reset_index(drop=True),
+        out_b.sort_values("symbol")["forward_ret_fused"].reset_index(drop=True),
+    )
+
+
+def test_up_capture_multiplier_applied_when_market_up():
+    """当截面均值为正时, up_capture 模式应放大 market_relative 信号。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03", "2023-01-03"]),
+        "symbol": ["000001", "000002"],
+        "ret_5d": [0.10, 0.02],  # 均值为正 (0.06)
+    })
+    out_up, _, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="up_capture_market_relative",
+    )
+    out_mr, _, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    mr_vals = out_mr.set_index("symbol").sort_index()["forward_ret_fused"]
+    up_vals = out_up.set_index("symbol").sort_index()["forward_ret_fused"]
+    # market_ret=0.06 > 0, 所以 up_capture = market_relative * 2
+    for sym in ["000001", "000002"]:
+        assert up_vals[sym] == pytest.approx(mr_vals[sym] * 2.0)
+
+
+def test_up_capture_no_multiplier_when_market_down():
+    """当截面均值为负时, up_capture 应等于 market_relative。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03", "2023-01-03"]),
+        "symbol": ["000001", "000002"],
+        "ret_5d": [-0.02, -0.08],  # 均值为负 (-0.05)
+    })
+    out_up, _, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="up_capture_market_relative",
+    )
+    out_mr, _, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    mr_vals = out_mr.set_index("symbol").sort_index()["forward_ret_fused"]
+    up_vals = out_up.set_index("symbol").sort_index()["forward_ret_fused"]
+    for sym in ["000001", "000002"]:
+        assert up_vals[sym] == pytest.approx(mr_vals[sym])
+
+
+def test_market_relative_multi_date():
+    """多日期截面: 每日独立计算 market_relative。"""
+    panel = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2023-01-03", "2023-01-03",
+                                       "2023-01-04", "2023-01-04"]),
+        "symbol": ["000001", "000002", "000001", "000002"],
+        "ret_5d": [0.10, -0.02, 0.04, 0.06],
+    })
+    out, col, _ = build_p1_training_label(
+        panel, label_columns=["ret_5d"], label_weights=[1.0],
+        label_mode="market_relative",
+    )
+    # Day 1: mean=(0.10-0.02)/2=0.04 → [0.06, -0.06]
+    # Day 2: mean=(0.04+0.06)/2=0.05 → [-0.01, 0.01]
+    day1 = out[out["trade_date"] == pd.Timestamp("2023-01-03")].set_index("symbol").sort_index()[col]
+    day2 = out[out["trade_date"] == pd.Timestamp("2023-01-04")].set_index("symbol").sort_index()[col]
+    assert day1["000001"] == pytest.approx(0.10 - 0.04)
+    assert day1["000002"] == pytest.approx(-0.02 - 0.04)
+    assert day2["000001"] == pytest.approx(0.04 - 0.05)
+    assert day2["000002"] == pytest.approx(0.06 - 0.05)

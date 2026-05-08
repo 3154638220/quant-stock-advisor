@@ -163,63 +163,61 @@ def main() -> int:
         print(f"[ERROR] 数据库不存在: {DB_PATH}")
         return 1
 
-    con = duckdb.connect(str(DB_PATH))
-    ensure_table(con)
+    with duckdb.connect(str(DB_PATH)) as con:
+        ensure_table(con)
 
-    # 确定日期范围
-    end_date = args.end or date.today().strftime("%Y-%m-%d")
-    if args.start:
-        start_date = args.start
-    else:
-        # 增量模式：最近 90 天除去已拉取的
-        start_date = (date.today() - timedelta(days=90)).strftime("%Y-%m-%d")
+        # 确定日期范围
+        end_date = args.end or date.today().strftime("%Y-%m-%d")
+        if args.start:
+            start_date = args.start
+        else:
+            # 增量模式：最近 90 天除去已拉取的
+            start_date = (date.today() - timedelta(days=90)).strftime("%Y-%m-%d")
 
-    trading_days = get_trading_days(con, start_date, end_date)
-    existing = get_existing_dates(con)
-    todo = [d for d in trading_days if d not in existing]
+        trading_days = get_trading_days(con, start_date, end_date)
+        existing = get_existing_dates(con)
+        todo = [d for d in trading_days if d not in existing]
 
-    if args.dry_run:
-        print(f"[DRY RUN] 交易日范围: {start_date} → {end_date}")
-        print(f"  总交易日: {len(trading_days)}, 已拉取: {len(existing)}, 待拉取: {len(todo)}")
-        if todo:
-            print(f"  首日: {todo[0]}, 末日: {todo[-1]}")
-        return 0
+        if args.dry_run:
+            print(f"[DRY RUN] 交易日范围: {start_date} → {end_date}")
+            print(f"  总交易日: {len(trading_days)}, 已拉取: {len(existing)}, 待拉取: {len(todo)}")
+            if todo:
+                print(f"  首日: {todo[0]}, 末日: {todo[-1]}")
+            return 0
 
-    if not todo:
-        print(f"[LHB] 全部就绪: {len(trading_days)} 个交易日已覆盖 ({start_date} → {end_date})")
-        con.close()
-        return 0
+        if not todo:
+            print(f"[LHB] 全部就绪: {len(trading_days)} 个交易日已覆盖 ({start_date} → {end_date})")
+            return 0
 
-    print(f"[LHB] 待拉取 {len(todo)} 个交易日 ({todo[0]} → {todo[-1]})", flush=True)
+        print(f"[LHB] 待拉取 {len(todo)} 个交易日 ({todo[0]} → {todo[-1]})", flush=True)
 
-    total_rows = 0
-    success = 0
-    empty = 0
-    failed = 0
+        total_rows = 0
+        success = 0
+        empty = 0
+        failed = 0
 
-    for i, d in enumerate(todo):
-        try:
-            df = fetch_lhb_daily(d)
-            if df is None or len(df) == 0:
-                empty += 1
-            else:
-                con.execute("DELETE FROM a_share_lhb_daily WHERE data_date = ?", [d])
-                con.register("_tmp", df)
-                con.execute("INSERT INTO a_share_lhb_daily SELECT * FROM _tmp")
-                con.unregister("_tmp")
-                total_rows += len(df)
-                success += 1
+        for i, d in enumerate(todo):
+            try:
+                df = fetch_lhb_daily(d)
+                if df is None or len(df) == 0:
+                    empty += 1
+                else:
+                    con.execute("DELETE FROM a_share_lhb_daily WHERE data_date = ?", [d])
+                    con.register("_tmp", df)
+                    con.execute("INSERT INTO a_share_lhb_daily SELECT * FROM _tmp")
+                    con.unregister("_tmp")
+                    total_rows += len(df)
+                    success += 1
 
-            if (i + 1) % 50 == 0 or i == len(todo) - 1:
-                msg = (f"  [{i+1}/{len(todo)}] {d}: {len(df) if df is not None else 0} rows  "
-                       f"(ok={success}, empty={empty}, fail={failed})")
-                print(msg, flush=True)
-        except Exception as e:
-            failed += 1
-            print(f"  [{i+1}/{len(todo)}] {d}: FAIL - {e}")
-        time.sleep(args.sleep)
+                if (i + 1) % 50 == 0 or i == len(todo) - 1:
+                    msg = (f"  [{i+1}/{len(todo)}] {d}: {len(df) if df is not None else 0} rows  "
+                           f"(ok={success}, empty={empty}, fail={failed})")
+                    print(msg, flush=True)
+            except Exception as e:
+                failed += 1
+                print(f"  [{i+1}/{len(todo)}] {d}: FAIL - {e}")
+            time.sleep(args.sleep)
 
-    con.close()
     print(f"[LHB] 完成: {success} 天成功, {total_rows} 行, {empty} 天无数据, {failed} 失败")
     return 0 if failed == 0 else 1
 

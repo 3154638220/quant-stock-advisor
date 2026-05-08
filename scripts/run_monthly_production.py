@@ -107,18 +107,17 @@ def check_alerts(
 def _check_oos_degradation(db_path: str, config_id: str):
     """从 DuckDB oos_tracking 表读取 OOS 记录，检测连续负超额。"""
     try:
-        conn = duckdb.connect(str(ROOT / db_path), read_only=True)
-        df = conn.execute(
-            """
-            SELECT signal_date, realized_excess_monthly
-            FROM oos_tracking
-            WHERE config_id = ?
-              AND realized_excess_monthly IS NOT NULL
-            ORDER BY signal_date ASC
-            """,
-            [config_id],
-        ).df()
-        conn.close()
+        with duckdb.connect(str(ROOT / db_path), read_only=True) as conn:
+            df = conn.execute(
+                """
+                SELECT signal_date, realized_excess_monthly
+                FROM oos_tracking
+                WHERE config_id = ?
+                  AND realized_excess_monthly IS NOT NULL
+                ORDER BY signal_date ASC
+                """,
+                [config_id],
+            ).df()
 
         if df.empty:
             print("  OOS tracking 无已实现记录，跳过检查")
@@ -190,11 +189,10 @@ def _check_next_trade_date(results_dir: Path):
 def _check_lhb_freshness(db_path: str):
     """检查 LHB 数据最新日期是否落后今日超过 LHB_STALE_DAYS 天。"""
     try:
-        conn = duckdb.connect(str(ROOT / db_path), read_only=True)
-        row = conn.execute(
-            "SELECT MAX(data_date) FROM a_share_lhb_daily"
-        ).fetchone()
-        conn.close()
+        with duckdb.connect(str(ROOT / db_path), read_only=True) as conn:
+            row = conn.execute(
+                "SELECT MAX(data_date) FROM a_share_lhb_daily"
+            ).fetchone()
 
         if row is None or row[0] is None:
             print("  LHB 数据表为空或不存在，跳过检查")
@@ -253,17 +251,16 @@ def print_summary(
 
 def _print_oos_history(db_path: str, config_id: str):
     try:
-        conn = duckdb.connect(str(ROOT / db_path), read_only=True)
-        df = conn.execute(
-            """
-            SELECT signal_date, predicted_excess_monthly, realized_excess_monthly
-            FROM oos_tracking
-            WHERE config_id = ?
-            ORDER BY signal_date ASC
-            """,
-            [config_id],
-        ).df()
-        conn.close()
+        with duckdb.connect(str(ROOT / db_path), read_only=True) as conn:
+            df = conn.execute(
+                """
+                SELECT signal_date, predicted_excess_monthly, realized_excess_monthly
+                FROM oos_tracking
+                WHERE config_id = ?
+                ORDER BY signal_date ASC
+                """,
+                [config_id],
+            ).df()
 
         if df.empty:
             print("\n  OOS 历史：无记录")

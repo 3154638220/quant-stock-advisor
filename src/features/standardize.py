@@ -70,6 +70,36 @@ def zscore_cross_section(
     return pd.Series(result, index=s.index, dtype=float)
 
 
+def winsor_zscore(
+    series: pd.Series,
+    *,
+    lo_q: float = 0.01,
+    hi_q: float = 0.99,
+    ddof: int = 0,
+    fill_empty: float = 0.0,
+    clip_val: Optional[float] = None,
+) -> pd.Series:
+    """截面 Winsorized z-score：分位数缩尾 → 中位数填缺 → 标准化。
+
+    样本不足（有效值 < 3）时返回全 ``fill_empty``；
+    ``clip_val`` 非 None 时将结果裁剪到 ``[-clip_val, clip_val]``。"""
+    x = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    if x.notna().sum() < 3:
+        return pd.Series(fill_empty, index=series.index, dtype=float)
+    lo = x.quantile(lo_q)
+    hi = x.quantile(hi_q)
+    clipped = x.clip(lo, hi)
+    med = clipped.median()
+    filled = clipped.fillna(med)
+    std = filled.std(ddof=ddof)
+    if not np.isfinite(std) or std <= 1e-12:
+        return pd.Series(fill_empty, index=series.index, dtype=float)
+    z = (filled - filled.mean()) / std
+    if clip_val is not None:
+        z = z.clip(-clip_val, clip_val)
+    return z
+
+
 def zscore_by_date(
     df: pd.DataFrame,
     col: str,

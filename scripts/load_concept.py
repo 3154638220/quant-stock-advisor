@@ -46,30 +46,28 @@ def _db_path() -> str:
 
 
 def cmd_backfill_daily(start_date: str, concept_limit: int | None) -> None:
-    conn = duckdb.connect(_db_path())
-    apply_migrations(conn)
-    result = backfill_all_concepts(
-        conn,
-        start_date=start_date,
-        concept_limit=concept_limit,
-    )
-    conn.close()
+    with duckdb.connect(_db_path()) as conn:
+        apply_migrations(conn)
+        result = backfill_all_concepts(
+            conn,
+            start_date=start_date,
+            concept_limit=concept_limit,
+        )
     print(f"Concepts: {result['concepts_success']}/{result['concepts_total']} success, "
           f"{result['concepts_empty']} empty, {result['total_rows']} total rows")
 
 
 def cmd_backfill_membership(snapshot_date: str | None, concept_limit: int | None) -> None:
-    conn = duckdb.connect(_db_path())
-    apply_migrations(conn)
-    snap = None
-    if snapshot_date:
-        snap = date.fromisoformat(snapshot_date)
-    result = backfill_concept_membership_snapshot(
-        conn,
-        snapshot_date=snap,
-        concept_limit=concept_limit,
-    )
-    conn.close()
+    with duckdb.connect(_db_path()) as conn:
+        apply_migrations(conn)
+        snap = None
+        if snapshot_date:
+            snap = date.fromisoformat(snapshot_date)
+        result = backfill_concept_membership_snapshot(
+            conn,
+            snapshot_date=snap,
+            concept_limit=concept_limit,
+        )
     print(
         f"Membership: {result['membership_rows']} rows, "
         f"{result['membership_symbols']} symbols, "
@@ -79,9 +77,8 @@ def cmd_backfill_membership(snapshot_date: str | None, concept_limit: int | None
 
 
 def cmd_diagnose() -> None:
-    conn = duckdb.connect(_db_path(), read_only=True)
-    report = diagnose_concept_quality(conn)
-    conn.close()
+    with duckdb.connect(_db_path(), read_only=True) as conn:
+        report = diagnose_concept_quality(conn)
     print(f"概念总数: {report.concept_count}")
     print(f"日线日期范围: {report.daily_date_min} ~ {report.daily_date_max}")
     print(f"日线总行数: {report.daily_total_rows}")

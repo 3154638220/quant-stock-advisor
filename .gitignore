@@ -57,6 +57,7 @@ tmp/
 .env.*
 !.env.example
 secrets.yaml
+config.yaml
 config.local.yaml
 output/
 

@@ -67,25 +67,22 @@ def main():
         print(f"错误: DuckDB 文件不存在: {db_path}", file=sys.stderr)
         sys.exit(1)
 
-    conn = duckdb.connect(str(db_path), read_only=True)
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        # ── 月份过滤转换为 signal_date 范围 ──
+        signal_date_kwargs = {}
+        if args.month:
+            start, end = _parse_month(args.month)
+            signal_date_kwargs["signal_date"] = f"{start}..{end}"
+            # query_events 目前只支持精确匹配。用原始 SQL 做范围查询。
 
-    # ── 月份过滤转换为 signal_date 范围 ──
-    signal_date_kwargs = {}
-    if args.month:
-        start, end = _parse_month(args.month)
-        signal_date_kwargs["signal_date"] = f"{start}..{end}"
-        # query_events 目前只支持精确匹配。用原始 SQL 做范围查询。
-
-    # ── 查询 ──
-    events = query_events(
-        conn,
-        event_type=args.event_type,
-        run_id=args.run_id,
-        symbol=args.symbol,
-        limit=args.limit,
-    )
-
-    conn.close()
+        # ── 查询 ──
+        events = query_events(
+            conn,
+            event_type=args.event_type,
+            run_id=args.run_id,
+            symbol=args.symbol,
+            limit=args.limit,
+        )
 
     if args.json:
         print(json.dumps(events, ensure_ascii=False, indent=2, default=str))

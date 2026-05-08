@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.engine import build_open_to_open_returns
+from src.features.standardize import winsor_zscore
 from src.market.tradability import is_open_limit_up_unbuyable, is_row_suspended_like, limit_up_ratio
 from src.research.gates import POOL_RULES
 
@@ -402,26 +403,11 @@ def build_monthly_labels(
 
 # ── 特征截面变换 ─────────────────────────────────────────────────────────
 
-def _winsor_zscore(series: pd.Series) -> pd.Series:
-    x = pd.to_numeric(series, errors="coerce")
-    if x.notna().sum() < 3:
-        return pd.Series(np.nan, index=series.index)
-    lo = x.quantile(0.01)
-    hi = x.quantile(0.99)
-    clipped = x.clip(lo, hi)
-    med = clipped.median()
-    filled = clipped.fillna(med)
-    std = filled.std(ddof=0)
-    if not np.isfinite(std) or std <= 1e-12:
-        return pd.Series(0.0, index=series.index)
-    return (filled - filled.mean()) / std
-
-
 def attach_feature_transforms(panel: pd.DataFrame) -> pd.DataFrame:
     out = panel.copy()
     for col in FEATURE_COLS:
         out[f"is_missing_{col}"] = pd.to_numeric(out[col], errors="coerce").isna().astype(int)
-        out[f"{col}_z"] = out.groupby("signal_date", sort=False)[col].transform(_winsor_zscore)
+        out[f"{col}_z"] = out.groupby("signal_date", sort=False)[col].transform(winsor_zscore)
     return out
 
 

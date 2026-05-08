@@ -38,6 +38,10 @@ def temp_db():
             benchmark_return DOUBLE,
             num_holdings INTEGER,
             limit_up_excluded INTEGER,
+            rank_ic_monthly DOUBLE,
+            max_single_month_loss DOUBLE,
+            portfolio_turnover DOUBLE,
+            industry_hhi DOUBLE,
             PRIMARY KEY (config_id, signal_date, top_k, candidate_pool, cost_bps)
         )
     """)
@@ -92,7 +96,7 @@ class TestRecordOOSFromM7Report:
         # 先手动创建一条仅含预测的记录
         conn = duckdb.connect(str(temp_db))
         conn.execute(
-            "INSERT INTO oos_tracking VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0)",
+            "INSERT INTO oos_tracking VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL)",
             ["test_config_v2", "2026-04-01", 20, "U1", 30.0, 0.004],
         )
         conn.close()

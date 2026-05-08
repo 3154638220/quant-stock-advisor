@@ -61,39 +61,36 @@ def resolve_symbols(args: argparse.Namespace) -> list[str]:
     if args.symbols:
         return [s.strip().zfill(6) for s in args.symbols.split(",") if s.strip()]
 
-    con = duckdb.connect(args.db_path, read_only=True)
-
-    if args.pool:
-        # Try to get symbols from pool_csv (per-stock monthly_long files have 'symbol')
-        try:
-            pool_df = pd.read_csv(args.pool_csv)
-            if "symbol" in pool_df.columns and args.pool in pool_df["candidate_pool_version"].values:
-                symbols = sorted(
-                    pool_df[pool_df["candidate_pool_version"] == args.pool]["symbol"]
-                    .dropna().astype(str).str.zfill(6).unique()
-                )
-            else:
-                # Fallback: get from DuckDB using U1 liquid tradable filter
+    with duckdb.connect(args.db_path, read_only=True) as con:
+        if args.pool:
+            # Try to get symbols from pool_csv (per-stock monthly_long files have 'symbol')
+            try:
+                pool_df = pd.read_csv(args.pool_csv)
+                if "symbol" in pool_df.columns and args.pool in pool_df["candidate_pool_version"].values:
+                    symbols = sorted(
+                        pool_df[pool_df["candidate_pool_version"] == args.pool]["symbol"]
+                        .dropna().astype(str).str.zfill(6).unique()
+                    )
+                else:
+                    # Fallback: get from DuckDB using U1 liquid tradable filter
+                    symbols_df = con.execute(
+                        "SELECT DISTINCT symbol FROM a_share_daily WHERE amount > 0 "
+                        "ORDER BY symbol"
+                    ).df()
+                    symbols = sorted(symbols_df["symbol"].astype(str).str.zfill(6).tolist())
+            except Exception:
                 symbols_df = con.execute(
-                    "SELECT DISTINCT symbol FROM a_share_daily WHERE amount > 0 "
-                    "ORDER BY symbol"
+                    "SELECT DISTINCT symbol FROM a_share_daily ORDER BY symbol"
                 ).df()
                 symbols = sorted(symbols_df["symbol"].astype(str).str.zfill(6).tolist())
-        except Exception:
+        elif args.all:
             symbols_df = con.execute(
                 "SELECT DISTINCT symbol FROM a_share_daily ORDER BY symbol"
             ).df()
             symbols = sorted(symbols_df["symbol"].astype(str).str.zfill(6).tolist())
-    elif args.all:
-        symbols_df = con.execute(
-            "SELECT DISTINCT symbol FROM a_share_daily ORDER BY symbol"
-        ).df()
-        symbols = sorted(symbols_df["symbol"].astype(str).str.zfill(6).tolist())
-    else:
-        print("请指定 --symbols / --pool / --all 中的一个", file=sys.stderr)
-        sys.exit(1)
-
-    con.close()
+        else:
+            print("请指定 --symbols / --pool / --all 中的一个", file=sys.stderr)
+            sys.exit(1)
 
     if args.sample and args.sample < len(symbols):
         import random

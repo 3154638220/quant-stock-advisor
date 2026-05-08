@@ -165,13 +165,11 @@ def main() -> int:
         dates = [args.date]
     elif args.start:
         end = args.end or datetime.today().strftime("%Y%m%d")
-        con_r = duckdb.connect(args.db_path, read_only=True)
-        dates = trading_days_between(args.start, end, con_r)
-        con_r.close()
+        with duckdb.connect(args.db_path, read_only=True) as con_r:
+            dates = trading_days_between(args.start, end, con_r)
     elif args.all:
-        con_r = duckdb.connect(args.db_path, read_only=True)
-        dates = trading_days_between("2012-01-01", datetime.today().strftime("%Y%m%d"), con_r)
-        con_r.close()
+        with duckdb.connect(args.db_path, read_only=True) as con_r:
+            dates = trading_days_between("2012-01-01", datetime.today().strftime("%Y%m%d"), con_r)
     else:
         print("请指定 --date / --start [--end] / --all", file=sys.stderr)
         return 1
