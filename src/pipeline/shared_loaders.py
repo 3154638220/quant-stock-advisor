@@ -22,13 +22,17 @@ from src.features.fundamental_factors import (
 )
 from src.features.registry import (
     CONCEPT_FEATURES_REGISTRY,
+    EVENT_FEATURES_REGISTRY,
     FUND_FLOW_FEATURES_REGISTRY,
     FUNDAMENTAL_FEATURES_REGISTRY,
     INDUSTRY_BREADTH_FEATURES_REGISTRY,
     LHB_FEATURES_REGISTRY,
+    LIQUIDITY_POSITION_FEATURES_REGISTRY,
     MARGIN_TRADING_FEATURES_REGISTRY,
     NORTHBOUND_FEATURES_REGISTRY,
     NORTHBOUND_REGIME_FEATURES_REGISTRY,
+    QUALITY_FEATURES_REGISTRY,
+    REVERSAL_VOLUME_FEATURES_REGISTRY,
     SHAREHOLDER_FEATURES_REGISTRY,
 )
 from src.features.standardize import winsor_zscore
@@ -44,6 +48,10 @@ NORTHBOUND_REGIME_RAW_FEATURES: tuple[str, ...] = NORTHBOUND_REGIME_FEATURES_REG
 MARGIN_TRADING_RAW_FEATURES: tuple[str, ...] = MARGIN_TRADING_FEATURES_REGISTRY
 CONCEPT_RAW_FEATURES: tuple[str, ...] = CONCEPT_FEATURES_REGISTRY
 LHB_RAW_FEATURES: tuple[str, ...] = LHB_FEATURES_REGISTRY
+EVENT_RAW_FEATURES: tuple[str, ...] = EVENT_FEATURES_REGISTRY
+QUALITY_RAW_FEATURES: tuple[str, ...] = QUALITY_FEATURES_REGISTRY
+REVERSAL_VOLUME_RAW_FEATURES: tuple[str, ...] = REVERSAL_VOLUME_FEATURES_REGISTRY
+LIQUIDITY_POSITION_RAW_FEATURES: tuple[str, ...] = LIQUIDITY_POSITION_FEATURES_REGISTRY
 
 CANONICAL_FAMILY_ORDER: tuple[str, ...] = (
     "industry_breadth",
@@ -55,6 +63,10 @@ CANONICAL_FAMILY_ORDER: tuple[str, ...] = (
     "margin_trading",
     "concept",
     "lhb",
+    "event",
+    "quality",
+    "reversal_volume",
+    "liquidity_position",
 )
 
 FAMILY_RAW_FEATURES: dict[str, tuple[str, ...]] = {
@@ -67,6 +79,10 @@ FAMILY_RAW_FEATURES: dict[str, tuple[str, ...]] = {
     "margin_trading": MARGIN_TRADING_RAW_FEATURES,
     "concept": CONCEPT_RAW_FEATURES,
     "lhb": LHB_RAW_FEATURES,
+    "event": EVENT_RAW_FEATURES,
+    "quality": QUALITY_RAW_FEATURES,
+    "reversal_volume": REVERSAL_VOLUME_RAW_FEATURES,
+    "liquidity_position": LIQUIDITY_POSITION_RAW_FEATURES,
 }
 
 
@@ -125,6 +141,10 @@ class DataLoader:
             "margin_trading": self.attach_margin_trading,
             "concept": self.attach_concept,
             "lhb": self.attach_lhb,
+            "event": self.attach_event,
+            "quality": self.attach_quality,
+            "reversal_volume": self.attach_reversal_volume,
+            "liquidity_position": self.attach_liquidity_position,
         }
 
     def attach_industry_breadth(self, dataset: pd.DataFrame) -> pd.DataFrame:
@@ -172,6 +192,18 @@ class DataLoader:
         from src.features.lhb_factors import attach_lhb_features
 
         return attach_lhb_features(dataset, str(self.db_path))
+
+    def attach_event(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return attach_event_features(dataset, str(self.db_path))
+
+    def attach_quality(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return attach_quality_features(dataset, str(self.db_path))
+
+    def attach_reversal_volume(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return attach_reversal_volume_features(dataset, str(self.db_path))
+
+    def attach_liquidity_position(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return attach_liquidity_position_features(dataset, str(self.db_path))
 
 
 def _normalize_symbol_date(df: pd.DataFrame, *, date_col: str = "signal_date") -> pd.DataFrame:
@@ -505,6 +537,54 @@ def attach_shareholder_features(
     attached = attached.drop(columns=["holder_availability_date"], errors="ignore")
     out = dataset.merge(attached, on=["signal_date", "symbol"], how="left")
     return add_zscore_and_missing_flags(out, SHAREHOLDER_RAW_FEATURES)
+
+
+def attach_quality_features(
+    dataset: pd.DataFrame,
+    db_path: str | Path,
+) -> pd.DataFrame:
+    """Attach W1 quality factors (ROE stability, accruals, asset growth, earnings surprise)."""
+    from src.features.quality_factors import attach_quality_factors
+
+    out = dataset.copy()
+    out = attach_quality_factors(out, str(db_path))
+    return add_zscore_and_missing_flags(out, QUALITY_RAW_FEATURES)
+
+
+def attach_event_features(
+    dataset: pd.DataFrame,
+    db_path: str | Path,
+) -> pd.DataFrame:
+    """Attach W4 structured announcement event factors."""
+    from src.features.event_factors import attach_event_factors
+
+    out = dataset.copy()
+    out = attach_event_factors(out, str(db_path))
+    return add_zscore_and_missing_flags(out, EVENT_RAW_FEATURES)
+
+
+def attach_reversal_volume_features(
+    dataset: pd.DataFrame,
+    db_path: str | Path,
+) -> pd.DataFrame:
+    """Attach W1 Phase 2 reversal & volume anomaly factors."""
+    from src.features.reversal_volume_factors import attach_reversal_volume_factors
+
+    out = dataset.copy()
+    out = attach_reversal_volume_factors(out, str(db_path))
+    return add_zscore_and_missing_flags(out, REVERSAL_VOLUME_RAW_FEATURES)
+
+
+def attach_liquidity_position_features(
+    dataset: pd.DataFrame,
+    db_path: str | Path,
+) -> pd.DataFrame:
+    """Attach W1 Phase 3 liquidity & price position extension factors."""
+    from src.features.liquidity_position_factors import attach_liquidity_position_factors
+
+    out = dataset.copy()
+    out = attach_liquidity_position_factors(out, str(db_path))
+    return add_zscore_and_missing_flags(out, LIQUIDITY_POSITION_RAW_FEATURES)
 
 
 def attach_feature_families(

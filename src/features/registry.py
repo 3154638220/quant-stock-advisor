@@ -557,3 +557,127 @@ for _spec in _LHB_FACTORS:
     ))
 
 LHB_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("lhb")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W1: 质量因子（Alpha158 对齐）
+# ═══════════════════════════════════════════════════════════════════════════
+
+_QUALITY_FACTORS: list[dict] = [
+    {"name": "roe_stability", "feature_col": "feature_quality_roe_stability",
+     "direction": 1, "description": "ROE 过去 8 季度标准差取负（高稳定性=高质量）"},
+    {"name": "accruals_ratio", "feature_col": "feature_quality_accruals_ratio",
+     "direction": -1, "description": "应计项目比率代理（高应计=盈利质量差）"},
+    {"name": "asset_growth_rate", "feature_col": "feature_quality_asset_growth_rate",
+     "direction": -1, "description": "资产增长率代理（过度扩张=负向）"},
+    {"name": "earnings_surprise", "feature_col": "feature_quality_earnings_surprise",
+     "direction": 1, "description": "盈利惊喜：最新 net_profit_yoy 相对历史均值的偏离"},
+]
+
+for _spec in _QUALITY_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="quality",
+        feature_col=_spec["feature_col"],
+        requires_pit=True,
+        min_coverage=0.30,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+QUALITY_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("quality")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W1 Phase 2: 短期反转 & 量能异常因子（Alpha158 对齐）
+# ═══════════════════════════════════════════════════════════════════════════
+
+_REVERSAL_VOLUME_FACTORS: list[dict] = [
+    {"name": "st_reversal_1m", "feature_col": "feature_reversal_st_reversal_1m",
+     "direction": -1, "description": "近月超额收益（短期反转=做空信号）"},
+    {"name": "st_reversal_1w", "feature_col": "feature_reversal_st_reversal_1w",
+     "direction": -1, "description": "近周超额收益（短期反转=做空信号）"},
+    {"name": "volume_spike", "feature_col": "feature_reversal_volume_spike",
+     "direction": -1, "description": "近5日/近60日成交额比（异常放量=情绪过热）"},
+    {"name": "turnover_anomaly", "feature_col": "feature_reversal_turnover_anomaly",
+     "direction": -1, "description": "换手率相对60日均值的z-score（异常换手=散户拥挤）"},
+    {"name": "pv_divergence", "feature_col": "feature_reversal_pv_divergence",
+     "direction": -1, "description": "近20日量价相关性取负（价涨量缩/价跌量增=背离）"},
+]
+
+for _spec in _REVERSAL_VOLUME_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="reversal_volume",
+        feature_col=_spec["feature_col"],
+        requires_pit=False,
+        min_coverage=0.30,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+REVERSAL_VOLUME_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("reversal_volume")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W1 Phase 3: 流动性 & 价格位置扩展因子（Alpha158 对齐）
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LIQUIDITY_POSITION_FACTORS: list[dict] = [
+    {"name": "amihud", "feature_col": "feature_liquidity_amihud",
+     "direction": -1, "description": "Amihud非流动性指标（日均|收益|/成交额×10^6，高=流动性差）"},
+    {"name": "high52w_ratio", "feature_col": "feature_liquidity_high52w_ratio",
+     "direction": 1, "description": "收盘价/52周最高价（接近高点=动量延续）"},
+    {"name": "low52w_ratio", "feature_col": "feature_liquidity_low52w_ratio",
+     "direction": -1, "description": "收盘价/52周最低价（接近低点=负向信号）"},
+    {"name": "price_range_width", "feature_col": "feature_liquidity_price_range_width",
+     "direction": -1, "description": "(52周高-低)/52周均价（宽幅震荡=不确定性高）"},
+]
+
+for _spec in _LIQUIDITY_POSITION_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="liquidity_position",
+        feature_col=_spec["feature_col"],
+        requires_pit=False,
+        min_coverage=0.30,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+LIQUIDITY_POSITION_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("liquidity_position")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W4: 结构化事件因子（M16 前置探索）
+# ═══════════════════════════════════════════════════════════════════════════
+
+_EVENT_FACTORS: list[dict] = [
+    {"name": "earnings_guidance_direction", "feature_col": "feature_event_earnings_guidance_direction",
+     "direction": 1, "description": "业绩预告方向（上调/下调）"},
+    {"name": "earnings_guidance_magnitude", "feature_col": "feature_event_earnings_guidance_magnitude",
+     "direction": 1, "description": "业绩预告幅度（预告净利润相对去年变化）"},
+    {"name": "earnings_surprise_ttm", "feature_col": "feature_event_earnings_surprise_ttm",
+     "direction": 1, "description": "业绩预告惊喜（相对历史分布的标准化偏离）"},
+    {"name": "buyback_amount_ratio", "feature_col": "feature_event_buyback_amount_ratio",
+     "direction": 1, "description": "回购金额/市值"},
+    {"name": "buyback_recent_30d", "feature_col": "feature_event_buyback_recent_30d",
+     "direction": 1, "description": "近30日是否存在回购公告"},
+    {"name": "reduction_plan_flag", "feature_col": "feature_event_reduction_plan_flag",
+     "direction": -1, "description": "近30日是否存在减持计划"},
+    {"name": "unlock_ratio_30d", "feature_col": "feature_event_unlock_ratio_30d",
+     "direction": -1, "description": "未来30日解禁市值/市值"},
+]
+
+for _spec in _EVENT_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="event",
+        feature_col=_spec["feature_col"],
+        requires_pit=True,
+        min_coverage=0.10,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+EVENT_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("event")

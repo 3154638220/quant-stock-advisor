@@ -291,6 +291,65 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         CREATE INDEX IF NOT EXISTS idx_nbaggr_date ON a_share_northbound_aggregate(trade_date);
     """),
+    # ── v17: 结构化公告事件表（W4: event factors，全部含 PIT 公告时间戳）──
+    (17, "a_share_event_tables", """
+        CREATE TABLE IF NOT EXISTS a_share_event_earnings_guidance (
+            symbol VARCHAR NOT NULL,
+            announce_date DATE NOT NULL,
+            report_period DATE,
+            guidance_direction VARCHAR,
+            guidance_change_ratio DOUBLE,
+            expected_net_profit_min DOUBLE,
+            expected_net_profit_max DOUBLE,
+            prev_year_net_profit DOUBLE,
+            source VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, announce_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_evt_guidance_announce
+            ON a_share_event_earnings_guidance(announce_date);
+
+        CREATE TABLE IF NOT EXISTS a_share_event_buyback (
+            symbol VARCHAR NOT NULL,
+            announce_date DATE NOT NULL,
+            buyback_amount DOUBLE,
+            market_cap DOUBLE,
+            progress_status VARCHAR,
+            source VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, announce_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_evt_buyback_announce
+            ON a_share_event_buyback(announce_date);
+
+        CREATE TABLE IF NOT EXISTS a_share_event_reduction (
+            symbol VARCHAR NOT NULL,
+            announce_date DATE NOT NULL,
+            reduction_ratio DOUBLE,
+            reduction_amount DOUBLE,
+            holder_name VARCHAR,
+            source VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, announce_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_evt_reduction_announce
+            ON a_share_event_reduction(announce_date);
+
+        CREATE TABLE IF NOT EXISTS a_share_event_unlock (
+            symbol VARCHAR NOT NULL,
+            announce_date DATE NOT NULL,
+            unlock_date DATE NOT NULL,
+            unlock_market_value DOUBLE,
+            market_cap DOUBLE,
+            source VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, announce_date, unlock_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_evt_unlock_announce
+            ON a_share_event_unlock(announce_date);
+        CREATE INDEX IF NOT EXISTS idx_evt_unlock_date
+            ON a_share_event_unlock(unlock_date);
+    """),
 ]
 
 # ── Migration 引擎 ───────────────────────────────────────────────────────
