@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-fetch", action="store_true", help="跳过数据拉取")
     p.add_argument("--config", default=PROMOTED_CONFIG, help="Promoted config 路径")
     p.add_argument("--dry-run", action="store_true", help="仅打印即将执行的命令，不实际运行")
+    p.add_argument(
+        "--rematerialize-prepared-factors", action="store_true",
+        help="在月度流程末尾重跑 materialize_prepared_factors.py，保持 W5/W6 分析数据同步",
+    )
     return p.parse_args()
 
 
@@ -375,6 +379,20 @@ def main() -> int:
 
     # ── Step 5: 摘要 ──
     print_summary(results_dir, month_str, config_id, DUCKDB_PATH)
+
+    # ── Step 6: 可选 — 重物化 prepared_factors ──
+    if args.rematerialize_prepared_factors:
+        mat_script = ROOT / "scripts" / "materialize_prepared_factors.py"
+        if mat_script.exists():
+            rc = run_cmd(
+                ["python3", str(mat_script)],
+                "materialize_prepared_factors.py（W5/W6 分析数据同步）",
+                dry_run=args.dry_run,
+            )
+            if rc != 0:
+                print("[WARNING] prepared_factors 物化返回非零，W5/W6 分析数据可能过时")
+        else:
+            print("[M15] materialize_prepared_factors.py 不存在，跳过物化")
 
     print(f"[M15] 月度生产完成 — {month_str}")
     return 0

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -55,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--batch-size", type=int, default=0,
         help="Process N months per batch (0 = all at once)",
+    )
+    p.add_argument(
+        "--skip-freshness-check", action="store_true",
+        help="Skip the staleness check against source dataset mtime",
     )
     return p.parse_args()
 
@@ -102,7 +107,47 @@ def attach_families(
     return result
 
 
-def write_to_duckdb(df: pd.DataFrame, db_path: str) -> None:
+def check_freshness(db_path: str, dataset_path: str) -> str:
+    """Compare prepared_factors last-write time against dataset mtime.
+
+    Returns one of 'fresh', 'stale', 'missing', 'unknown'.
+    """
+    try:
+        dataset_mtime = os.path.getmtime(dataset_path)
+    except OSError:
+        _LOG.warning("Dataset file not found, skipping freshness check: %s", dataset_path)
+        return "missing"
+
+    con = duckdb.connect(db_path)
+    try:
+        tables = [r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name='prepared_factors'"
+        ).fetchall()]
+        if "prepared_factors" not in tables:
+            return "missing"
+
+        meta_exists = con.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='_materialization_meta'"
+        ).fetchone()[0] > 0
+        if not meta_exists:
+            return "unknown"
+
+        row = con.execute(
+            "SELECT materialized_at FROM _materialization_meta "
+            "WHERE table_name='prepared_factors' ORDER BY materialized_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return "unknown"
+
+        last_write_ts = pd.Timestamp(row[0]).timestamp()
+        if dataset_mtime > last_write_ts + 1:  # 1s tolerance for filesystem timestamp granularity
+            return "stale"
+        return "fresh"
+    finally:
+        con.close()
+
+
+def write_to_duckdb(df: pd.DataFrame, db_path: str, dataset_path: str) -> None:
     """Write (or replace) the prepared_factors table in duckdb."""
     con = duckdb.connect(db_path)
     try:
@@ -112,6 +157,22 @@ def write_to_duckdb(df: pd.DataFrame, db_path: str) -> None:
         row_count = con.execute("SELECT COUNT(*) FROM prepared_factors").fetchone()[0]
         col_count = len(con.execute("DESCRIBE prepared_factors").fetchall())
         _LOG.info("prepared_factors written: %d rows, %d columns", row_count, col_count)
+
+        # Record materialization metadata for freshness checks
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS _materialization_meta (
+                table_name VARCHAR,
+                materialized_at TIMESTAMP,
+                source_file VARCHAR,
+                row_count BIGINT,
+                col_count BIGINT
+            )
+        """)
+        con.execute(
+            "INSERT INTO _materialization_meta VALUES (?, NOW(), ?, ?, ?)",
+            ["prepared_factors", str(Path(dataset_path).resolve()), row_count, col_count],
+        )
+        _LOG.info("_materialization_meta updated")
     finally:
         con.close()
 
@@ -124,6 +185,22 @@ def main() -> None:
     skip = {f.strip() for f in args.skip_families.split(",") if f.strip()}
     families = [f for f in families if f not in skip]
 
+    # Freshness check: warn if parquet was updated after last materialization
+    if not args.skip_freshness_check:
+        status = check_freshness(args.db, args.dataset)
+        if status == "stale":
+            _LOG.warning(
+                "Dataset %s is newer than prepared_factors table in %s. "
+                "Consider re-running materialization to keep W5/W6 analysis in sync.",
+                args.dataset, args.db,
+            )
+        elif status == "missing":
+            _LOG.info("prepared_factors table not yet created — first run")
+        elif status == "unknown":
+            _LOG.info("No materialization metadata found — will record after this run")
+        else:
+            _LOG.info("prepared_factors is up to date with dataset")
+
     _LOG.info("Loading base dataset from %s", args.dataset)
     df = load_base_dataset(args.dataset)
 
@@ -131,7 +208,7 @@ def main() -> None:
     df = attach_families(df, args.db, families)
 
     _LOG.info("Writing prepared_factors to %s", args.db)
-    write_to_duckdb(df, args.db)
+    write_to_duckdb(df, args.db, args.dataset)
 
     # Print factor column summary
     factor_cols = [c for c in df.columns if c.startswith("feature_") and not c.endswith("_z")]
