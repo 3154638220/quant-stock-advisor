@@ -506,7 +506,7 @@ def build_gate_table(leaderboard: pd.DataFrame) -> pd.DataFrame:
 
     baseline = leaderboard[
         (leaderboard["selection_policy"] == "uncapped")
-        & (leaderboard["base_model"].isin([STABLE_M5_ELASTICNET, STABLE_M5_EXTRATREES]))
+        & (leaderboard["base_model"].str.match(r"^M5_.*(elasticnet|extratrees)_excess$"))
     ].copy()
     baseline = (
         baseline.groupby(["candidate_pool_version", "top_k"], sort=True)
@@ -603,12 +603,11 @@ def build_regime_policy_scores(scores: pd.DataFrame, states: pd.DataFrame) -> pd
 
     if scores.empty:
         return pd.DataFrame()
-    wanted = {
-        STABLE_M5_ELASTICNET: "_elasticnet_score",
-        STABLE_M5_EXTRATREES: "_extratrees_score",
-        WATCHLIST_M6_RANK: "_rank_score",
-        WATCHLIST_M6_TOP20: "_top20_score",
-    }
+    # 使用模式匹配而非精确名称——M5 模型名称随 --families 动态变化。
+    wanted_m5_elasticnet = {"pattern": r"^M5_.*elasticnet_excess$", "score_col": "_elasticnet_score"}
+    wanted_m5_extratrees = {"pattern": r"^M5_.*extratrees_excess$", "score_col": "_extratrees_score"}
+    wanted_m6_rank = {"model": WATCHLIST_M6_RANK, "score_col": "_rank_score"}
+    wanted_m6_top20 = {"model": WATCHLIST_M6_TOP20, "score_col": "_top20_score"}
     base_cols = [
         "signal_date", "candidate_pool_version", "symbol",
         LABEL_COL, EXCESS_COL, INDUSTRY_EXCESS_COL, MARKET_COL,
@@ -616,12 +615,29 @@ def build_regime_policy_scores(scores: pd.DataFrame, states: pd.DataFrame) -> pd
         "risk_flags", "is_buyable_tplus1_open", "next_trade_date",
     ]
     frames: list[pd.DataFrame] = []
-    for model, score_col in wanted.items():
-        part = scores[scores["model"] == model].copy()
+
+    # M5 模型：按模式匹配（适用于任意因子族组合）
+    m5_models = scores[scores["model"].str.match(wanted_m5_elasticnet["pattern"])]
+    if not m5_models.empty:
+        part = m5_models.copy()
+        cols = [c for c in base_cols if c in part.columns]
+        part = part[cols + ["score"]].rename(columns={"score": wanted_m5_elasticnet["score_col"]})
+        frames.append(part)
+
+    m5_models = scores[scores["model"].str.match(wanted_m5_extratrees["pattern"])]
+    if not m5_models.empty:
+        part = m5_models.copy()
+        cols = [c for c in base_cols if c in part.columns]
+        part = part[cols + ["score"]].rename(columns={"score": wanted_m5_extratrees["score_col"]})
+        frames.append(part)
+
+    # M6 模型：固定名称
+    for m6_cfg in [wanted_m6_rank, wanted_m6_top20]:
+        part = scores[scores["model"] == m6_cfg["model"]].copy()
         if part.empty:
             continue
         cols = [c for c in base_cols if c in part.columns]
-        part = part[cols + ["score"]].rename(columns={"score": score_col})
+        part = part[cols + ["score"]].rename(columns={"score": m6_cfg["score_col"]})
         frames.append(part)
     if not frames:
         return pd.DataFrame()
@@ -633,11 +649,12 @@ def build_regime_policy_scores(scores: pd.DataFrame, states: pd.DataFrame) -> pd
     merged = merged.merge(states[["signal_date", "lagged_regime", "breadth_state"]], on="signal_date", how="left")
     merged["lagged_regime"] = merged["lagged_regime"].fillna("neutral")
     merged["breadth_state"] = merged["breadth_state"].fillna("normal")
-    for col in wanted.values():
+    policy_score_cols = ["_elasticnet_score", "_extratrees_score", "_rank_score", "_top20_score"]
+    for col in policy_score_cols:
         if col not in merged.columns:
             merged[col] = np.nan
     stable_mean = merged[["_elasticnet_score", "_extratrees_score"]].mean(axis=1)
-    for col in wanted.values():
+    for col in policy_score_cols:
         merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(stable_mean).fillna(0.5)
 
     score = pd.Series(0.5 * merged["_elasticnet_score"] + 0.5 * merged["_extratrees_score"], index=merged.index)

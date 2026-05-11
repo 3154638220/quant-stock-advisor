@@ -109,9 +109,9 @@ def _compute_guidance_features(
 
     direction_col = _pick_col(cols, ("guidance_direction", "direction", "forecast_direction"))
     magnitude_col = _pick_col(cols, ("guidance_change_ratio", "change_ratio", "guidance_ratio"))
-    np_min_col = _pick_col(cols, ("expected_net_profit_min", "net_profit_min", "forecast_profit_min"))
-    np_max_col = _pick_col(cols, ("expected_net_profit_max", "net_profit_max", "forecast_profit_max"))
-    prev_np_col = _pick_col(cols, ("prev_year_net_profit", "last_year_net_profit", "net_profit_prev_year"))
+    np_min_col = _pick_col(cols, ("forecast_value", "expected_net_profit_min", "net_profit_min", "forecast_profit_min"))
+    np_max_col = _pick_col(cols, ("forecast_value", "expected_net_profit_max", "net_profit_max", "forecast_profit_max"))
+    prev_np_col = _pick_col(cols, ("prev_year_value", "prev_year_net_profit", "last_year_net_profit", "net_profit_prev_year"))
 
     select_cols = ["symbol", "announce_date"]
     for col in [direction_col, magnitude_col, np_min_col, np_max_col, prev_np_col]:
@@ -124,6 +124,7 @@ def _compute_guidance_features(
         WHERE announce_date IS NOT NULL
           AND CAST(announce_date AS DATE) <= CAST(? AS DATE)
           AND CAST(announce_date AS DATE) >= CAST(? AS DATE)
+          AND (forecast_metric IS NULL OR forecast_metric = '' OR forecast_metric LIKE '%净利润%')
     """
     hist_start = sd - pd.Timedelta(days=730)
     df = con.execute(query, [sd.strftime("%Y-%m-%d"), hist_start.strftime("%Y-%m-%d")]).df()
@@ -302,18 +303,20 @@ def _compute_unlock_features(
     select_cols = ["symbol", "announce_date", unlock_date_col, unlock_col]
     if mcap_col:
         select_cols.append(mcap_col)
+    # announce_date is set to unlock_date in the source data (API lacks separate
+    # announcement field).  Unlock schedules are public information filed in
+    # advance, so we treat the unlock_date itself as known and use a simple
+    # future-30d window without requiring announce_date <= signal_date.
     query = f"""
         SELECT {", ".join(select_cols)}
         FROM {table}
-        WHERE announce_date IS NOT NULL
-          AND CAST(announce_date AS DATE) <= CAST(? AS DATE)
-          AND CAST({unlock_date_col} AS DATE) > CAST(? AS DATE)
+        WHERE CAST({unlock_date_col} AS DATE) > CAST(? AS DATE)
           AND CAST({unlock_date_col} AS DATE) <= CAST(? AS DATE)
     """
     win_end = sd + pd.Timedelta(days=30)
     df = con.execute(
         query,
-        [sd.strftime("%Y-%m-%d"), sd.strftime("%Y-%m-%d"), win_end.strftime("%Y-%m-%d")],
+        [sd.strftime("%Y-%m-%d"), win_end.strftime("%Y-%m-%d")],
     ).df()
     if df.empty:
         return pd.DataFrame(columns=["symbol", "feature_event_unlock_ratio_30d"])
@@ -324,7 +327,8 @@ def _compute_unlock_features(
         df[mcap_col] = pd.to_numeric(df[mcap_col], errors="coerce")
         df["_ratio"] = _safe_div(df[unlock_col], df[mcap_col])
     else:
-        df["_ratio"] = np.nan
+        # Fallback: absolute unlock market value (pipeline z-score will normalize)
+        df["_ratio"] = df[unlock_col]
 
     agg = df.groupby("symbol", as_index=False).agg(
         feature_event_unlock_ratio_30d=("_ratio", "sum")

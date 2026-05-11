@@ -42,11 +42,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-state-history-months", type=int, default=24)
     p.add_argument("--families", type=str, default="industry_breadth,fund_flow,fundamental")
     p.add_argument("--skip-m6", action="store_true")
+    p.add_argument("--exclude-missing-flags", action="store_true", default=True,
+                   help="从模型特征中排除 is_missing_* 二元标记列（默认启用）")
+    p.add_argument("--keep-missing-flags", action="store_true",
+                   help="保留 is_missing_* 列在特征集中（覆盖 --exclude-missing-flags）")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    exclude_missing = args.exclude_missing_flags and not args.keep_missing_flags
     return run_monthly_concentration_regime(
         config=args.config,
         dataset=args.dataset,
@@ -69,6 +74,7 @@ def main() -> int:
         min_state_history_months=args.min_state_history_months,
         families=args.families,
         skip_m6=args.skip_m6,
+        exclude_missing_flags=exclude_missing,
         root=ROOT,
     )
 

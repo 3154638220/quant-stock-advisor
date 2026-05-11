@@ -80,6 +80,10 @@ def parse_args() -> argparse.Namespace:
         else:
             p.add_argument(flag, type=str, default=default)
     p.add_argument("--skip-xgboost", action="store_true")
+    p.add_argument("--exclude-missing-flags", action="store_true", default=True,
+                   help="从模型特征中排除 is_missing_* 二元标记列（默认启用）")
+    p.add_argument("--keep-missing-flags", action="store_true",
+                   help="保留 is_missing_* 列在特征集中（覆盖 --exclude-missing-flags）")
     return p.parse_args()
 
 
@@ -201,6 +205,11 @@ def main() -> int:
 
     dataset = load_baseline_dataset(dataset_path, candidate_pools=pools)
     dataset = attach_enabled_families(dataset, db_path, cfg, enabled_families)
+    exclude_missing = args.exclude_missing_flags and not args.keep_missing_flags
+    if exclude_missing:
+        missing_cols = [c for c in dataset.columns if c.startswith("is_missing_")]
+        if missing_cols:
+            dataset = dataset.drop(columns=missing_cols)
     specs = build_feature_specs(enabled_families)
     feature_coverage = summarize_feature_coverage_by_spec(dataset, specs)
     scores, raw_importance = build_all_m5_scores(dataset, specs, cfg)

@@ -129,6 +129,7 @@ def run_monthly_concentration_regime(
     min_state_history_months: int,
     families: str,
     skip_m6: bool,
+    exclude_missing_flags: bool,
     root: Path,
 ) -> int:
     """M8: 月度选股行业集中度约束与 lagged-regime 复核。"""
@@ -182,6 +183,10 @@ def run_monthly_concentration_regime(
         ml_models=("elasticnet", "extratrees"), model_n_jobs=cfg.model_n_jobs,
     )
     data = attach_enabled_families(data, db_path, m5_cfg, enabled_families)
+    if exclude_missing_flags:
+        missing_cols = [c for c in data.columns if c.startswith("is_missing_")]
+        if missing_cols:
+            data = data.drop(columns=missing_cols)
     m5_specs = build_feature_specs(enabled_families)
     m5_spec = m5_specs[-1:]
     feature_coverage = summarize_feature_coverage_by_spec(data, m5_spec)

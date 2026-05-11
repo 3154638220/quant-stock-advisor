@@ -34,6 +34,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--output", default="data/results/oracle_gap_analysis.csv", help="输出 CSV 路径")
     p.add_argument("--min-samples", type=int, default=30, help="每个截面最低样本数")
     p.add_argument("--top-k", type=int, default=20, help="Oracle top-K 数量")
+    p.add_argument("--level2", action="store_true", help="执行 Level 2 oracle imitator 分析")
+    p.add_argument("--train-months", type=int, default=36, help="Level 2 训练窗口月数")
     return p.parse_args(argv)
 
 
@@ -264,21 +266,22 @@ def run_oracle_gap_analysis(
     output_path: str = "data/results/oracle_gap_analysis.csv",
     min_samples: int = 30,
     top_k: int = 20,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """执行完整的 Oracle Gap Level 1 分析。
+    level2: bool = False,
+    train_months: int = 36,
+) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """执行完整的 Oracle Gap 分析（Level 1 + 可选的 Level 2）。
 
     Returns
     -------
-    (single_factor_ic, oracle_predictors)
+    (single_factor_ic, oracle_predictors, level2_result)
     """
     _LOG.info("加载因子数据...")
     df = load_factor_data(db_path)
     if df.empty:
         _LOG.error("因子数据为空，无法执行分析")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), {}
 
     _LOG.info("计算 Oracle top-%d 标签...", top_k)
-    # Auto-detect forward return column: prepared_factors uses label_*, daily uses ret_20d
     if "label_forward_1m_o2o_return" in df.columns:
         forward_col = "label_forward_1m_o2o_return"
     elif "feature_ret_20d" in df.columns:
@@ -288,11 +291,10 @@ def run_oracle_gap_analysis(
     _LOG.info("Using forward column: %s", forward_col)
     df = compute_oracle_topk(df, top_k=top_k, forward_col=forward_col)
 
-    # 识别因子列（排除非因子列）
-    exclude_prefixes = ("symbol", "trade_date", "oracle_", "_", "close", "open",
+    exclude_prefixes = ("symbol", "trade_date", "oracle_", "label_", "_", "close", "open",
                         "high", "low", "volume", "amount", "pct_chg", "change",
                         "turnover", "amplitude", "report_period", "announcement",
-                        "source", "fetched_at")
+                        "signal_date", "source", "fetched_at")
     factor_cols = [
         c for c in df.columns
         if not any(c.startswith(p) for p in exclude_prefixes)
@@ -311,12 +313,11 @@ def run_oracle_gap_analysis(
         df, factor_cols, min_samples=min_samples
     )
 
-    # 输出
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     single_factor_ic.to_csv(output_path, index=False)
     _LOG.info("结果已写入 %s", output_path)
 
-    # 打印摘要
+    # Level 1 summary
     print("\n" + "=" * 70)
     print("Oracle Gap Level 1 — Top-10 Oracle Predictors")
     print("=" * 70)
@@ -330,7 +331,196 @@ def run_oracle_gap_analysis(
     ))
     print("=" * 70)
 
-    return single_factor_ic, oracle_predictors
+    # Level 2
+    level2_result = {}
+    if level2:
+        _LOG.info("Level 2: Oracle imitator walk-forward analysis...")
+        level2_result = run_oracle_imitator_level2(
+            df, factor_cols,
+            train_months=train_months,
+            min_samples=min_samples,
+            top_k=top_k,
+        )
+        if level2_result:
+            print("\n" + "=" * 70)
+            print("Oracle Gap Level 2 — Oracle Imitator vs Baseline")
+            print("=" * 70)
+            print(f"  Oracle imitator IC: {level2_result['oracle_imitator_ic_mean']:.4f} "
+                  f"(IR={level2_result['oracle_imitator_ic_ir']:.2f})")
+            print(f"  Baseline reg IC:    {level2_result['baseline_reg_ic_mean']:.4f} "
+                  f"(IR={level2_result['baseline_reg_ic_ir']:.2f})")
+            print(f"  IC delta:           {level2_result['ic_delta']:+.4f}")
+            print(f"  Test months:        {level2_result['n_test_months']}")
+            print(f"  Diagnosis:          {level2_result['diagnosis']}")
+            print("=" * 70)
+
+            # Write L2 results
+            l2_path = Path(output_path).with_suffix(".level2.csv")
+            pd.DataFrame([level2_result]).to_csv(l2_path, index=False)
+            _LOG.info("Level 2 结果已写入 %s", l2_path)
+
+    return single_factor_ic, oracle_predictors, level2_result
+
+
+def run_oracle_imitator_level2(
+    df: pd.DataFrame,
+    factor_cols: list[str],
+    *,
+    train_months: int = 36,
+    min_samples: int = 30,
+    top_k: int = 20,
+    n_estimators: int = 200,
+    random_state: int = 42,
+) -> dict:
+    """Level 2: Oracle imitator — walk-forward ExtraTrees classifier.
+
+    For each test month (starting after train_months), train an ExtraTrees
+    classifier to predict ``oracle_top`` using the preceding train_months
+    of data.  Then compute the Rank IC between the predicted probability
+    and the actual forward return on the test month.
+
+    Compares against a baseline ExtraTrees regressor trained on the
+    continuous forward return (same walk-forward scheme).
+
+    Returns a dict with summary metrics.
+    """
+    from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+
+    dates_sorted = sorted(df["trade_date"].dropna().unique())
+    if len(dates_sorted) <= train_months + 1:
+        _LOG.error("Not enough monthly cross-sections for walk-forward (need >%d, got %d)",
+                   train_months, len(dates_sorted))
+        return {}
+
+    # Ensure we have the forward return column for evaluation
+    forward_col = None
+    for cand in ("label_forward_1m_o2o_return", "feature_ret_20d", "ret_20d"):
+        if cand in df.columns:
+            forward_col = cand
+            break
+    if forward_col is None:
+        _LOG.error("No forward return column found for evaluation")
+        return {}
+
+    # Build trainable factor matrix: filter to columns with sufficient coverage
+    all_model_cols = [c for c in factor_cols if c in df.columns]
+    # Keep only columns with >= 60% non-NaN coverage in the overall dataset
+    model_cols = [
+        c for c in all_model_cols
+        if df[c].notna().mean() >= 0.6
+    ]
+    _LOG.info("Level 2: %d/%d factor columns (>=60%% coverage), %d train months window",
+              len(model_cols), len(all_model_cols), train_months)
+
+    if len(model_cols) < 5:
+        _LOG.error("Too few columns with sufficient coverage (%d)", len(model_cols))
+        return {}
+
+    clf_ic_vals: list[float] = []
+    reg_ic_vals: list[float] = []
+
+    for i in range(train_months, len(dates_sorted)):
+        test_date = dates_sorted[i]
+        train_dates = dates_sorted[i - train_months:i]
+
+        train_mask = df["trade_date"].isin(train_dates)
+        test_mask = df["trade_date"] == test_date
+
+        # Drop rows missing oracle_top or forward_col, but impute factor NaNs
+        train_df = df[train_mask].dropna(subset=["oracle_top"]).copy()
+        test_df = df[test_mask].dropna(subset=[forward_col]).copy()
+
+        if len(train_df) < min_samples or len(test_df) < min_samples:
+            continue
+
+        # Impute missing factor values with column median from training data
+        X_train = train_df[model_cols].values.astype(float)
+        X_test = test_df[model_cols].values.astype(float)
+        col_medians = np.nanmedian(X_train, axis=0)
+        # Fill NaN with column median; if entire column is NaN, fill with 0
+        col_medians = np.where(np.isnan(col_medians), 0.0, col_medians)
+        X_train = np.where(np.isnan(X_train), col_medians, X_train)
+        X_test = np.where(np.isnan(X_test), col_medians, X_test)
+
+        y_train_clf = train_df["oracle_top"].values
+        y_train_reg = train_df[forward_col].values
+
+        y_test_forward = test_df[forward_col].values
+
+        # Skip if not enough positive samples
+        if y_train_clf.sum() < 5:
+            continue
+
+        # --- Oracle imitator (classifier) ---
+        try:
+            clf = ExtraTreesClassifier(
+                n_estimators=n_estimators, max_depth=10, min_samples_leaf=50,
+                random_state=random_state, n_jobs=-1,
+            )
+            clf.fit(X_train, y_train_clf)
+            prob_test = clf.predict_proba(X_test)
+            if prob_test.shape[1] >= 2:
+                pred_clf = prob_test[:, 1]  # probability of being top-K
+            else:
+                pred_clf = prob_test[:, 0]
+        except Exception:
+            continue
+
+        # --- Baseline regressor ---
+        try:
+            reg = ExtraTreesRegressor(
+                n_estimators=n_estimators, max_depth=10, min_samples_leaf=50,
+                random_state=random_state, n_jobs=-1,
+            )
+            y_train_reg_finite = np.nan_to_num(y_train_reg, nan=0.0)
+            reg.fit(X_train, y_train_reg_finite)
+            pred_reg = reg.predict(X_test)
+        except Exception:
+            pred_reg = np.zeros_like(pred_clf)
+
+        # Compute Rank IC for both
+        if len(pred_clf) >= min_samples and len(y_test_forward) >= min_samples:
+            ic_clf = spearmanr(pred_clf, y_test_forward)[0]
+            if np.isfinite(ic_clf):
+                clf_ic_vals.append(float(ic_clf))
+
+        if len(pred_reg) >= min_samples:
+            ic_reg = spearmanr(pred_reg, y_test_forward)[0]
+            if np.isfinite(ic_reg):
+                reg_ic_vals.append(float(ic_reg))
+
+    if not clf_ic_vals:
+        _LOG.warning("Level 2: No valid test months, insufficient data")
+        return {}
+
+    clf_ic_mean = float(np.mean(clf_ic_vals))
+    clf_ic_std = float(np.std(clf_ic_vals, ddof=1))
+    clf_ic_ir = clf_ic_mean / clf_ic_std if clf_ic_std > 0 else 0.0
+    reg_ic_mean = float(np.mean(reg_ic_vals)) if reg_ic_vals else 0.0
+    reg_ic_std = float(np.std(reg_ic_vals, ddof=1)) if reg_ic_vals else 0.0
+    reg_ic_ir = reg_ic_mean / reg_ic_std if reg_ic_std > 0 else 0.0
+    ic_delta = clf_ic_mean - reg_ic_mean
+
+    # Diagnosis
+    if clf_ic_mean <= reg_ic_mean + 0.01:
+        diagnosis = "信息层瓶颈：特征集本身的信息上限 ≈ M5 ExtraTrees 水平。加更多特征也难以突破。"
+    elif clf_ic_mean >= reg_ic_mean + 0.04:
+        diagnosis = "模型层瓶颈：特征中有额外信息，但当前训练方法未能提取。可尝试非线性模型/不同目标函数。"
+    else:
+        diagnosis = "混合瓶颈：特征有部分额外信息，但提升空间有限。"
+
+    result = {
+        "oracle_imitator_ic_mean": clf_ic_mean,
+        "oracle_imitator_ic_std": clf_ic_std,
+        "oracle_imitator_ic_ir": clf_ic_ir,
+        "baseline_reg_ic_mean": reg_ic_mean,
+        "baseline_reg_ic_std": reg_ic_std,
+        "baseline_reg_ic_ir": reg_ic_ir,
+        "ic_delta": ic_delta,
+        "n_test_months": len(clf_ic_vals),
+        "diagnosis": diagnosis,
+    }
+    return result
 
 
 def main(argv: list[str]) -> int:
@@ -343,6 +533,8 @@ def main(argv: list[str]) -> int:
             output_path=args.output,
             min_samples=args.min_samples,
             top_k=args.top_k,
+            level2=args.level2,
+            train_months=args.train_months,
         )
     except Exception as e:
         _LOG.error("分析失败: %s", e)
