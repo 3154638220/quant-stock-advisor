@@ -39,6 +39,8 @@ from src.features.registry import (  # D1: 统一因子注册中心（单一权�
     REVERSAL_VOLUME_FEATURES_REGISTRY,
     SHAREHOLDER_FEATURES_REGISTRY,
     LIQUIDITY_POSITION_FEATURES_REGISTRY,
+    TREND_OVERHEAT_REVERSAL_FEATURES_REGISTRY,
+    TREND_PERSISTENCE_FEATURES_REGISTRY,
     apply_factor_governance_log,
     get_factor_cols,
 )
@@ -80,6 +82,8 @@ LHB_RAW_FEATURES: tuple[str, ...] = LHB_FEATURES_REGISTRY
 NORTHBOUND_REGIME_RAW_FEATURES: tuple[str, ...] = NORTHBOUND_REGIME_FEATURES_REGISTRY
 QUALITY_RAW_FEATURES: tuple[str, ...] = QUALITY_FEATURES_REGISTRY
 REVERSAL_VOLUME_RAW_FEATURES: tuple[str, ...] = REVERSAL_VOLUME_FEATURES_REGISTRY
+TREND_PERSISTENCE_RAW_FEATURES: tuple[str, ...] = TREND_PERSISTENCE_FEATURES_REGISTRY
+TREND_OVERHEAT_REVERSAL_RAW_FEATURES: tuple[str, ...] = TREND_OVERHEAT_REVERSAL_FEATURES_REGISTRY
 LIQUIDITY_POSITION_RAW_FEATURES: tuple[str, ...] = LIQUIDITY_POSITION_FEATURES_REGISTRY
 EVENT_RAW_FEATURES: tuple[str, ...] = EVENT_FEATURES_REGISTRY
 
@@ -99,6 +103,8 @@ FAMILY_DATA_START: dict[str, str] = {
     "lhb": "2021-01-01",
     "quality": "2018-01-01",
     "reversal_volume": "2018-01-01",
+    "trend_persistence": "2018-01-01",
+    "trend_overheat_reversal": "2018-01-01",
     "liquidity_position": "2018-01-01",
     "event": "2018-01-01",
 }
@@ -116,6 +122,8 @@ _FAMILY_FEATURE_PREFIX: dict[str, str] = {
     "lhb": "feature_lhb_",
     "quality": "feature_quality_",
     "reversal_volume": "feature_reversal_",
+    "trend_overheat_reversal": "feature_trend_overheat_",
+    "trend_persistence": "feature_trend_",
     "liquidity_position": "feature_liquidity_",
     "event": "feature_event_",
 }
@@ -509,7 +517,7 @@ def build_feature_specs(
     use_industry_neutral_zscore : bool
         P0-1: 若为 True，基本面因子使用 _ind_z（行业内 z-score）替代 _z（全截面 z-score）。
     """
-    enabled = [x for x in enabled_families if x and x != "price_volume_only"]
+    enabled = [x for x in enabled_families if x and x not in {"price_volume", "price_volume_only"}]
     price_volume_cols = tuple(get_factor_cols("price_volume", use_zscore=True, only_active=True))
     specs = [
         FeatureSpec(name="price_volume_only", families=("price_volume",), feature_cols=price_volume_cols)
@@ -534,6 +542,10 @@ def build_feature_specs(
         "lhb": tuple(get_factor_cols("lhb", use_zscore=True, only_active=True)),
         "quality": tuple(get_factor_cols("quality", use_zscore=True, only_active=True)),
         "reversal_volume": tuple(get_factor_cols("reversal_volume", use_zscore=True, only_active=True)),
+        "trend_overheat_reversal": tuple(
+            get_factor_cols("trend_overheat_reversal", use_zscore=True, only_active=True)
+        ),
+        "trend_persistence": tuple(get_factor_cols("trend_persistence", use_zscore=True, only_active=True)),
         "liquidity_position": tuple(get_factor_cols("liquidity_position", use_zscore=True, only_active=True)),
         "event": tuple(get_factor_cols("event", use_zscore=True, only_active=True)),
     }
@@ -549,6 +561,8 @@ def build_feature_specs(
         "lhb",
         "quality",
         "reversal_volume",
+        "trend_overheat_reversal",
+        "trend_persistence",
         "liquidity_position",
         "event",
     ]

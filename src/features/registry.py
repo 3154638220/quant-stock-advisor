@@ -669,6 +669,66 @@ for _spec in _REVERSAL_VOLUME_FACTORS:
 REVERSAL_VOLUME_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("reversal_volume")
 
 # ═══════════════════════════════════════════════════════════════════════════
+# W7: 多空趋势持续性因子
+# ═══════════════════════════════════════════════════════════════════════════
+
+_TREND_PERSISTENCE_FACTORS: list[dict] = [
+    {"name": "trend_bull_state", "feature_col": "feature_trend_bull_state",
+     "direction": 1, "description": "信号日 EMA12/EMA26 多头状态（1/0）"},
+    {"name": "trend_streak_days", "feature_col": "feature_trend_streak_days",
+     "direction": 1, "description": "当前多空状态连续天数（多头为正，空头为负）"},
+    {"name": "trend_bull_ratio_20d", "feature_col": "feature_trend_bull_ratio_20d",
+     "direction": 1, "description": "过去20个交易日多头天数占比"},
+    {"name": "trend_bull_ratio_60d", "feature_col": "feature_trend_bull_ratio_60d",
+     "direction": 1, "description": "过去60个交易日多头天数占比"},
+    {"name": "trend_flip_days_ago", "feature_col": "feature_trend_flip_days_ago",
+     "direction": 1, "description": "距上次多空状态翻转的交易日数"},
+    {"name": "trend_ema_spread", "feature_col": "feature_trend_ema_spread",
+     "direction": 1, "description": "EMA12-EMA26 相对收盘价价差"},
+]
+
+for _spec in _TREND_PERSISTENCE_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="trend_persistence",
+        feature_col=_spec["feature_col"],
+        requires_pit=False,
+        min_coverage=0.30,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+TREND_PERSISTENCE_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("trend_persistence")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W7 follow-up: 趋势过热反向因子
+# ═══════════════════════════════════════════════════════════════════════════
+
+_TREND_OVERHEAT_REVERSAL_FACTORS: list[dict] = [
+    {"name": "trend_overheat_bear_state", "feature_col": "feature_trend_overheat_bear_state",
+     "direction": 1, "description": "EMA12/EMA26 空头状态（原 bull_state 反向）"},
+    {"name": "trend_overheat_cooling_streak_days", "feature_col": "feature_trend_overheat_cooling_streak_days",
+     "direction": 1, "description": "当前趋势连续天数反向值（多头持续越久越负，空头持续越久越正）"},
+    {"name": "trend_overheat_ema_spread_reversal", "feature_col": "feature_trend_overheat_ema_spread_reversal",
+     "direction": 1, "description": "EMA12-EMA26 相对价差取反（趋势扩张越强越负）"},
+]
+
+for _spec in _TREND_OVERHEAT_REVERSAL_FACTORS:
+    register_factor(FactorSpec(
+        name=_spec["name"],
+        family="trend_overheat_reversal",
+        feature_col=_spec["feature_col"],
+        requires_pit=False,
+        min_coverage=0.30,
+        ic_decay_threshold=0.02,
+        direction=_spec["direction"],
+        description=_spec["description"],
+    ))
+
+TREND_OVERHEAT_REVERSAL_FEATURES_REGISTRY: tuple[str, ...] = _build_family_raw_tuple("trend_overheat_reversal")
+
+# ═══════════════════════════════════════════════════════════════════════════
 # W1 Phase 3: 流动性 & 价格位置扩展因子（Alpha158 对齐）
 # ═══════════════════════════════════════════════════════════════════════════
 

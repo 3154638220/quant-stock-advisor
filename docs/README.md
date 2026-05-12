@@ -13,7 +13,7 @@
 
 ## 归档
 
-- `archive/plans/` — 历史计划文档（plan-05-03 ~ plan-05-07）。
+- `archive/plans/` — 历史计划文档（plan-05-03 ~ plan-05-07）与已收口子计划（如 W7 `plan-05-12.md`）。
 - `reports/<YYYY-MM>/` — 月度研究报告、诊断报告、证据链。
 
 ## 规则

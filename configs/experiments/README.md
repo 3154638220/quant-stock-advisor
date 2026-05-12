@@ -48,7 +48,7 @@ python scripts/run_oracle_ic_gate.py \
 
 | 维度 | 说明 |
 |------|------|
-| **基准** | 当前 `promoted_registry.json` 中的生产 config（当前为 `M8_regime_aware_fixed_policy__indcap3`） |
+| **基准** | 当前 `promoted_registry.json` 中的 active promoted config（当前为 `monthly_selection_m8_indcap3_plus_quality`） |
 | **模型** | M8 regime-aware policy + indcap3 行业分散 |
 | **门槛** | after-cost 月超额 delta vs production baseline ≥ 0，NW-t ≥ 2.5，Bootstrap CI 下界 > 0 |
 | **通过后状态** | 「promotion 候选」— 可创建研究配置，等待 OOS 积累后正式 promote |
@@ -104,6 +104,29 @@ python scripts/run_monthly_selection_concentration_regime.py \
 - **排除的因子族**:
   - `reversal_volume`: 毒性, 在 quality 基础上 −0.81%/月
   - `liquidity_position`: 中性偏负, 部分修复 rv 损害但仍低于 baseline
+
+---
+
+## 已停止研究分支
+
+### W7: trend_persistence / trend_overheat_reversal
+
+- **状态**: ❌ Stage A 未通过，不是 production candidate，不进入 M8 Baseline Gate。
+- **停止日期**: 2026-05-12
+- **涉及 family**:
+  - `trend_persistence`: EMA12/EMA26 多空趋势持续性原方向
+  - `trend_overheat_reversal`: 原方向失败后的独立反向过热方案
+- **停止原因**:
+  - `trend_persistence` 方向类因子多数为负 IC；唯一弱正项 `feature_trend_flip_days_ago` 的 IC IR 未达 0.3。
+  - 候选池 `bull_state` 过滤在 U1/U2 均为负向；稳定性过滤仅弱正且统计强度不足。
+  - `trend_overheat_reversal` 覆盖率充足，但相对 `price_volume_only` 的 Rank IC delta 在 U1/U2、ElasticNet/ExtraTrees 组合中均为负。
+- **证据文件**:
+  - 子计划: `docs/archive/plans/plan-05-12.md`
+  - 原方向 Stage A: `docs/reports/2026-05/w7_trend_stage_a_2026-05-12.md`
+  - 候选池过滤复查: `docs/reports/2026-05/w7_trend_filter_audit_2026_05_12_2026-05-12.md`
+  - 反向离线审计: `docs/reports/2026-05/w7_trend_reverse_ic_audit_2026_05_12_2026-05-12.md`
+  - 独立反向 Stage A: `docs/reports/2026-05/w7_trend_overheat_stage_a_2026_05_12_2026-05-12.md`
+- **治理口径**: 代码、测试和报告保留用于复现失败分支；不得把上述 family 写入 promoted 配置或 `config.yaml.example` 默认主线。
 
 ---
 

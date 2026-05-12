@@ -35,6 +35,8 @@ from src.features.registry import (
     QUALITY_FEATURES_REGISTRY,
     REVERSAL_VOLUME_FEATURES_REGISTRY,
     SHAREHOLDER_FEATURES_REGISTRY,
+    TREND_OVERHEAT_REVERSAL_FEATURES_REGISTRY,
+    TREND_PERSISTENCE_FEATURES_REGISTRY,
 )
 from src.features.standardize import winsor_zscore
 
@@ -52,6 +54,8 @@ LHB_RAW_FEATURES: tuple[str, ...] = LHB_FEATURES_REGISTRY
 EVENT_RAW_FEATURES: tuple[str, ...] = EVENT_FEATURES_REGISTRY
 QUALITY_RAW_FEATURES: tuple[str, ...] = QUALITY_FEATURES_REGISTRY
 REVERSAL_VOLUME_RAW_FEATURES: tuple[str, ...] = REVERSAL_VOLUME_FEATURES_REGISTRY
+TREND_PERSISTENCE_RAW_FEATURES: tuple[str, ...] = TREND_PERSISTENCE_FEATURES_REGISTRY
+TREND_OVERHEAT_REVERSAL_RAW_FEATURES: tuple[str, ...] = TREND_OVERHEAT_REVERSAL_FEATURES_REGISTRY
 LIQUIDITY_POSITION_RAW_FEATURES: tuple[str, ...] = LIQUIDITY_POSITION_FEATURES_REGISTRY
 
 CANONICAL_FAMILY_ORDER: tuple[str, ...] = (
@@ -67,6 +71,8 @@ CANONICAL_FAMILY_ORDER: tuple[str, ...] = (
     "event",
     "quality",
     "reversal_volume",
+    "trend_persistence",
+    "trend_overheat_reversal",
     "liquidity_position",
 )
 
@@ -83,6 +89,8 @@ FAMILY_RAW_FEATURES: dict[str, tuple[str, ...]] = {
     "event": EVENT_RAW_FEATURES,
     "quality": QUALITY_RAW_FEATURES,
     "reversal_volume": REVERSAL_VOLUME_RAW_FEATURES,
+    "trend_persistence": TREND_PERSISTENCE_RAW_FEATURES,
+    "trend_overheat_reversal": TREND_OVERHEAT_REVERSAL_RAW_FEATURES,
     "liquidity_position": LIQUIDITY_POSITION_RAW_FEATURES,
 }
 
@@ -117,7 +125,11 @@ class DataLoader:
             self.registry.update(dict(registry))
 
     def attach(self, dataset: pd.DataFrame, families: Sequence[str]) -> pd.DataFrame:
-        requested = {family for family in families if family and family != "price_volume_only"}
+        requested = {
+            family
+            for family in families
+            if family and family not in {"price_volume", "price_volume_only"}
+        }
         unknown = requested.difference(self.registry)
         if unknown and self.config.strict_unknown_families:
             raise ValueError(f"Unknown feature families: {sorted(unknown)}")
@@ -148,6 +160,8 @@ class DataLoader:
             "event": self.attach_event,
             "quality": self.attach_quality,
             "reversal_volume": self.attach_reversal_volume,
+            "trend_persistence": self.attach_trend_persistence,
+            "trend_overheat_reversal": self.attach_trend_overheat_reversal,
             "liquidity_position": self.attach_liquidity_position,
         }
 
@@ -205,6 +219,12 @@ class DataLoader:
 
     def attach_reversal_volume(self, dataset: pd.DataFrame) -> pd.DataFrame:
         return attach_reversal_volume_features(dataset, str(self.db_path))
+
+    def attach_trend_persistence(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return attach_trend_persistence_features(dataset, str(self.db_path))
+
+    def attach_trend_overheat_reversal(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return attach_trend_overheat_reversal_features(dataset, str(self.db_path))
 
     def attach_liquidity_position(self, dataset: pd.DataFrame) -> pd.DataFrame:
         return attach_liquidity_position_features(dataset, str(self.db_path))
@@ -592,6 +612,30 @@ def attach_reversal_volume_features(
     out = dataset.copy()
     out = attach_reversal_volume_factors(out, str(db_path))
     return add_zscore_and_missing_flags(out, REVERSAL_VOLUME_RAW_FEATURES)
+
+
+def attach_trend_persistence_features(
+    dataset: pd.DataFrame,
+    db_path: str | Path,
+) -> pd.DataFrame:
+    """Attach W7 trend persistence factors."""
+    from src.features.trend_persistence_factors import attach_trend_persistence_factors
+
+    out = dataset.copy()
+    out = attach_trend_persistence_factors(out, str(db_path))
+    return add_zscore_and_missing_flags(out, TREND_PERSISTENCE_RAW_FEATURES)
+
+
+def attach_trend_overheat_reversal_features(
+    dataset: pd.DataFrame,
+    db_path: str | Path,
+) -> pd.DataFrame:
+    """Attach W7 trend-overheat reversal factors."""
+    from src.features.trend_overheat_reversal_factors import attach_trend_overheat_reversal_factors
+
+    out = dataset.copy()
+    out = attach_trend_overheat_reversal_factors(out, str(db_path))
+    return add_zscore_and_missing_flags(out, TREND_OVERHEAT_REVERSAL_RAW_FEATURES)
 
 
 def attach_liquidity_position_features(

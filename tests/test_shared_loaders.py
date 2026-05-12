@@ -72,6 +72,14 @@ def test_data_loader_can_ignore_unknown_family_when_configured(tmp_path: Path):
     pd.testing.assert_frame_equal(out.reset_index(drop=True), _dataset().reset_index(drop=True))
 
 
+def test_data_loader_treats_price_volume_as_builtin_family(tmp_path: Path):
+    loader = DataLoader(tmp_path / "empty.duckdb", registry={})
+
+    out = loader.attach(_dataset(), ["price_volume"])
+
+    pd.testing.assert_frame_equal(out.reset_index(drop=True), _dataset().reset_index(drop=True))
+
+
 def test_attach_feature_families_uses_shared_industry_loader(tmp_path: Path):
     out = attach_feature_families(_dataset(), tmp_path / "empty.duckdb", ["industry_breadth"])
 

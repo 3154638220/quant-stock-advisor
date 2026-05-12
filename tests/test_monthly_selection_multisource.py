@@ -102,6 +102,20 @@ def test_feature_specs_are_cumulative_in_m5_order():
     assert set(specs[1].feature_cols).issubset(set(specs[2].feature_cols))
 
 
+def test_feature_specs_treat_price_volume_as_builtin_alias():
+    specs = build_feature_specs(["price_volume", "trend_persistence"])
+
+    assert [s.name for s in specs] == ["price_volume_only", "plus_trend_persistence"]
+    assert "feature_trend_bull_state_z" in specs[-1].feature_cols
+
+
+def test_feature_specs_support_trend_overheat_reversal_family():
+    specs = build_feature_specs(["price_volume", "trend_overheat_reversal"])
+
+    assert [s.name for s in specs] == ["price_volume_only", "plus_trend_overheat_reversal"]
+    assert "feature_trend_overheat_ema_spread_reversal_z" in specs[-1].feature_cols
+
+
 def test_feature_specs_exclude_inactive_registry_factors():
     reset_all_active()
     try:
