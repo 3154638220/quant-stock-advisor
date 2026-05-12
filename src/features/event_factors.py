@@ -9,6 +9,7 @@
 PIT 规则:
     - 信号日 t 仅使用 announce_date <= t 的公告
     - 解禁因子只看 future 30 天窗口（unlock_date in (t, t+30]）
+    - v2 稀疏事件特征增加 180d 回看 / 90d 前瞻窗口，用于提升月频覆盖率
 """
 
 from __future__ import annotations
@@ -23,8 +24,13 @@ EVENT_FACTOR_COLS: tuple[str, ...] = (
     "feature_event_earnings_surprise_ttm",
     "feature_event_buyback_amount_ratio",
     "feature_event_buyback_recent_30d",
+    "feature_event_buyback_amount_ratio_180d",
+    "feature_event_buyback_recent_180d",
     "feature_event_reduction_plan_flag",
+    "feature_event_reduction_plan_flag_180d",
+    "feature_event_reduction_ratio_180d",
     "feature_event_unlock_ratio_30d",
+    "feature_event_unlock_ratio_90d",
 )
 
 EVENT_FACTOR_DIRECTION: dict[str, int] = {
@@ -33,8 +39,13 @@ EVENT_FACTOR_DIRECTION: dict[str, int] = {
     "feature_event_earnings_surprise_ttm": 1,
     "feature_event_buyback_amount_ratio": 1,
     "feature_event_buyback_recent_30d": 1,
+    "feature_event_buyback_amount_ratio_180d": 1,
+    "feature_event_buyback_recent_180d": 1,
     "feature_event_reduction_plan_flag": -1,
+    "feature_event_reduction_plan_flag_180d": -1,
+    "feature_event_reduction_ratio_180d": -1,
     "feature_event_unlock_ratio_30d": -1,
+    "feature_event_unlock_ratio_90d": -1,
 }
 
 
@@ -118,13 +129,17 @@ def _compute_guidance_features(
         if col and col not in select_cols:
             select_cols.append(col)
 
+    metric_filter = ""
+    if "forecast_metric" in cols:
+        metric_filter = "AND (forecast_metric IS NULL OR forecast_metric = '' OR forecast_metric LIKE '%净利润%')"
+
     query = f"""
         SELECT {", ".join(select_cols)}
         FROM {table}
         WHERE announce_date IS NOT NULL
           AND CAST(announce_date AS DATE) <= CAST(? AS DATE)
           AND CAST(announce_date AS DATE) >= CAST(? AS DATE)
-          AND (forecast_metric IS NULL OR forecast_metric = '' OR forecast_metric LIKE '%净利润%')
+          {metric_filter}
     """
     hist_start = sd - pd.Timedelta(days=730)
     df = con.execute(query, [sd.strftime("%Y-%m-%d"), hist_start.strftime("%Y-%m-%d")]).df()
@@ -212,6 +227,8 @@ def _compute_buyback_features(
             "symbol",
             "feature_event_buyback_amount_ratio",
             "feature_event_buyback_recent_30d",
+            "feature_event_buyback_amount_ratio_180d",
+            "feature_event_buyback_recent_180d",
         ])
 
     amount_col = _pick_col(cols, ("buyback_amount", "planned_amount", "amount"))
@@ -221,6 +238,8 @@ def _compute_buyback_features(
             "symbol",
             "feature_event_buyback_amount_ratio",
             "feature_event_buyback_recent_30d",
+            "feature_event_buyback_amount_ratio_180d",
+            "feature_event_buyback_recent_180d",
         ])
 
     select_cols = ["symbol", "announce_date", amount_col]
@@ -233,29 +252,49 @@ def _compute_buyback_features(
           AND CAST(announce_date AS DATE) <= CAST(? AS DATE)
           AND CAST(announce_date AS DATE) > CAST(? AS DATE)
     """
-    win_start = sd - pd.Timedelta(days=30)
+    win_start = sd - pd.Timedelta(days=180)
     df = con.execute(query, [sd.strftime("%Y-%m-%d"), win_start.strftime("%Y-%m-%d")]).df()
     if df.empty:
         return pd.DataFrame(columns=[
             "symbol",
             "feature_event_buyback_amount_ratio",
             "feature_event_buyback_recent_30d",
+            "feature_event_buyback_amount_ratio_180d",
+            "feature_event_buyback_recent_180d",
         ])
 
     df["symbol"] = _norm_symbol(df["symbol"])
+    df["announce_date"] = pd.to_datetime(df["announce_date"], errors="coerce").dt.normalize()
     df[amount_col] = pd.to_numeric(df[amount_col], errors="coerce")
     if mcap_col:
         df[mcap_col] = pd.to_numeric(df[mcap_col], errors="coerce")
         df["_ratio"] = _safe_div(df[amount_col], df[mcap_col])
     else:
         df["_ratio"] = np.nan
+    df["_in_30d"] = df["announce_date"] > (sd - pd.Timedelta(days=30))
 
     agg = df.groupby("symbol", as_index=False).agg(
-        feature_event_buyback_amount_ratio=("_ratio", "sum"),
-        _cnt=(amount_col, "count"),
+        feature_event_buyback_amount_ratio_180d=("_ratio", "sum"),
+        _cnt_180d=(amount_col, "count"),
     )
-    agg["feature_event_buyback_recent_30d"] = (agg["_cnt"] > 0).astype(float)
-    return agg[["symbol", "feature_event_buyback_amount_ratio", "feature_event_buyback_recent_30d"]]
+    recent = (
+        df[df["_in_30d"]]
+        .groupby("symbol", as_index=False)
+        .agg(
+            feature_event_buyback_amount_ratio=("_ratio", "sum"),
+            _cnt_30d=(amount_col, "count"),
+        )
+    )
+    agg = agg.merge(recent, on="symbol", how="left")
+    agg["feature_event_buyback_recent_30d"] = (agg["_cnt_30d"].fillna(0) > 0).astype(float)
+    agg["feature_event_buyback_recent_180d"] = (agg["_cnt_180d"] > 0).astype(float)
+    return agg[[
+        "symbol",
+        "feature_event_buyback_amount_ratio",
+        "feature_event_buyback_recent_30d",
+        "feature_event_buyback_amount_ratio_180d",
+        "feature_event_buyback_recent_180d",
+    ]]
 
 
 def _compute_reduction_features(
@@ -265,24 +304,56 @@ def _compute_reduction_features(
     table = "a_share_event_reduction"
     cols = _available_columns(con, table)
     if not cols:
-        return pd.DataFrame(columns=["symbol", "feature_event_reduction_plan_flag"])
+        return pd.DataFrame(columns=[
+            "symbol",
+            "feature_event_reduction_plan_flag",
+            "feature_event_reduction_plan_flag_180d",
+            "feature_event_reduction_ratio_180d",
+        ])
 
+    ratio_col = _pick_col(cols, ("reduction_ratio", "plan_ratio", "reduce_ratio"))
+    select_cols = ["symbol", "announce_date"]
+    if ratio_col:
+        select_cols.append(ratio_col)
     query = f"""
-        SELECT symbol, announce_date
+        SELECT {", ".join(select_cols)}
         FROM {table}
         WHERE announce_date IS NOT NULL
           AND CAST(announce_date AS DATE) <= CAST(? AS DATE)
           AND CAST(announce_date AS DATE) > CAST(? AS DATE)
     """
-    win_start = sd - pd.Timedelta(days=30)
+    win_start = sd - pd.Timedelta(days=180)
     df = con.execute(query, [sd.strftime("%Y-%m-%d"), win_start.strftime("%Y-%m-%d")]).df()
     if df.empty:
-        return pd.DataFrame(columns=["symbol", "feature_event_reduction_plan_flag"])
+        return pd.DataFrame(columns=[
+            "symbol",
+            "feature_event_reduction_plan_flag",
+            "feature_event_reduction_plan_flag_180d",
+            "feature_event_reduction_ratio_180d",
+        ])
 
     df["symbol"] = _norm_symbol(df["symbol"])
-    agg = df.groupby("symbol", as_index=False).size().rename(columns={"size": "_cnt"})
-    agg["feature_event_reduction_plan_flag"] = (agg["_cnt"] > 0).astype(float)
-    return agg[["symbol", "feature_event_reduction_plan_flag"]]
+    df["announce_date"] = pd.to_datetime(df["announce_date"], errors="coerce").dt.normalize()
+    df["_in_30d"] = df["announce_date"] > (sd - pd.Timedelta(days=30))
+    if ratio_col:
+        df[ratio_col] = pd.to_numeric(df[ratio_col], errors="coerce")
+    else:
+        df["_ratio_missing"] = np.nan
+        ratio_col = "_ratio_missing"
+    agg = df.groupby("symbol", as_index=False).agg(
+        _cnt_180d=("announce_date", "count"),
+        feature_event_reduction_ratio_180d=(ratio_col, "sum"),
+    )
+    recent = df[df["_in_30d"]].groupby("symbol", as_index=False).size().rename(columns={"size": "_cnt_30d"})
+    agg = agg.merge(recent, on="symbol", how="left")
+    agg["feature_event_reduction_plan_flag"] = (agg["_cnt_30d"].fillna(0) > 0).astype(float)
+    agg["feature_event_reduction_plan_flag_180d"] = (agg["_cnt_180d"] > 0).astype(float)
+    return agg[[
+        "symbol",
+        "feature_event_reduction_plan_flag",
+        "feature_event_reduction_plan_flag_180d",
+        "feature_event_reduction_ratio_180d",
+    ]]
 
 
 def _compute_unlock_features(
@@ -292,36 +363,49 @@ def _compute_unlock_features(
     table = "a_share_event_unlock"
     cols = _available_columns(con, table)
     if not cols:
-        return pd.DataFrame(columns=["symbol", "feature_event_unlock_ratio_30d"])
+        return pd.DataFrame(columns=[
+            "symbol",
+            "feature_event_unlock_ratio_30d",
+            "feature_event_unlock_ratio_90d",
+        ])
 
     unlock_col = _pick_col(cols, ("unlock_market_value", "unlock_amount", "unlock_value"))
     unlock_date_col = _pick_col(cols, ("unlock_date", "listing_date", "effective_date"))
     mcap_col = _pick_col(cols, ("market_cap", "announce_market_cap", "total_market_cap"))
     if unlock_col is None or unlock_date_col is None:
-        return pd.DataFrame(columns=["symbol", "feature_event_unlock_ratio_30d"])
+        return pd.DataFrame(columns=[
+            "symbol",
+            "feature_event_unlock_ratio_30d",
+            "feature_event_unlock_ratio_90d",
+        ])
 
     select_cols = ["symbol", "announce_date", unlock_date_col, unlock_col]
     if mcap_col:
         select_cols.append(mcap_col)
     # announce_date is set to unlock_date in the source data (API lacks separate
     # announcement field).  Unlock schedules are public information filed in
-    # advance, so we treat the unlock_date itself as known and use a simple
-    # future-30d window without requiring announce_date <= signal_date.
+    # advance, so we treat the unlock_date itself as known and use simple
+    # future windows without requiring announce_date <= signal_date.
     query = f"""
         SELECT {", ".join(select_cols)}
         FROM {table}
         WHERE CAST({unlock_date_col} AS DATE) > CAST(? AS DATE)
           AND CAST({unlock_date_col} AS DATE) <= CAST(? AS DATE)
     """
-    win_end = sd + pd.Timedelta(days=30)
+    win_end = sd + pd.Timedelta(days=90)
     df = con.execute(
         query,
         [sd.strftime("%Y-%m-%d"), win_end.strftime("%Y-%m-%d")],
     ).df()
     if df.empty:
-        return pd.DataFrame(columns=["symbol", "feature_event_unlock_ratio_30d"])
+        return pd.DataFrame(columns=[
+            "symbol",
+            "feature_event_unlock_ratio_30d",
+            "feature_event_unlock_ratio_90d",
+        ])
 
     df["symbol"] = _norm_symbol(df["symbol"])
+    df[unlock_date_col] = pd.to_datetime(df[unlock_date_col], errors="coerce").dt.normalize()
     df[unlock_col] = pd.to_numeric(df[unlock_col], errors="coerce")
     if mcap_col:
         df[mcap_col] = pd.to_numeric(df[mcap_col], errors="coerce")
@@ -330,8 +414,10 @@ def _compute_unlock_features(
         # Fallback: absolute unlock market value (pipeline z-score will normalize)
         df["_ratio"] = df[unlock_col]
 
+    df["_ratio_30d"] = df["_ratio"].where(df[unlock_date_col] <= sd + pd.Timedelta(days=30), np.nan)
     agg = df.groupby("symbol", as_index=False).agg(
-        feature_event_unlock_ratio_30d=("_ratio", "sum")
+        feature_event_unlock_ratio_30d=("_ratio_30d", "sum"),
+        feature_event_unlock_ratio_90d=("_ratio", "sum"),
     )
     return agg
 
@@ -368,8 +454,12 @@ def compute_event_factors(
     # 有事件但比率不可计算时，至少保留事件 flag
     if "feature_event_buyback_recent_30d" not in result.columns:
         result["feature_event_buyback_recent_30d"] = 0.0
+    if "feature_event_buyback_recent_180d" not in result.columns:
+        result["feature_event_buyback_recent_180d"] = 0.0
     if "feature_event_reduction_plan_flag" not in result.columns:
         result["feature_event_reduction_plan_flag"] = 0.0
+    if "feature_event_reduction_plan_flag_180d" not in result.columns:
+        result["feature_event_reduction_plan_flag_180d"] = 0.0
 
     result["trade_date"] = sd
 

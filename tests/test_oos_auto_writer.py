@@ -114,6 +114,69 @@ class TestRecordOOSFromM7Report:
         # Backfill may or may not succeed depending on data availability
         # (it tries to compute realized from holdings but there are none)
 
+    def test_backfill_records_excess_net_of_market_benchmark(self, temp_db):
+        conn = duckdb.connect(str(temp_db))
+        conn.execute(
+            """
+            CREATE TABLE a_share_daily (
+                symbol VARCHAR,
+                trade_date DATE,
+                open DOUBLE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO a_share_daily VALUES
+            ('000001', DATE '2026-02-02', 100), ('000001', DATE '2026-03-02', 110),
+            ('000002', DATE '2026-02-02', 200), ('000002', DATE '2026-03-02', 220),
+            ('000003', DATE '2026-02-02', 100), ('000003', DATE '2026-03-02', 110),
+            ('000004', DATE '2026-02-02', 100), ('000004', DATE '2026-03-02', 100),
+            ('000005', DATE '2026-02-02', 100), ('000005', DATE '2026-03-02', 100)
+            """
+        )
+        conn.execute(
+            "INSERT INTO oos_tracking VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, NULL, ?, NULL, NULL, 0, NULL, NULL, NULL, NULL)",
+            [
+                "test_config_excess",
+                "2026-01-31",
+                20,
+                "U1",
+                30.0,
+                0.004,
+                json.dumps(["000001", "000002", "000003"]),
+            ],
+        )
+        conn.close()
+
+        result = record_oos_from_m7_report(
+            db_path=temp_db,
+            config_id="test_config_excess",
+            signal_date="2026-02-27",
+            predicted_excess_monthly=0.006,
+            candidate_pool="U1",
+            top_k=20,
+            cost_bps=30.0,
+        )
+
+        assert result.predicted_written is True
+        assert result.realized_backfilled is True
+        assert result.backfilled_realized_excess == pytest.approx(0.04)
+        assert result.backfilled_portfolio_return == pytest.approx(0.10)
+        assert result.backfilled_benchmark_return == pytest.approx(0.06)
+        conn = duckdb.connect(str(temp_db))
+        realized, benchmark = conn.execute(
+            """
+            SELECT realized_excess_monthly, benchmark_return
+            FROM oos_tracking
+            WHERE config_id = 'test_config_excess'
+              AND signal_date = DATE '2026-01-31'
+            """
+        ).fetchone()
+        conn.close()
+        assert realized == pytest.approx(0.04)
+        assert benchmark == pytest.approx(0.06)
+
     def test_multiple_writes_same_key_updates(self, temp_db):
         """相同 (config_id, signal_date, ...) 应做 upsert。"""
         record_oos_from_m7_report(
@@ -208,6 +271,36 @@ class TestComputeRealizedExcess:
         holdings_json = json.dumps({"000001": 0.05, "000002": 0.05})
         result = _compute_realized_excess_from_holdings(tracker, "2026-01-01", holdings_json)
         assert result is None  # No daily_features table
+        conn.close()
+
+    def test_computes_excess_against_market_equal_weight(self):
+        conn = duckdb.connect(":memory:")
+        conn.execute("CREATE TABLE oos_tracking (x INT)")
+        conn.execute(
+            """
+            CREATE TABLE a_share_daily (
+                symbol VARCHAR,
+                trade_date DATE,
+                open DOUBLE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO a_share_daily VALUES
+            ('000001', DATE '2026-02-02', 100), ('000001', DATE '2026-03-02', 110),
+            ('000002', DATE '2026-02-02', 100), ('000002', DATE '2026-03-02', 110),
+            ('000003', DATE '2026-02-02', 100), ('000003', DATE '2026-03-02', 110),
+            ('000004', DATE '2026-02-02', 100), ('000004', DATE '2026-03-02', 100),
+            ('000005', DATE '2026-02-02', 100), ('000005', DATE '2026-03-02', 100)
+            """
+        )
+        tracker = type("Mock", (), {"_conn": conn, "_table": "oos_tracking"})()
+        holdings_json = json.dumps(["000001", "000002", "000003"])
+
+        result = _compute_realized_excess_from_holdings(tracker, "2026-01-31", holdings_json)
+
+        assert result == pytest.approx(0.04)
         conn.close()
 
 

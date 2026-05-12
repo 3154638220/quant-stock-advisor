@@ -712,10 +712,20 @@ _EVENT_FACTORS: list[dict] = [
      "direction": 1, "description": "回购金额/市值"},
     {"name": "buyback_recent_30d", "feature_col": "feature_event_buyback_recent_30d",
      "direction": 1, "description": "近30日是否存在回购公告"},
+    {"name": "buyback_amount_ratio_180d", "feature_col": "feature_event_buyback_amount_ratio_180d",
+     "direction": 1, "description": "近180日回购金额/市值"},
+    {"name": "buyback_recent_180d", "feature_col": "feature_event_buyback_recent_180d",
+     "direction": 1, "description": "近180日是否存在回购公告"},
     {"name": "reduction_plan_flag", "feature_col": "feature_event_reduction_plan_flag",
      "direction": -1, "description": "近30日是否存在减持计划"},
+    {"name": "reduction_plan_flag_180d", "feature_col": "feature_event_reduction_plan_flag_180d",
+     "direction": -1, "description": "近180日是否存在减持计划"},
+    {"name": "reduction_ratio_180d", "feature_col": "feature_event_reduction_ratio_180d",
+     "direction": -1, "description": "近180日减持比例合计"},
     {"name": "unlock_ratio_30d", "feature_col": "feature_event_unlock_ratio_30d",
      "direction": -1, "description": "未来30日解禁市值/市值"},
+    {"name": "unlock_ratio_90d", "feature_col": "feature_event_unlock_ratio_90d",
+     "direction": -1, "description": "未来90日解禁市值/市值"},
 ]
 
 for _spec in _EVENT_FACTORS:

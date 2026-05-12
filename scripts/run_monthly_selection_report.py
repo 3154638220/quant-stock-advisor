@@ -385,7 +385,8 @@ def main() -> int:
                       f"date={report_signal_date.date()} pred={predicted_excess:.4%}")
             if oos_result.realized_backfilled:
                 print(f"[monthly-m7] OOS backfill: date={oos_result.backfilled_date} "
-                      f"realized={oos_result.previous_prediction}")
+                      f"realized_excess={oos_result.backfilled_realized_excess:.4%} "
+                      f"benchmark={oos_result.backfilled_benchmark_return:.4%}")
     except Exception as oos_err:
         print(f"[monthly-m7] OOS record skipped (non-fatal): {oos_err}")
 

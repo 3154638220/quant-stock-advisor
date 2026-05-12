@@ -40,7 +40,8 @@ def _seed_event_tables(db_path: Path) -> None:
             VALUES
             ('000001', DATE '2026-04-10', 10, 1000, 'plan', 'unit'),
             ('000001', DATE '2026-04-28', 5, 1000, 'done', 'unit'),
-            ('000001', DATE '2026-03-20', 9, 1000, 'plan', 'unit')
+            ('000001', DATE '2026-03-20', 9, 1000, 'plan', 'unit'),
+            ('000002', DATE '2026-01-15', 12, 1000, 'plan', 'unit')
             """
         )
         con.execute(
@@ -48,7 +49,8 @@ def _seed_event_tables(db_path: Path) -> None:
             INSERT INTO a_share_event_reduction
             (symbol, announce_date, reduction_ratio, reduction_amount, holder_name, source)
             VALUES
-            ('000001', DATE '2026-04-25', 0.01, 8, 'holderA', 'unit')
+            ('000001', DATE '2026-04-25', 0.01, 8, 'holderA', 'unit'),
+            ('000002', DATE '2026-01-20', 0.03, 20, 'holderB', 'unit')
             """
         )
         con.execute(
@@ -57,7 +59,8 @@ def _seed_event_tables(db_path: Path) -> None:
             (symbol, announce_date, unlock_date, unlock_market_value, market_cap, source)
             VALUES
             ('000001', DATE '2026-04-01', DATE '2026-05-20', 30, 1000, 'unit'),
-            ('000001', DATE '2026-04-01', DATE '2026-06-30', 20, 1000, 'unit')
+            ('000001', DATE '2026-04-01', DATE '2026-06-30', 20, 1000, 'unit'),
+            ('000002', DATE '2026-04-01', DATE '2026-07-10', 40, 1000, 'unit')
             """
         )
     finally:
@@ -75,6 +78,13 @@ def test_compute_event_factors_is_pit_safe_and_windowed(tmp_path: Path):
     assert e001["feature_event_earnings_guidance_direction"] > 0
     # buyback 30 日窗口：03-20 计入，04-10 不计入
     assert e001["feature_event_buyback_recent_30d"] == 1
+    e002 = early.loc[early["symbol"] == "000002"].iloc[0]
+    assert e002["feature_event_buyback_recent_30d"] == 0
+    assert e002["feature_event_buyback_recent_180d"] == 1
+    assert abs(float(e002["feature_event_buyback_amount_ratio_180d"]) - 0.012) < 1e-9
+    assert e002["feature_event_reduction_plan_flag"] == 0
+    assert e002["feature_event_reduction_plan_flag_180d"] == 1
+    assert abs(float(e002["feature_event_reduction_ratio_180d"]) - 0.03) < 1e-9
 
     late = compute_event_factors(str(db_path), "2026-04-30")
     l001 = late.loc[late["symbol"] == "000001"].iloc[0]
@@ -83,6 +93,7 @@ def test_compute_event_factors_is_pit_safe_and_windowed(tmp_path: Path):
     assert l001["feature_event_reduction_plan_flag"] == 1
     # 仅统计 future 30 天解禁：2026-05-20 计入，2026-06-30 不计入
     assert abs(float(l001["feature_event_unlock_ratio_30d"]) - 0.03) < 1e-9
+    assert abs(float(l001["feature_event_unlock_ratio_90d"]) - 0.05) < 1e-9
     assert pd.notna(l001["feature_event_earnings_surprise_ttm"])
 
 
@@ -109,4 +120,7 @@ def test_event_feature_spec_includes_event_columns():
     event_spec = specs[-1]
     assert "feature_event_earnings_guidance_direction_z" in event_spec.feature_cols
     assert "feature_event_buyback_amount_ratio_z" in event_spec.feature_cols
+    assert "feature_event_buyback_amount_ratio_180d_z" in event_spec.feature_cols
+    assert "feature_event_reduction_ratio_180d_z" in event_spec.feature_cols
     assert "feature_event_unlock_ratio_30d_z" in event_spec.feature_cols
+    assert "feature_event_unlock_ratio_90d_z" in event_spec.feature_cols

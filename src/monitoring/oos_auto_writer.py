@@ -42,6 +42,18 @@ class OOSWriteResult:
     errors: list[str] = field(default_factory=list)
     previous_prediction: Optional[float] = None
     current_prediction: Optional[float] = None
+    backfilled_realized_excess: Optional[float] = None
+    backfilled_portfolio_return: Optional[float] = None
+    backfilled_benchmark_return: Optional[float] = None
+
+
+@dataclass
+class RealizedExcessDetail:
+    """Realized OOS return details for one prediction window."""
+
+    realized_excess: float
+    portfolio_return: float
+    benchmark_return: float
 
 
 def record_oos_from_m7_report(
@@ -153,7 +165,7 @@ def _try_backfill_previous(
         result.previous_prediction = float(prev_pred) if prev_pred is not None else None
 
         # 尝试从 holdings 计算实现超额
-        realized = _compute_realized_excess_from_holdings(
+        realized = _compute_realized_excess_detail_from_holdings(
             tracker, str(prev_date), holdings_json
         )
 
@@ -161,13 +173,17 @@ def _try_backfill_previous(
             tracker.update_realized(
                 config_id=config_id,
                 signal_date=str(prev_date),
-                realized_excess_monthly=realized,
+                realized_excess_monthly=realized.realized_excess,
+                benchmark_return=realized.benchmark_return,
             )
             result.realized_backfilled = True
             result.backfilled_date = str(prev_date)
+            result.backfilled_realized_excess = realized.realized_excess
+            result.backfilled_portfolio_return = realized.portfolio_return
+            result.backfilled_benchmark_return = realized.benchmark_return
             _LOG.info(
-                "OOS backfill: config=%s date=%s realized=%.4f%%",
-                config_id, prev_date, realized * 100,
+                "OOS backfill: config=%s date=%s realized_excess=%.4f%%",
+                config_id, prev_date, realized.realized_excess * 100,
             )
 
     except Exception as e:
@@ -181,13 +197,24 @@ def _compute_realized_excess_from_holdings(
     signal_date: str,
     holdings_json: Optional[str],
 ) -> Optional[float]:
+    """Backward-compatible wrapper returning only realized excess."""
+    detail = _compute_realized_excess_detail_from_holdings(tracker, signal_date, holdings_json)
+    return detail.realized_excess if detail is not None else None
+
+
+def _compute_realized_excess_detail_from_holdings(
+    tracker: OOSTracker,
+    signal_date: str,
+    holdings_json: Optional[str],
+) -> Optional[RealizedExcessDetail]:
     """从 a_share_daily 计算持仓的 T+1 开盘到次月开盘实现超额。
 
     计算逻辑：
     - buy_open = signal_date 之后第一个交易日的开盘价
     - sell_open = 次月第一个交易日的开盘价（即下次调仓买入日）
-    - realized_return = sell_open / buy_open - 1
-    - realized_excess = mean(holdings_returns) - market_ew_return
+    - portfolio_return = mean(holdings sell_open / buy_open - 1)
+    - benchmark_return = mean(all-stock sell_open / buy_open - 1)
+    - realized_excess = portfolio_return - benchmark_return
     """
     if not holdings_json:
         return None
@@ -213,8 +240,8 @@ def _compute_realized_excess_from_holdings(
         return None
 
     try:
-        # 零填充为 6 位代码以匹配数据库格式
-        sym_list = "', '".join(s.zfill(6) for s in symbols[:50])
+        holdings_df = pd.DataFrame({"symbol": [s.zfill(6) for s in symbols[:50]]})
+        tracker._conn.register("_oos_holdings_symbols", holdings_df)
 
         # signal_date 之后第一个交易日 = 买入日（开盘价买入）
         # 次月第一个交易日 = 卖出日（开盘价卖出）
@@ -222,15 +249,15 @@ def _compute_realized_excess_from_holdings(
         sd = pd.Timestamp(signal_date)
         sell_cutoff = (sd + pd.DateOffset(months=2)).replace(day=1).strftime("%Y-%m-%d")
 
-        df = tracker._conn.execute(
-            f"""
+        portfolio_df = tracker._conn.execute(
+            """
             WITH
             ranked AS (
                 SELECT symbol, trade_date, open,
                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date) AS rn
                 FROM a_share_daily
-                WHERE symbol IN ('{sym_list}')
-                  AND trade_date > '{signal_date}'
+                WHERE symbol IN (SELECT symbol FROM _oos_holdings_symbols)
+                  AND trade_date > ?
             ),
             buy_prices AS (
                 SELECT symbol, open AS buy_open FROM ranked WHERE rn = 1
@@ -239,8 +266,8 @@ def _compute_realized_excess_from_holdings(
                 SELECT symbol, trade_date, open,
                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date) AS rn
                 FROM a_share_daily
-                WHERE symbol IN ('{sym_list}')
-                  AND trade_date >= '{sell_cutoff}'
+                WHERE symbol IN (SELECT symbol FROM _oos_holdings_symbols)
+                  AND trade_date >= ?
             ),
             sell_prices AS (
                 SELECT symbol, open AS sell_open FROM sell_ranked WHERE rn = 1
@@ -251,19 +278,65 @@ def _compute_realized_excess_from_holdings(
             LEFT JOIN sell_prices s ON b.symbol = s.symbol
             WHERE b.buy_open > 0
             """,
+            [signal_date, sell_cutoff],
         ).df()
 
-        if df.empty:
+        if portfolio_df.empty:
             return None
 
-        rets = pd.to_numeric(df["realized_return"], errors="coerce").dropna()
+        rets = pd.to_numeric(portfolio_df["realized_return"], errors="coerce").dropna()
         if len(rets) < max(3, len(symbols) * 0.5):
             return None
 
-        return float(rets.mean())
+        benchmark_df = tracker._conn.execute(
+            """
+            WITH
+            ranked AS (
+                SELECT symbol, trade_date, open,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date) AS rn
+                FROM a_share_daily
+                WHERE trade_date > ?
+            ),
+            buy_prices AS (
+                SELECT symbol, open AS buy_open FROM ranked WHERE rn = 1
+            ),
+            sell_ranked AS (
+                SELECT symbol, trade_date, open,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date) AS rn
+                FROM a_share_daily
+                WHERE trade_date >= ?
+            ),
+            sell_prices AS (
+                SELECT symbol, open AS sell_open FROM sell_ranked WHERE rn = 1
+            )
+            SELECT b.symbol,
+                   (s.sell_open / NULLIF(b.buy_open, 0) - 1.0) AS benchmark_return
+            FROM buy_prices b
+            INNER JOIN sell_prices s ON b.symbol = s.symbol
+            WHERE b.buy_open > 0
+              AND s.sell_open > 0
+            """,
+            [signal_date, sell_cutoff],
+        ).df()
+        benchmark_rets = pd.to_numeric(benchmark_df["benchmark_return"], errors="coerce").dropna()
+        if benchmark_rets.empty:
+            return None
+
+        portfolio_return = float(rets.mean())
+        benchmark_return = float(benchmark_rets.mean())
+        return RealizedExcessDetail(
+            realized_excess=portfolio_return - benchmark_return,
+            portfolio_return=portfolio_return,
+            benchmark_return=benchmark_return,
+        )
 
     except Exception:
         return None
+    finally:
+        try:
+            tracker._conn.unregister("_oos_holdings_symbols")
+        except Exception:
+            pass
 
 
 def record_oos_batch_from_history(
