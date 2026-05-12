@@ -35,7 +35,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 
-PROMOTED_CONFIG = "configs/promoted/monthly_selection_u1_top20_indcap3_hardcap_baseline.json"
+PROMOTED_CONFIG = "configs/promoted/monthly_selection_m8_indcap3_plus_quality.json"
 DUCKDB_PATH = "data/market.duckdb"
 OOS_WARNING_CONSECUTIVE = 3
 OOS_WARNING_THRESHOLD = -0.01
@@ -297,10 +297,16 @@ def main() -> int:
     promoted = load_promoted_config(args.config)
     config_id = promoted["config_id"]
     method = promoted.get("method", {})
+    evidence = promoted.get("evidence", {})
     cost_bps = method.get("cost_bps", 10.0)
     candidate_pool = method.get("candidate_pool_version", "U1_liquid_tradable")
     top_k = method.get("top_k", 20)
     model = method.get("model", "M8_regime_aware_fixed_policy__indcap3")
+    feature_families = method.get(
+        "feature_families",
+        ["industry_breadth", "fund_flow", "fundamental"],
+    )
+    families_arg = ",".join(str(x) for x in feature_families if str(x).strip())
 
     results_dir = ROOT / "data" / "results"
     docs_dir = ROOT / "docs" / "reports" / month_str
@@ -344,17 +350,22 @@ def main() -> int:
         "--output-prefix", output_stem,
         "--top-k", str(top_k),
         "--candidate-pools", candidate_pool,
-        "--families", "industry_breadth,fund_flow,fundamental",
+        "--families", families_arg,
         "--cost-bps", str(int(cost_bps)),
     ]
     rc = run_cmd(cmd_step2, "run_monthly_selection_report.py", dry_run=args.dry_run)
 
     # ── Step 3: Benchmark suite ──
-    monthly_long_candidates = sorted(
-        results_dir.glob("*concentration_regime*monthly_long.csv")
-    )
-    if monthly_long_candidates:
+    evidence_monthly_long = str(evidence.get("monthly_long_csv", "") or "").strip()
+    evidence_monthly_long_path = ROOT / evidence_monthly_long if evidence_monthly_long else None
+    monthly_long_candidates = sorted(results_dir.glob("*monthly_long.csv"))
+    if evidence_monthly_long_path is not None and evidence_monthly_long_path.exists():
+        monthly_long = str(evidence_monthly_long_path)
+    elif monthly_long_candidates:
         monthly_long = str(monthly_long_candidates[-1])
+    else:
+        monthly_long = ""
+    if monthly_long:
         rc3 = run_cmd(
             [
                 "python3",
@@ -371,7 +382,7 @@ def main() -> int:
         )
     else:
         print(
-            "\n[M15] 未找到 concentration_regime monthly_long.csv，跳过 benchmark suite"
+            "\n[M15] 未找到 monthly_long.csv，跳过 benchmark suite"
         )
 
     # ── Step 4: 告警检查 ──

@@ -7,7 +7,7 @@
 - `../config.yaml.backtest`：当前 canonical 研究回测快照。
 - `backtests/`：历史 backtest 场景、消融和验证快照。
 - `experiments/`：临时或探索性配置，按主题归档；用于保留实验上下文，不作为 canonical 入口。
-- `promoted/`：生产 promotion registry；月度选股生产候选只能来自该 registry。当前 active promoted 方法是 `monthly_selection_u1_top20_indcap3_hardcap_baseline`。
+- `promoted/`：生产 promotion registry；月度选股生产候选只能来自该 registry。当前 active promoted 方法是 `monthly_selection_m8_indcap3_plus_quality`。
 
 配置加载兼容旧命令：传入 `config.yaml.backtest.r7_s2_prefilter_off_universe_on` 这类旧快照名时，加载器会先查根目录，再自动查 `configs/backtests/`。
 

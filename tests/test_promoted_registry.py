@@ -5,7 +5,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "configs" / "promoted" / "promoted_registry.json"
-ACTIVE_CONFIG_ID = "monthly_selection_u1_top20_m8_natural_soft_gamma0_20"
+ACTIVE_CONFIG_ID = "monthly_selection_m8_indcap3_plus_quality"
 
 
 def load_registry() -> dict:
@@ -17,13 +17,19 @@ def test_promoted_registry_records_active_monthly_selection_default() -> None:
 
     assert registry["current_state"]["has_promoted_research_candidates"] is True
     assert registry["current_state"]["active_promoted_config_id"] == ACTIVE_CONFIG_ID
-    assert len(registry["promoted_configs"]) == 2
+    assert len(registry["promoted_configs"]) == 3
     promoted = next(p for p in registry["promoted_configs"] if p["config_id"] == ACTIVE_CONFIG_ID)
     assert promoted["config_id"] == ACTIVE_CONFIG_ID
     assert promoted["production_method"]["candidate_pool_version"] == "U1_liquid_tradable"
     assert promoted["production_method"]["top_k"] == 20
-    assert promoted["production_method"]["selection_policy"] == "soft_industry_risk_budget"
-    assert promoted["production_method"]["max_industry_names"] is None
+    assert promoted["production_method"]["feature_families"] == [
+        "industry_breadth",
+        "fund_flow",
+        "fundamental",
+        "quality",
+    ]
+    assert promoted["production_method"]["selection_policy"] == "industry_names_cap"
+    assert promoted["production_method"]["max_industry_names"] == 3
     assert promoted["production_method"]["buy_timing"] == "next_month_first_trading_day_open"
     assert promoted["production_method"]["sell_timing"] == "holding_month_last_trading_day_open"
 
@@ -81,8 +87,14 @@ def test_production_template_points_to_active_monthly_selection_config() -> None
     assert default_method["config_id"] == registry["current_state"]["active_promoted_config_id"]
     assert default_method["candidate_pool_version"] == "U1_liquid_tradable"
     assert default_method["top_k"] == 20
-    assert default_method["selection_policy"] == "soft_industry_risk_budget"
-    assert default_method["max_industry_names"] is None
+    assert default_method["feature_families"] == [
+        "industry_breadth",
+        "fund_flow",
+        "fundamental",
+        "quality",
+    ]
+    assert default_method["selection_policy"] == "industry_names_cap"
+    assert default_method["max_industry_names"] == 3
     assert default_method["buy_timing"] == "next_month_first_trading_day_open"
     assert default_method["sell_timing"] == "holding_month_last_trading_day_open"
     assert cfg["signals"]["top_k"] == 20

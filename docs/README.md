@@ -4,10 +4,11 @@
 
 ## 活跃文档
 
-- `plan-05-08.md` — 当前唯一主计划（canonical，2026-05-08），所有研究决策的权威来源。
+- `plan-05-09.md` — 当前唯一主计划（canonical，2026-05-12），所有研究决策的权威来源。
 - `项目算法建模详解.md` — 算法、统计口径与模型说明。
 - `月度选股流程说明.md` — 月频选股主线、候选池、脚本/模块边界、产物与 promotion 纪律。
 - `研究脚本契约化与配置治理.md` — 研究 manifest、配置治理和脚本模块化治理记录。
+- `factor_data_consistency.md` — `prepared_factors` 物化表与 pipeline 特征缓存的双轨一致性说明。
 - `config_reference.md` — 配置文件参考。
 
 ## 归档

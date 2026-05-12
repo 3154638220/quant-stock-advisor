@@ -15,12 +15,14 @@ from src.pipeline.monthly_baselines import (
 )
 from src.pipeline.monthly_multisource import (
     M5RunConfig,
+    attach_enabled_families,
     attach_fundamental_features,
     attach_industry_breadth_features,
     build_feature_specs,
     build_incremental_delta,
     build_walk_forward_scores_for_spec,
 )
+from src.features.registry import get_factor, reset_all_active
 from src.research.contracts import validate_manifest
 
 
@@ -98,6 +100,45 @@ def test_feature_specs_are_cumulative_in_m5_order():
     ]
     assert len(specs[-1].feature_cols) > len(specs[0].feature_cols)
     assert set(specs[1].feature_cols).issubset(set(specs[2].feature_cols))
+
+
+def test_feature_specs_exclude_inactive_registry_factors():
+    reset_all_active()
+    try:
+        spec = get_factor("roe_ttm")
+        assert spec is not None
+        spec.active = False
+
+        specs = build_feature_specs(["fundamental"])
+
+        assert spec.z_col not in specs[-1].feature_cols
+        assert "feature_fundamental_pe_ttm_z" in specs[-1].feature_cols
+    finally:
+        reset_all_active()
+
+
+def test_attach_enabled_families_drops_inactive_registry_columns(tmp_path):
+    reset_all_active()
+    try:
+        spec = get_factor("roe_ttm")
+        assert spec is not None
+        spec.active = False
+
+        dataset = pd.DataFrame(
+            {
+                "signal_date": pd.to_datetime(["2026-02-28"]),
+                "symbol": ["000001"],
+            }
+        )
+        cfg = M5RunConfig(ic_decay_enabled=False, enforce_factor_governance=False)
+
+        out = attach_enabled_families(dataset, tmp_path / "missing.duckdb", cfg, ["fundamental"])
+
+        assert spec.feature_col not in out.columns
+        assert spec.z_col not in out.columns
+        assert spec.is_missing_col not in out.columns
+    finally:
+        reset_all_active()
 
 
 def test_fundamental_features_drop_statement_rows_without_positive_notice_lag(tmp_path):

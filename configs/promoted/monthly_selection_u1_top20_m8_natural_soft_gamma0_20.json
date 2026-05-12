@@ -1,7 +1,7 @@
 {
   "config_id": "monthly_selection_u1_top20_m8_natural_soft_gamma0_20",
   "promotion_date": "2026-05-04",
-  "status": "active_promoted",
+  "status": "superseded_promoted",
   "owner_decision": "M8 natural candidate: U1_liquid_tradable + ElasticNet + industry_neutral_excess + Top20 + soft_risk_budget_gamma0_20. Passed M10 cost gate at 30bps (after-cost excess >0).",
   "method": {
     "research_topic": "monthly_selection",

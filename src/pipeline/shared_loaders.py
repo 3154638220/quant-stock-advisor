@@ -23,6 +23,7 @@ from src.features.fundamental_factors import (
 from src.features.registry import (
     CONCEPT_FEATURES_REGISTRY,
     EVENT_FEATURES_REGISTRY,
+    FACTOR_REGISTRY,
     FUND_FLOW_FEATURES_REGISTRY,
     FUNDAMENTAL_FEATURES_REGISTRY,
     INDUSTRY_BREADTH_FEATURES_REGISTRY,
@@ -94,6 +95,7 @@ class DataLoaderConfig:
     pit_fallback_lag_days: int = 45
     disclosure_calendar: pd.DataFrame | None = None
     strict_unknown_families: bool = True
+    enforce_active_registry: bool = True
 
 
 class DataLoader:
@@ -128,6 +130,8 @@ class DataLoader:
             if attach is None:
                 continue
             out = attach(out)
+        if self.config.enforce_active_registry:
+            out = _drop_inactive_registry_columns(out, requested)
         return out
 
     def _default_registry(self) -> dict[str, FeatureAttachFunc]:
@@ -241,6 +245,21 @@ def add_zscore_and_missing_flags(
         if use_rank_transform:
             out[z_col] = out.groupby(date_col, sort=False)[z_col].transform(_rank_transform)
     return out
+
+
+def _drop_inactive_registry_columns(dataset: pd.DataFrame, families: set[str]) -> pd.DataFrame:
+    inactive_cols: set[str] = set()
+    for spec in FACTOR_REGISTRY.values():
+        if spec.active or spec.family not in families:
+            continue
+        inactive_cols.update({
+            spec.feature_col,
+            spec.z_col,
+            spec.ind_z_col,
+            spec.is_missing_col,
+        })
+    present = [col for col in inactive_cols if col in dataset.columns]
+    return dataset.drop(columns=present) if present else dataset
 
 
 def _unique_signal_frame(dataset: pd.DataFrame) -> pd.DataFrame:

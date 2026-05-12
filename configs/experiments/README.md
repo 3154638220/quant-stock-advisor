@@ -91,15 +91,16 @@ python scripts/run_monthly_selection_concentration_regime.py \
 ### monthly_selection_m8_indcap3_plus_quality
 
 - **Config**: [`configs/experiments/monthly_selection_m8_indcap3_plus_quality.json`](monthly_selection_m8_indcap3_plus_quality.json)
-- **状态**: `research_candidate` (2026-05-11 创建)
+- **状态**: `promoted_owner_override` (2026-05-11 owner override)
 - **Stage A (IC Gate)**: ✅ 通过 — quality 族 13 个因子 IC delta +0.0027 vs PV-only, coverage ≥ 60%
 - **Stage B (M8 Baseline Gate)**: ✅ 通过 (2026-05-10 重跑) — M8+quality indcap3 = 2.15%/月, delta +0.16% vs baseline 1.99%, 全 7 gate 通过
 - **证据文件**:
   - Stage B leaderboard: `docs/reports/2026-05/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10.md`
   - Baseline rerun: `docs/reports/2026-05/monthly_selection_m8_baseline_rerun_2026_05_10_2026_05_10.md`
-  - Leaderboard CSV: `data/results/monthly_selection_m8_plus_quality_2026_05_10_leaderboard.csv`
-  - Gate CSV: `data/results/monthly_selection_m8_plus_quality_2026_05_10_gate.csv`
-- **Promotion 阻塞**: OOS gate — OOS #2 待 2026-05-29 录入
+  - Leaderboard CSV: `data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_leaderboard.csv`
+  - Gate CSV: `data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_gate.csv`
+  - Marginal contribution: `docs/reports/2026-05/factor_marginal_contribution_2026-05-12.md`
+- **Promotion 说明**: 2026-05-11 owner override，未等待 2026-05-29 的 OOS #2，已迁移到 `configs/promoted/monthly_selection_m8_indcap3_plus_quality.json`
 - **排除的因子族**:
   - `reversal_volume`: 毒性, 在 quality 基础上 −0.81%/月
   - `liquidity_position`: 中性偏负, 部分修复 rv 损害但仍低于 baseline
@@ -131,3 +132,12 @@ python scripts/run_monthly_selection_concentration_regime.py \
 | shareholder | 2 |
 
 > 降级因子在下次 `get_factor_cols(only_active=True)` 调用时自动排除。
+
+### 2026-05-12: W5 治理接入训练管线
+
+- `src/features/registry.py` 新增 `apply_factor_governance_log()`，默认回放 `data/results/factor_audit_2026_05_09_full/factor_governance_log.jsonl`。
+- `src/pipeline/monthly_multisource.py` 在 `attach_enabled_families()` 中应用治理日志，`build_feature_specs()` 改为只使用 `active=True` 因子列。
+- `src/pipeline/shared_loaders.py` 的 `DataLoader.attach()` 会剥离 inactive 因子的 raw / `_z` / `_ind_z` / `is_missing_*` 列，避免按 family 直接加载时绕过 registry。
+- 验证：`pytest -o addopts='' tests/test_monthly_selection_multisource.py tests/test_monthly_selection_concentration_regime.py -q` → 19 passed。
+
+> 默认 governance 回放后，15 个 demoted 因子不再进入 M5/M8/M7 训练特征集；`is_missing_*` flags 仍由 `--exclude-missing-flags` 默认剥离。

@@ -1,7 +1,7 @@
 {
   "config_id": "monthly_selection_u1_top20_indcap3_hardcap_baseline",
   "promotion_date": "2026-04-30",
-  "status": "active_promoted",
+  "status": "superseded_promoted",
   "owner_decision": "Project default method: U1_liquid_tradable + Top20 + indcap3 hard-cap baseline.",
   "method": {
     "research_topic": "monthly_selection",

@@ -129,8 +129,8 @@ def run_monthly_concentration_regime(
     min_state_history_months: int,
     families: str,
     skip_m6: bool,
-    exclude_missing_flags: bool,
     root: Path,
+    exclude_missing_flags: bool = True,
 ) -> int:
     """M8: 月度选股行业集中度约束与 lagged-regime 复核。"""
     started_at = time.perf_counter()

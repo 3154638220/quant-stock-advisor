@@ -1,6 +1,6 @@
 {
   "registry_version": "r5_config_governance_2026-04-28",
-  "updated_at": "2026-05-04",
+  "updated_at": "2026-05-11",
   "purpose": "Production promotion registry for monthly selection configs. Research configs are not production inputs unless an entry is added here after the full promotion gate passes.",
   "production_policy": {
     "monthly_selection_rule": "Monthly selection must use only configs recorded in promoted_configs.",
@@ -27,8 +27,8 @@
   ],
   "current_state": {
     "has_promoted_research_candidates": true,
-    "active_promoted_config_id": "monthly_selection_u1_top20_m8_natural_soft_gamma0_20",
-    "decision": "M8 natural candidate promoted on 2026-05-04: U1_liquid_tradable + ElasticNet + market_excess + Top20 + soft_risk_budget_gamma0_20. Passed M10 cost gate at 30bps.",
+    "active_promoted_config_id": "monthly_selection_m8_indcap3_plus_quality",
+    "decision": "Owner override on 2026-05-11 promotes the best current backtest method as default before OOS #2: U1_liquid_tradable + Top20 + M8_regime_aware_fixed_policy__indcap3 + quality. Backtest after-cost excess 2.15%/month, delta +0.16%/month vs M8 baseline.",
     "default_action": "Use the active promoted config for monthly selection; do not write any other unpromoted research result into config.yaml.example or local production config.yaml."
   },
   "research_candidate_status": [
@@ -79,6 +79,12 @@
       "status": "promoted",
       "production_eligible": true,
       "evidence": "M8 natural candidate promoted on 2026-05-04: Passed M10 cost gate at 30bps (after-cost excess 0.51%). U1_liquid_tradable + ElasticNet + market_excess + Top20 + soft_risk_budget_gamma0_20."
+    },
+    {
+      "candidate_id": "monthly_selection_m8_indcap3_plus_quality",
+      "status": "promoted_owner_override",
+      "production_eligible": true,
+      "evidence": "Owner override on 2026-05-11 promotes M8+quality indcap3 before OOS #2. Stage B passed on 2026-05-10: after-cost 2.15%/month, delta +0.16%/month vs M8 baseline, all 7 M8 gates passed."
     }
   ],
   "promoted_configs": [
@@ -137,6 +143,45 @@
         "sell_timing": "holding_month_last_trading_day_open",
         "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day",
         "cost_bps": 30.0
+      }
+    },
+    {
+      "config_id": "monthly_selection_m8_indcap3_plus_quality",
+      "config_path": "configs/promoted/monthly_selection_m8_indcap3_plus_quality.json",
+      "promotion_date": "2026-05-11",
+      "full_backtest_report": "docs/reports/2026-05/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10.md",
+      "oos_report": "data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_leaderboard.csv",
+      "state_slice_report": "data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_regime_slice.csv",
+      "boundary_report": "data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_gate.csv",
+      "promotion_package": "docs/reports/2026-05/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10.md",
+      "nw_t": "pass",
+      "bootstrap_ci_lower_gt_0": true,
+      "ir": 0.829323,
+      "oos_months": 1,
+      "oos_latest": {"signal_date": "2026-03-31", "realized_excess": 0.0213},
+      "status": "production_research_owner_override",
+      "human_confirmed": true,
+      "owner_decision": "Owner explicitly chose on 2026-05-11 not to wait for the 2026-05-29 OOS #2 result and to make M8+quality indcap3 the current default.",
+      "production_method": {
+        "research_topic": "monthly_selection",
+        "candidate_pool_version": "U1_liquid_tradable",
+        "top_k": 20,
+        "feature_families": [
+          "industry_breadth",
+          "fund_flow",
+          "fundamental",
+          "quality"
+        ],
+        "base_model": "M8_regime_aware_fixed_policy",
+        "model": "M8_regime_aware_fixed_policy__indcap3",
+        "selection_policy": "industry_names_cap",
+        "max_industry_names": 3,
+        "execution_mode": "tplus1_open",
+        "rebalance_rule": "M",
+        "buy_timing": "next_month_first_trading_day_open",
+        "sell_timing": "holding_month_last_trading_day_open",
+        "transition_policy": "sell_existing_top20_on_month_end_then_buy_next_top20_on_next_trade_day",
+        "cost_bps": 10.0
       }
     }
   ]

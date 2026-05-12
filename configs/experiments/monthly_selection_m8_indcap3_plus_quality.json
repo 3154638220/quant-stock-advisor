@@ -1,6 +1,6 @@
 {
   "config_id": "monthly_selection_m8_indcap3_plus_quality",
-  "status": "research_candidate",
+  "status": "promoted_owner_override",
   "created_at": "2026-05-11",
   "description": "M8 regime-aware policy + quality factor family. W1 Stage B (M8 Baseline Gate) passed 2026-05-10.",
   "feature_families": [
@@ -15,13 +15,14 @@
   "model": "M8_regime_aware_fixed_policy__indcap3",
   "selection_policy": "industry_names_cap",
   "max_industry_names": 3,
-  "promotion_date": null,
-  "promotion_blocked_by": "OOS gate 需至少等到 2026-05-29 录入 OOS #2",
+  "promotion_date": "2026-05-11",
+  "promotion_blocked_by": null,
+  "promotion_note": "Owner override: 2026-05-11 promoted before OOS #2; canonical production snapshot is configs/promoted/monthly_selection_m8_indcap3_plus_quality.json.",
   "evidence": {
     "stage_b_report": "docs/reports/2026-05/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10.md",
     "baseline_report": "docs/reports/2026-05/monthly_selection_m8_baseline_rerun_2026_05_10_2026_05_10.md",
-    "leaderboard": "data/results/monthly_selection_m8_plus_quality_2026_05_10_leaderboard.csv",
-    "gate": "data/results/monthly_selection_m8_plus_quality_2026_05_10_gate.csv"
+    "leaderboard": "data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_leaderboard.csv",
+    "gate": "data/results/monthly_selection_m8_plus_quality_2026_05_10_2026_05_10_gate.csv"
   },
   "metrics": {
     "after_cost_excess_per_month": 0.0215,
